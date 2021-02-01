@@ -1,0 +1,11 @@
+[package]
+name = "telegram"
+version = "0.0.0"
+authors = ["b f <brianf@geemale.kom>"]
+edition = "2018"
+
+[dependencies]
+log = "*"
+pretty_env_logger = "*"
+actix-web = { version = "3", features = ["openssl"] }
+openssl = { version = "0.10" }
