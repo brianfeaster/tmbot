@@ -76,8 +76,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     let re = Regex::new(r"[^A-Za-z]").unwrap();
 
     for s in msg.split(" ") {
-        let mut w = s.split("$").collect::<Vec<&str>>();
-        warn!("{:?}", w);
+        let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len()
             && w[0] != ""
             && w[1] == ""
