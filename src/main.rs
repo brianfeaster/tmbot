@@ -3,6 +3,7 @@ use std::time::{Duration};
 use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
+use regex::{Regex};
 
 
 //use ::serde::{Serialize, Deserialize};
@@ -72,9 +73,16 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     let msg = msg.unwrap(); // Consider message string
     let mut tickers = String::new();
 
+    let re = Regex::new(r"[^A-Za-z]").unwrap();
+
     for s in msg.split(" ") {
         let mut w = s.split("$").collect::<Vec<&str>>();
-        if 2 == w.len() && w[0] != "" && w[1] == "" {
+        warn!("{:?}", w);
+        if 2 == w.len()
+            && w[0] != ""
+            && w[1] == ""
+            && re.captures(w[0]).is_none()
+        {
             tickers.push_str(w[0]);
             tickers.push_str("@");
             tickers.push_str(&format!("{:.2}", utils::rf32(100.0)));

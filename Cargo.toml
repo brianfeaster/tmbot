@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 log = "*"
+regex = "*"
 pretty_env_logger = "*"
 actix-web = { version = "3", features = ["openssl"] }
 tokio = "*"
