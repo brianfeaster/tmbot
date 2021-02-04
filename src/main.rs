@@ -73,11 +73,9 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     let mut tickers = String::new();
 
     for s in msg.split(" ") {
-        let mut w = s.split("$");
-        let ticker = w.next();
-        let second = w.next();
-        if second.is_some() && second.unwrap() == "" {
-            tickers.push_str(ticker.unwrap());
+        let mut w = s.split("$").collect::<Vec<&str>>();
+        if 2 == w.len() && w[0] != "" && w[1] == "" {
+            tickers.push_str(w[0]);
             tickers.push_str("@");
             tickers.push_str(&format!("{:.2}", utils::rf32(100.0)));
             tickers.push_str("+");
@@ -85,7 +83,9 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     }
     info!("message tickers message {:?}", tickers);
 
-    info!("client {:?}", sendmsg(&tickers).await);
+    if 0 < tickers.len() {
+        info!("client {:?}", sendmsg(&tickers).await);
+    }
 
     HttpResponse::from("")
 }
@@ -101,7 +101,7 @@ async fn main() -> std::io::Result<()> {
             .service(
                 web::resource("*")
                 .route( Route::new().to(do_all) ) ) )
-    .bind_openssl("127.0.0.1:8443", builder)?
+    .bind_openssl("0.0.0.0:8443", builder)?
     .run()
     .await
 }
