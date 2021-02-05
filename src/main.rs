@@ -100,7 +100,7 @@ async fn getticker(ticker: &str) -> Option<String> {
          return None;
     }
 
-    let re = Regex::new(r#"data-reactid="[0-9]+">([0-9]+\.[0-9]+)"#).unwrap();
+    let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
     let caps = re
         .captures_iter(domstr.unwrap())
         .map( |cap| cap[1].to_string() )
@@ -111,8 +111,13 @@ async fn getticker(ticker: &str) -> Option<String> {
          return None;
     }
 
-    info!(r#"http dom regex matches for {:?} {:?}"#, ticker, caps);
-    let price = caps[0].to_string();
+    info!(r#"http dom possible prices for {:?} {:?}"#, ticker, caps);
+
+    if caps.len() < 4 {
+         error!(r#"http dom regex matched too few prices"#);
+         return None;
+    }
+    let price = caps[3].to_string();
 
     return Some(price);
 }
@@ -144,7 +149,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     }
 
     let msg = msg.unwrap(); // Consider message string
-    let re = Regex::new(r"[^A-Za-z]").unwrap();
+    let re = Regex::new(r"[^A-Za-z.]").unwrap();
     let mut tickers = HashSet::new();
 
     for s in msg.split(" ") {
