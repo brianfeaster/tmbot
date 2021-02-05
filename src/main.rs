@@ -97,23 +97,18 @@ async fn getticker(ticker: &str) -> Option<String> {
          return None;
     }
 
-    let cap = Regex::new("data-reactid=\"50\">([0-9]+.[0-9]+)")
-        .unwrap()
-        .captures(domstr.unwrap());
+    let re = Regex::new(r#"data-reactid="[0-9]+">([0-9]+\.[0-9]+)"#).unwrap();
+    let mut caps = re.captures_iter(domstr.unwrap());
+
+    let cap = caps.nth(0);
     if cap.is_none() {
-         error!("yahoo regex captures {:?}", cap);
-        return None;
+         error!("yahoo dom regex captures is empty");
+         return None;
     }
-
-    let cap = cap.unwrap();
-    if 2 != cap.len() {
-        error!("yahoo regex cap len = {} != 2", cap.len());
-        return None;
-    }
-
-    let price = cap[1].to_string();
+    let price = cap.unwrap()[1].to_string();
     
-    info!("yahoo ticker {}  price {}", ticker, price);
+    info!("yahoo ret ticker:{} price:{}", ticker, price);
+
     return Some(price);
 }
 
@@ -141,12 +136,12 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
         if 2 == w.len()
             && w[0] != ""
             && w[1] == ""
-            && re.captures(w[0]).is_none() {
+            && re.captures(w[0]).is_none() { // ticker characters only
             tickers.insert(w[0].to_string());
         }
     }
 
-    info!("message tickers set {:?}", tickers);
+    info!("message tickers set:{:?}", tickers);
 
     for ticker in tickers {
         match getticker(&ticker).await {
@@ -155,7 +150,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
                 tickerstr.push_str(&ticker);
                 tickerstr.push_str("@");
                 tickerstr.push_str(&price);
-                //error!("ticker querystr {:?}", tickerstr);
+                error!("telegram message {:?}", tickerstr);
                 info!("client {:?}", sendmsg(&tickerstr).await);
             },
             _ => {
