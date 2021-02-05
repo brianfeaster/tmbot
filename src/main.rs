@@ -1,10 +1,11 @@
 use log::*;
 use std::time::{Duration};
+use std::collections::{HashSet};
+use std::str::{from_utf8, Utf8Error};
 use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
-use std::collections::{HashSet};
 
 
 //use ::serde::{Serialize, Deserialize};
@@ -13,11 +14,11 @@ use std::collections::{HashSet};
 #[derive(Debug)]
 enum Serror {
    Error(json::Error),
-   Utf8Error(std::str::Utf8Error)
+   Utf8Error(Utf8Error)
 }
 
-impl From<std::str::Utf8Error> for Serror {
-    fn from(e: std::str::Utf8Error) -> Self { Serror::Utf8Error(e) }
+impl From<Utf8Error> for Serror {
+    fn from(e: Utf8Error) -> Self { Serror::Utf8Error(e) }
 }
 impl From<json::Error> for Serror {
     fn from(e: json::Error) -> Self { Serror::Error(e) }
@@ -59,7 +60,7 @@ async fn sendmsg(tickers: &String) {
 
 async fn getticker(ticker: &str) -> Option<String> {
 
-    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+    let builder = SslConnector::builder(SslMethod::tls()).unwrap();
 
     let client = Client::builder()
         .connector(
@@ -72,7 +73,7 @@ async fn getticker(ticker: &str) -> Option<String> {
     let mut url = "https://finance.yahoo.com/quote/".to_string();
     url.push_str(ticker);
     url.push_str("/");
-    //error!("yahoo url = {:?}", url);
+    //error!("http url = {:?}", url);
 
     // Create request builder, configure request and send
     let mut response = client
@@ -82,54 +83,64 @@ async fn getticker(ticker: &str) -> Option<String> {
         .send()
         .await.unwrap();
 
-    //error!("yahoo! response = {:?}", response);
+    //error!("http response = {:?}", response);
 
     let body = response.body().limit(1_000_000).await;
     if body.is_err() {
-         error!("yahoo http reuest body {:?}", body);
+         error!(r#"http body {:?} for {:?}"#, body, ticker);
          return None;
     }
     let body = body.unwrap();
 
-    let domstr = std::str::from_utf8(&body);
+    let domstr = from_utf8(&body);
     if domstr.is_err() {
-         error!("yahoo dom parse {:?}", domstr);
+         error!(r#"http body2str {:?} for {:?}"#, domstr, ticker);
          return None;
     }
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([0-9]+\.[0-9]+)"#).unwrap();
-    let mut caps = re.captures_iter(domstr.unwrap());
+    let caps = re
+        .captures_iter(domstr.unwrap())
+        .map( |cap| cap[1].to_string() )
+        .collect::<Vec<String>>();
 
-    let cap = caps.nth(0);
-    if cap.is_none() {
-         error!("yahoo dom regex captures is empty");
+    if 0 == caps.len() {
+         error!(r#"http dom regex matched nothing for {:?}"#, ticker);
          return None;
     }
-    let price = cap.unwrap()[1].to_string();
-    
-    info!("yahoo ret ticker:{} price:{}", ticker, price);
+
+    info!(r#"http dom regex matches for {:?} {:?}"#, ticker, caps);
+    let price = caps[0].to_string();
 
     return Some(price);
 }
 
-fn _do_all(req: HttpRequest, body: web::Bytes) -> Result<String, Serror> {
+/// Incomming POST handler that extracts the ".message.text" field from JSON
+fn http_body_json_field(req: HttpRequest, body: web::Bytes) -> Result<String, Serror> {
     debug!("\x1b[0;1;36m{:?}\x1b[0;36m{:?}\x1b[30m", req, body);
-    let s = std::str::from_utf8(&body)?;
-    let j = json::parse(s)?;
-    let v = &j["message"]["text"]; // might return null
-    info!("\x1b[35m .message.text = {}\x1b[0m", v);
-    //Ok(HttpResponse::from(v.as_str().ok_or(json::Error::WrongType("not a string value".to_string()))?))
-    //Ok(HttpResponse::from(v.as_str().ok_or("not a string")?.to_string()))
-    Ok(String::from(v.as_str().ok_or(json::Error::WrongType("not a string".to_string()))?))
+
+    let bodystr = json::parse(from_utf8(&body)?)?;
+    info!("\x1b[1;35m{}\x1b[0m", bodystr);
+
+    let textfield = &bodystr["message"]["text"]; // might return null
+    info!("\x1b[35m.message.text = {}\x1b[0m", textfield);
+
+    Ok( textfield.as_str()
+        .ok_or( json::Error::WrongType( "not a string".to_string() ) )?
+        .to_string()
+    )
 }
 
 async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    let msg = _do_all(req, body);
-    if msg.is_err() { return HttpResponse::from(""); }
-    let msg = msg.unwrap(); // Consider message string
-    let mut tickers = HashSet::new();
+    let msg = http_body_json_field(req, body);
+    if msg.is_err() {
+        error!("{:?}", msg);
+        return HttpResponse::from("");
+    }
 
+    let msg = msg.unwrap(); // Consider message string
     let re = Regex::new(r"[^A-Za-z]").unwrap();
+    let mut tickers = HashSet::new();
 
     for s in msg.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
@@ -141,8 +152,9 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
         }
     }
 
-    info!("message tickers set:{:?}", tickers);
+    if 0 == tickers.len() { return HttpResponse::from(""); }
 
+    info!("set of tickers {:?}", tickers);
     for ticker in tickers {
         match getticker(&ticker).await {
             Some(price) => {
@@ -150,12 +162,9 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
                 tickerstr.push_str(&ticker);
                 tickerstr.push_str("@");
                 tickerstr.push_str(&price);
-                error!("telegram message {:?}", tickerstr);
-                info!("client {:?}", sendmsg(&tickerstr).await);
-            },
-            _ => {
-                error!("ticker lookup failed for {}", ticker);
-            }
+                //info!("{:?} -> msg telegram", tickerstr);
+                info!("{:?} -> msg telegram {:?}", tickerstr, sendmsg(&tickerstr).await);
+            }, _ => ()
         }
     }
 
