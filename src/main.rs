@@ -7,11 +7,14 @@ use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
 use json::{JsonValue};
+use std::fs::{read_to_string, write};
 
+/*
 const  OFF :&str = "\x1b[0m";
 const  MAG :&str = "\x1b[36m";
 const  GRN :&str = "\x1b[32m";
 const BGRN :&str = "\x1b[1;32m";
+*/
 
 //use ::serde::{Serialize, Deserialize};
 //use ::serde_json::{Value, from_str, to_string_pretty};
@@ -162,23 +165,38 @@ async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
         return;
     }
 
+    // Load database of people
+
     let mut people :HashMap<String, String> = HashMap::new();
-    people.insert("107258721".to_string(), "einkitty".to_string());
-    people.insert("140291124".to_string(), "tokiepuppy".to_string());
-    people.insert("205816332".to_string(), "perlman".to_string());
-    people.insert("241726795".to_string(), "tangl3s".to_string());
-    people.insert("260754952".to_string(), "fuzzie_wuzzie".to_string());
-    people.insert("308188500".to_string(), "shrewm".to_string());
-    people.insert("1087483763".to_string(), "ArfyCat".to_string());
-    people.insert("1544486685".to_string(), "worldtmbot".to_string());
+    for l in read_to_string("telegram/users.txt").unwrap().lines() {
+        let v = l.split(" ").collect::<Vec<&str>>();
+        people.insert(v[0].to_string(), v[1].to_string());
+    }
+    info!("{:?}", people);
 
     let from = from.unwrap().to_string();
     let to = to.unwrap().to_string();
 
-    let froms = match people.get(&from) { Some(s) => s, _ => &from };
-    let tos   = match people.get(&to) { Some(s) => s, _ => &to };
+    let froms = people.get(&from).unwrap_or(&from);
+    let tos   = people.get(&to).unwrap_or(&to);
 
-    let text = format!("{}+liked+{}", froms, tos);
+    // Load/update/save likes
+
+    let flikes = read_to_string( "telegram/".to_string() + &from )
+        .unwrap_or("0".to_string())
+        .parse::<i64>()
+        .unwrap();
+
+    let tlikes = read_to_string( "telegram/".to_string() + &to )
+        .unwrap_or("0\n".to_string())
+        .lines()
+        .nth(0).unwrap()
+        .parse::<i64>()
+        .unwrap() + 1;
+
+    info!("update likes in filesystem {:?} {:?} {:?}", to, tlikes, write("telegram/".to_string() + &to, tlikes.to_string()));
+
+    let text = format!("{}({})+liked+{}({})", froms, flikes, tos, tlikes);
     info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, chat_id, &text).await);
 }
 
