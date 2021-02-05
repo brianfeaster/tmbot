@@ -123,8 +123,7 @@ async fn getticker(ticker: &str) -> Option<String> {
 }
 
 /// Incomming POST handler that extracts the ".message.text" field from JSON
-fn http_body_json_field(req: HttpRequest, body: web::Bytes) -> Result<String, Serror> {
-    debug!("\x1b[0;1;36m{:?}\x1b[0;36m{:?}\x1b[30m", req, body);
+fn http_body_json_field(req: &HttpRequest, body: &web::Bytes) -> Result<String, Serror> {
 
     let bodystr = json::parse(from_utf8(&body)?)?;
     info!("\x1b[1;35m{}\x1b[0m", bodystr);
@@ -142,9 +141,9 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     info!("args {:?}", std::env::args());
     let botkey = &std::env::args().nth(1).unwrap();
 
-    let msg = http_body_json_field(req, body);
+    let msg = http_body_json_field(&req, &body);
     if msg.is_err() {
-        error!("{:?}", msg);
+        error!("{:?}\x1b[1;36m{:?}\x1b[0;36m{:?}\x1b[0m", msg, req, body);
         return HttpResponse::from("");
     }
 
