@@ -31,7 +31,7 @@ impl From<&str> for Serror {
 //let mut rt = tokio::runtime::Runtime::new().unwrap();
 //info!("client {:?}", rt.block_on(sendmsg()));
 
-async fn sendmsg(tickers: &String) {
+async fn sendmsg(botkey :&str, tickers: &String) {
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
@@ -44,7 +44,9 @@ async fn sendmsg(tickers: &String) {
                 .finish() )
         .finish();
 
-    let mut url = "https://api.telegram.org/bot1511069753:AAEFHXhfCVfo-aAETh450c4aARp37u_QIrg/sendmessage?chat_id=-1001082930701&text=".to_string();
+    let mut url = "https://api.telegram.org/bot".to_string();
+    url.push_str(botkey);
+    url.push_str("/sendmessage?chat_id=-1001082930701&text=");
     url.push_str(tickers);
 
     // Create request builder, configure request and send
@@ -132,6 +134,9 @@ fn http_body_json_field(req: HttpRequest, body: web::Bytes) -> Result<String, Se
 }
 
 async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    info!("args {:?}", std::env::args());
+    let botkey = &std::env::args().nth(1);
+
     let msg = http_body_json_field(req, body);
     if msg.is_err() {
         error!("{:?}", msg);
@@ -163,7 +168,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
                 tickerstr.push_str("@");
                 tickerstr.push_str(&price);
                 //info!("{:?} -> msg telegram", tickerstr);
-                info!("{:?} -> msg telegram {:?}", tickerstr, sendmsg(&tickerstr).await);
+                info!("{:?} -> msg telegram {:?}", tickerstr, sendmsg(botkey, &tickerstr).await);
             }, _ => ()
         }
     }
