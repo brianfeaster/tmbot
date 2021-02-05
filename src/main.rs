@@ -149,7 +149,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     }
 
     let msg = msg.unwrap(); // Consider message string
-    let re = Regex::new(r"[^A-Za-z.]").unwrap();
+    let re = Regex::new(r"[^A-Za-z^.]").unwrap();
     let mut tickers = HashSet::new();
 
     for s in msg.split(" ") {
