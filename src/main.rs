@@ -1,6 +1,6 @@
 use log::*;
 use std::time::{Duration};
-use std::collections::{HashSet};
+use std::collections::{HashMap, HashSet};
 use std::str::{from_utf8, Utf8Error};
 use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
@@ -8,6 +8,10 @@ use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
 use json::{JsonValue};
 
+const  OFF :&str = "\x1b[0m";
+const  MAG :&str = "\x1b[36m";
+const  GRN :&str = "\x1b[32m";
+const BGRN :&str = "\x1b[1;32m";
 
 //use ::serde::{Serialize, Deserialize};
 //use ::serde_json::{Value, from_str, to_string_pretty};
@@ -28,11 +32,10 @@ impl From<&str> for Serror {
     fn from(s: &str) -> Self { Serror::Error(json::Error::WrongType(s.to_string())) }
 }
 
-async fn sendmsg(botkey :&str, tickers: &String) {
+async fn sendmsg (botkey :&str, chat_id: &str, text: &String) {
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
-
     let response =
         Client::builder()
         .connector( Connector::new()
@@ -42,27 +45,28 @@ async fn sendmsg(botkey :&str, tickers: &String) {
         .finish() // -> Client
         .get( String::new() +
                 "https://api.telegram.org/bot" + botkey +
-                "/sendmessage?chat_id=-1001082930701&text=" + tickers +
+                "/sendmessage" +
+                "?chat_id=" + chat_id +
+                "&text=" + text +
                 "&disable_notification=true" )
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .send()
         .await;
 
-    info!("client {:?}", response);
+    if response.is_err() {
+        error!("telegram sendmsg response {:?}", response);
+    }
+    //error!("telegram sendmsg response body {:?}", response.unwrap().body().limit(1_000_000).await.unwrap());
 }
 
-async fn getticker(ticker: &str) -> Option<String> {
-
+async fn get_ticker_quote(ticker: &str) -> Option<String> {
     let body =
         Client::builder()
-        .connector(
-            Connector::new()
-            .ssl( SslConnector::builder(SslMethod::tls())
-                .unwrap()
-                .build() )
-            .timeout( Duration::new(10,0) )
-            .finish() )
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .timeout( Duration::new(10,0) )
+                    .finish() )
         .finish() // -> Client
         .get("https://finance.yahoo.com/quote/".to_string() + ticker + "/")
         .header("User-Agent", "Actix-web")
@@ -89,8 +93,8 @@ async fn getticker(ticker: &str) -> Option<String> {
         .map( |cap| cap[1].to_string() )
         .collect::<Vec<String>>();
 
-    if 0 == caps.len() {
-         error!(r#"http dom regex matched nothing for {:?}"#, ticker);
+    if caps.is_empty() {
+         error!(r#"http dom prices regex empty for {:?}"#, ticker);
          return None;
     }
 
@@ -112,20 +116,9 @@ fn body2json(body: &web::Bytes) -> Result<JsonValue, Serror> {
     Ok(json)
 }
 
-fn text_field(json: &JsonValue) -> Result<String, Serror> {
-    let textfield = &json["message"]["text"]; // might return null
-
-    info!("\x1b[35m.message.text = {}\x1b[0m", textfield);
-
-    Ok( textfield.as_str()
-        .ok_or( json::Error::WrongType( "not a string".to_string() ) )?
-        .to_string()
-    )
-}
-
-async fn do_ticker_things (botkey :&String, txt :&String) {
-    let re = Regex::new(r"[^A-Za-z^.]").unwrap();
+fn parse_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
+    let re = Regex::new(r"[^A-Za-z^.]").unwrap();
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -137,24 +130,62 @@ async fn do_ticker_things (botkey :&String, txt :&String) {
             }
         }
     }
+    tickers
+}
 
-    if 0 == tickers.len() { return }
+async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
 
-    info!("set of tickers {:?}", tickers);
+    let txt = &json["message"]["text"].as_str(); // might return null
+    if txt.is_none() { error!("ticker string .message.text = {:?}", txt); return; }
+
+    let tickers = parse_tickers(&txt.unwrap());
+    info!("tickers {:?}", tickers);
+    if tickers.is_empty() { return }
+
     for ticker in tickers {
-        match getticker(&ticker).await {
+        match get_ticker_quote(&ticker).await {
             Some(price) => {
-                let tickerstr = String::new() + &ticker + "@" + &price;
-                //info!("{:?} -> msg telegram", tickerstr);
-                info!("{:?} -> msg telegram {:?}", tickerstr, sendmsg(botkey, &tickerstr).await);
+                let quote = String::new() + &ticker + "@" + &price;
+                info!("{:?} -> msg telegram {:?}", quote, sendmsg(botkey, chat_id, &quote).await);
             }, _ => ()
         }
     }
 }
 
+async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
+    let textfield = &json["message"]["text"];
+    let from = &json["message"]["from"]["id"].as_i64();
+    let to = &json["message"]["reply_to_message"]["from"]["id"].as_i64();
+
+    if textfield != "+1" || from.is_none() || to.is_none() {
+        error!("plussy  txt {:?}  from {:?}  to {:?}", textfield, from, to);
+        return;
+    }
+
+    let mut people :HashMap<String, String> = HashMap::new();
+    people.insert("107258721".to_string(), "einkitty".to_string());
+    people.insert("140291124".to_string(), "tokiepuppy".to_string());
+    people.insert("205816332".to_string(), "perlman".to_string());
+    people.insert("241726795".to_string(), "tangl3s".to_string());
+    people.insert("260754952".to_string(), "fuzzie_wuzzie".to_string());
+    people.insert("308188500".to_string(), "shrewm".to_string());
+    people.insert("1087483763".to_string(), "ArfyCat".to_string());
+    people.insert("1511069753".to_string(), "worldtmbot".to_string());
+
+    let from = from.unwrap().to_string();
+    let to = to.unwrap().to_string();
+
+    let froms = match people.get(&from) { Some(s) => s, _ => &from };
+    let tos   = match people.get(&to) { Some(s) => s, _ => &to };
+
+    let text = format!("{}+liked+{}", froms, tos);
+    info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, chat_id, &text).await);
+}
+
 async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     info!("args {:?}", std::env::args());
     let botkey = &std::env::args().nth(1).unwrap();
+    let chat_id = &std::env::args().nth(2).unwrap();
     let json = match body2json(&body) {
         Ok(json) => json,
         Err(e) => {
@@ -163,15 +194,8 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
         }
     };
 
-    let txt = text_field(&json);
-    if txt.is_err() {
-        error!("{:?}\x1b[1;36m{:?}\x1b[0;36m{:?}\x1b[0m", txt, req, body);
-        return HttpResponse::from("");
-    }
-
-    let txt = txt.unwrap(); // Consider message string
-
-    do_ticker_things(botkey, &txt).await;
+    do_ticker(botkey, chat_id, &json).await;
+    do_plussy(botkey, chat_id, &json).await;
 
     HttpResponse::from("")
 }
