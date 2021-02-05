@@ -6,6 +6,7 @@ use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
+use json::{JsonValue};
 
 
 //use ::serde::{Serialize, Deserialize};
@@ -27,73 +28,55 @@ impl From<&str> for Serror {
     fn from(s: &str) -> Self { Serror::Error(json::Error::WrongType(s.to_string())) }
 }
 
-
-//let mut rt = tokio::runtime::Runtime::new().unwrap();
-//info!("client {:?}", rt.block_on(sendmsg()));
-
 async fn sendmsg(botkey :&str, tickers: &String) {
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
 
-    let client = Client::builder()
-        .connector(
-            Connector::new()
-                .ssl( builder.build() )
-                .timeout(Duration::new(10,0))
-                .finish() )
-        .finish();
-
-    let mut url = "https://api.telegram.org/bot".to_string();
-    url.push_str(botkey);
-    url.push_str("/sendmessage?chat_id=-1001082930701&text=");
-    url.push_str(tickers);
-
-    // Create request builder, configure request and send
-    let response = client
-        //.get("http://localhost:8888/sendmessage?chat_id=-1001082930701&text=hello+stonks!")
-        .get(url)
+    let response =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( builder.build() )
+                    .timeout(Duration::new(10,0))
+                    .finish() )
+        .finish() // -> Client
+        .get( String::new() +
+                "https://api.telegram.org/bot" + botkey +
+                "/sendmessage?chat_id=-1001082930701&text=" + tickers +
+                "&disable_notification=true" )
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .send()
         .await;
+
     info!("client {:?}", response);
 }
 
 async fn getticker(ticker: &str) -> Option<String> {
 
-    let builder = SslConnector::builder(SslMethod::tls()).unwrap();
-
-    let client = Client::builder()
+    let body =
+        Client::builder()
         .connector(
             Connector::new()
-                .ssl( builder.build() )
-                .timeout(Duration::new(10,0))
-                .finish() )
-        .finish();
-
-    let mut url = "https://finance.yahoo.com/quote/".to_string();
-    url.push_str(ticker);
-    url.push_str("/");
-    //error!("http url = {:?}", url);
-
-    // Create request builder, configure request and send
-    let mut response = client
-        .get(url)
+            .ssl( SslConnector::builder(SslMethod::tls())
+                .unwrap()
+                .build() )
+            .timeout( Duration::new(10,0) )
+            .finish() )
+        .finish() // -> Client
+        .get("https://finance.yahoo.com/quote/".to_string() + ticker + "/")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .send()
-        .await.unwrap();
+        .await.unwrap()
+        .body().limit(1_000_000).await;
 
-    //error!("http response = {:?}", response);
-
-    let body = response.body().limit(1_000_000).await;
     if body.is_err() {
          error!(r#"http body {:?} for {:?}"#, body, ticker);
          return None;
     }
-    let body = body.unwrap();
 
+    let body = body.unwrap();
     let domstr = from_utf8(&body);
     if domstr.is_err() {
          error!(r#"http body2str {:?} for {:?}"#, domstr, ticker);
@@ -123,12 +106,15 @@ async fn getticker(ticker: &str) -> Option<String> {
 }
 
 /// Incomming POST handler that extracts the ".message.text" field from JSON
-fn http_body_json_field(req: &HttpRequest, body: &web::Bytes) -> Result<String, Serror> {
+fn body2json(body: &web::Bytes) -> Result<JsonValue, Serror> {
+    let json = json::parse( from_utf8(&body)? )?;
+    info!("json = \x1b[1;35m{}\x1b[0m", json);
+    Ok(json)
+}
 
-    let bodystr = json::parse(from_utf8(&body)?)?;
-    info!("\x1b[1;35m{}\x1b[0m", bodystr);
+fn text_field(json: &JsonValue) -> Result<String, Serror> {
+    let textfield = &json["message"]["text"]; // might return null
 
-    let textfield = &bodystr["message"]["text"]; // might return null
     info!("\x1b[35m.message.text = {}\x1b[0m", textfield);
 
     Ok( textfield.as_str()
@@ -137,21 +123,10 @@ fn http_body_json_field(req: &HttpRequest, body: &web::Bytes) -> Result<String, 
     )
 }
 
-async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    info!("args {:?}", std::env::args());
-    let botkey = &std::env::args().nth(1).unwrap();
-
-    let msg = http_body_json_field(&req, &body);
-    if msg.is_err() {
-        error!("{:?}\x1b[1;36m{:?}\x1b[0;36m{:?}\x1b[0m", msg, req, body);
-        return HttpResponse::from("");
-    }
-
-    let msg = msg.unwrap(); // Consider message string
+async fn do_ticker_things (botkey :&String, txt :&String) {
     let re = Regex::new(r"[^A-Za-z^.]").unwrap();
     let mut tickers = HashSet::new();
-
-    for s in msg.split(" ") {
+    for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
             let mut idx = 42;
@@ -163,21 +138,40 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
         }
     }
 
-    if 0 == tickers.len() { return HttpResponse::from(""); }
+    if 0 == tickers.len() { return }
 
     info!("set of tickers {:?}", tickers);
     for ticker in tickers {
         match getticker(&ticker).await {
             Some(price) => {
-                let mut tickerstr = String::new();
-                tickerstr.push_str(&ticker);
-                tickerstr.push_str("@");
-                tickerstr.push_str(&price);
+                let tickerstr = String::new() + &ticker + "@" + &price;
                 //info!("{:?} -> msg telegram", tickerstr);
                 info!("{:?} -> msg telegram {:?}", tickerstr, sendmsg(botkey, &tickerstr).await);
             }, _ => ()
         }
     }
+}
+
+async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    info!("args {:?}", std::env::args());
+    let botkey = &std::env::args().nth(1).unwrap();
+    let json = match body2json(&body) {
+        Ok(json) => json,
+        Err(e) => {
+            error!("{:?}\x1b[1;36m{:?}\x1b[0;36m{:?}\x1b[0m", e, req, body);
+            return HttpResponse::from("");
+        }
+    };
+
+    let txt = text_field(&json);
+    if txt.is_err() {
+        error!("{:?}\x1b[1;36m{:?}\x1b[0;36m{:?}\x1b[0m", txt, req, body);
+        return HttpResponse::from("");
+    }
+
+    let txt = txt.unwrap(); // Consider message string
+
+    do_ticker_things(botkey, &txt).await;
 
     HttpResponse::from("")
 }
