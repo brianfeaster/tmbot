@@ -4,6 +4,7 @@ use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
+use std::collections::{HashSet};
 
 
 //use ::serde::{Serialize, Deserialize};
@@ -56,6 +57,66 @@ async fn sendmsg(tickers: &String) {
     info!("client {:?}", response);
 }
 
+async fn getticker(ticker: &str) -> Option<String> {
+
+    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+
+    let client = Client::builder()
+        .connector(
+            Connector::new()
+                .ssl( builder.build() )
+                .timeout(Duration::new(10,0))
+                .finish() )
+        .finish();
+
+    let mut url = "https://finance.yahoo.com/quote/".to_string();
+    url.push_str(ticker);
+    url.push_str("/");
+    //error!("yahoo url = {:?}", url);
+
+    // Create request builder, configure request and send
+    let mut response = client
+        .get(url)
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(10,0))
+        .send()
+        .await.unwrap();
+
+    //error!("yahoo! response = {:?}", response);
+
+    let body = response.body().limit(1_000_000).await;
+    if body.is_err() {
+         error!("yahoo http reuest body {:?}", body);
+         return None;
+    }
+    let body = body.unwrap();
+
+    let domstr = std::str::from_utf8(&body);
+    if domstr.is_err() {
+         error!("yahoo dom parse {:?}", domstr);
+         return None;
+    }
+
+    let cap = Regex::new("data-reactid=\"50\">([0-9]+.[0-9]+)")
+        .unwrap()
+        .captures(domstr.unwrap());
+    if cap.is_none() {
+         error!("yahoo regex captures {:?}", cap);
+        return None;
+    }
+
+    let cap = cap.unwrap();
+    if 2 != cap.len() {
+        error!("yahoo regex cap len = {} != 2", cap.len());
+        return None;
+    }
+
+    let price = cap[1].to_string();
+    
+    info!("yahoo ticker {}  price {}", ticker, price);
+    return Some(price);
+}
+
 fn _do_all(req: HttpRequest, body: web::Bytes) -> Result<String, Serror> {
     debug!("\x1b[0;1;36m{:?}\x1b[0;36m{:?}\x1b[30m", req, body);
     let s = std::str::from_utf8(&body)?;
@@ -71,7 +132,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     let msg = _do_all(req, body);
     if msg.is_err() { return HttpResponse::from(""); }
     let msg = msg.unwrap(); // Consider message string
-    let mut tickers = String::new();
+    let mut tickers = HashSet::new();
 
     let re = Regex::new(r"[^A-Za-z]").unwrap();
 
@@ -80,18 +141,27 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
         if 2 == w.len()
             && w[0] != ""
             && w[1] == ""
-            && re.captures(w[0]).is_none()
-        {
-            tickers.push_str(w[0]);
-            tickers.push_str("@");
-            tickers.push_str(&format!("{:.2}", utils::rf32(100.0)));
-            tickers.push_str("+");
+            && re.captures(w[0]).is_none() {
+            tickers.insert(w[0].to_string());
         }
     }
-    info!("message tickers message {:?}", tickers);
 
-    if 0 < tickers.len() {
-        info!("client {:?}", sendmsg(&tickers).await);
+    info!("message tickers set {:?}", tickers);
+
+    for ticker in tickers {
+        match getticker(&ticker).await {
+            Some(price) => {
+                let mut tickerstr = String::new();
+                tickerstr.push_str(&ticker);
+                tickerstr.push_str("@");
+                tickerstr.push_str(&price);
+                //error!("ticker querystr {:?}", tickerstr);
+                info!("client {:?}", sendmsg(&tickerstr).await);
+            },
+            _ => {
+                error!("ticker lookup failed for {}", ticker);
+            }
+        }
     }
 
     HttpResponse::from("")
