@@ -149,11 +149,13 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
     for s in msg.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
-        if 2 == w.len()
-            && w[0] != ""
-            && w[1] == ""
-            && re.captures(w[0]).is_none() { // ticker characters only
-            tickers.insert(w[0].to_string());
+        if 2 == w.len() {
+            let mut idx = 42;
+            if w[0]!=""  &&  w[1]=="" { idx = 0; } // "$" is to the right of ticker symbol
+            if w[0]==""  &&  w[1]!="" { idx = 1; } // "$" is to the left of ticker symbol
+            if 42!=idx && re.captures(w[idx]).is_none() { // ticker characters only
+               tickers.insert(w[idx].to_string());
+            }
         }
     }
 
