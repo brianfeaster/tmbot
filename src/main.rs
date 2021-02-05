@@ -135,7 +135,7 @@ fn http_body_json_field(req: HttpRequest, body: web::Bytes) -> Result<String, Se
 
 async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     info!("args {:?}", std::env::args());
-    let botkey = &std::env::args().nth(1);
+    let botkey = &std::env::args().nth(1).unwrap();
 
     let msg = http_body_json_field(req, body);
     if msg.is_err() {
