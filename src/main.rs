@@ -201,7 +201,7 @@ async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
     let from = &json["message"]["from"]["id"].as_i64();
     let to = &json["message"]["reply_to_message"]["from"]["id"].as_i64();
 
-    if textfield != "+1" || from.is_none() || to.is_none() {
+    if textfield != "+1" || from.is_none() || to.is_none() || from==to {
         error!("plussy  txt {:?}  from {:?}  to {:?}", textfield, from, to);
         return;
     }
