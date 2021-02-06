@@ -155,6 +155,26 @@ async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
     }
 }
 
+async fn do_plussy_all (botkey :&String, chat_id :&str, json :&JsonValue) {
+    let textfield = &json["message"]["text"];
+    if textfield != "+?" {
+        error!("plussy_all  txt {:?}", textfield);
+        return;
+    }
+
+    for l in read_to_string("telegram/users.txt").unwrap().lines() {
+        let v = l.split(" ").collect::<Vec<&str>>();
+        let id = v[0];
+        let nom = v[1];
+
+        let likes = read_to_string( "telegram/".to_string() + &id )
+            .unwrap_or("0".to_string());
+
+        let text = format!("{}({})", nom, likes);
+        info!("{} {} -> msg telegram {:?}", id, text, sendmsg(botkey, chat_id, &text).await);
+    }
+}
+
 async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
     let textfield = &json["message"]["text"];
     let from = &json["message"]["from"]["id"].as_i64();
@@ -194,7 +214,9 @@ async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
         .parse::<i64>()
         .unwrap() + 1;
 
-    info!("update likes in filesystem {:?} {:?} {:?}", to, tlikes, write("telegram/".to_string() + &to, tlikes.to_string()));
+    info!("update likes in filesystem {:?} {:?} {:?}",
+        to, tlikes,
+        write("telegram/".to_string() + &to, tlikes.to_string()));
 
     let text = format!("{}({})+liked+{}({})", froms, flikes, tos, tlikes);
     info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, chat_id, &text).await);
@@ -214,6 +236,7 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
     do_ticker(botkey, chat_id, &json).await;
     do_plussy(botkey, chat_id, &json).await;
+    do_plussy_all(botkey, chat_id, &json).await;
 
     HttpResponse::from("")
 }
