@@ -90,6 +90,15 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
          return None;
     }
 
+    let re = Regex::new(r#"<title>([^(<]+)"#).unwrap();
+    let titlere = re.captures(domstr.unwrap()).unwrap();
+    info!("title = {:?}", titlere);
+    let title = if 2 == titlere.len() {
+        &titlere[1]
+    } else {
+        "stonk"
+    };
+
     let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
     let caps = re
         .captures_iter(domstr.unwrap())
@@ -109,7 +118,7 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
     }
     let price = caps[3].to_string();
 
-    return Some(price);
+    return Some( str::replace( &(price+" "+title), " ", "+") );
 }
 
 /// Incomming POST handler that extracts the ".message.text" field from JSON
