@@ -21,10 +21,16 @@ const BGRN :&str = "\x1b[1;32m";
 
 #[derive(Debug)]
 enum Serror {
+   StdIoError(std::io::Error),
    Error(json::Error),
-   Utf8Error(Utf8Error)
+   Utf8Error(Utf8Error),
+   SetLoggerError(log::SetLoggerError),
+   SslErrorStack(openssl::error::ErrorStack)
 }
 
+impl From<std::io::Error> for Serror {
+    fn from(e: std::io::Error) -> Self { Serror::StdIoError(e) }
+}
 impl From<Utf8Error> for Serror {
     fn from(e: Utf8Error) -> Self { Serror::Utf8Error(e) }
 }
@@ -33,6 +39,12 @@ impl From<json::Error> for Serror {
 }
 impl From<&str> for Serror {
     fn from(s: &str) -> Self { Serror::Error(json::Error::WrongType(s.to_string())) }
+}
+impl From<openssl::error::ErrorStack> for Serror {
+    fn from(e: openssl::error::ErrorStack) -> Self { Serror::SslErrorStack(e) }
+}
+impl From<log::SetLoggerError> for Serror {
+    fn from(e: log::SetLoggerError) -> Self { Serror::SetLoggerError(e) }
 }
 
 async fn sendmsg (botkey :&str, chat_id: &str, text: &String) {
@@ -122,7 +134,7 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
 }
 
 /// Incomming POST handler that extracts the ".message.text" field from JSON
-fn body2json(body: &web::Bytes) -> Result<JsonValue, Serror> {
+fn body2json(body: &web::Bytes) -> core::result::Result<JsonValue, Serror> {
     let json = json::parse( from_utf8(&body)? )?;
     info!("json = \x1b[1;35m{}\x1b[0m", json);
     Ok(json)
@@ -130,7 +142,7 @@ fn body2json(body: &web::Bytes) -> Result<JsonValue, Serror> {
 
 fn parse_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"[^A-Za-z^.]").unwrap();
+    let re = Regex::new(r"[^A-Za-z^.-]").unwrap();
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -250,18 +262,25 @@ async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
+fn ginfo<T: std::fmt::Debug>(e: T) { info!("{:?}", e); }
+fn gerror<T: std::fmt::Debug>(e: T) { error!("{:?}", e); }
+
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    println!("\x1b[35m{:?} {:?}\x1b[0m", ::pretty_env_logger::try_init(), std::env::args());
+async fn main() -> std::io::Result<()>{
+    ::pretty_env_logger::try_init();
+
+    println!("{:?}", std::env::args());
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
-    let mut builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
-    builder.set_certificate_chain_file("cert.pem")?;
+
+    let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
+
     HttpServer::new( || App::new()
             .service(
                 web::resource("*")
                 .route( Route::new().to(do_all) ) ) )
-    .bind_openssl("0.0.0.0:8443", builder)?
+    .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
     .run()
     .await
 }
