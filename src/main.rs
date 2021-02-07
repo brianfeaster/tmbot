@@ -103,13 +103,11 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
     }
 
     let re = Regex::new(r#"<title>([^(<]+)"#).unwrap();
-    let titlere = re.captures(domstr.unwrap()).unwrap();
-    info!("title = {:?}", titlere);
-    let title = if 2 == titlere.len() {
-        &titlere[1]
-    } else {
-        "stonk"
-    };
+    let title =
+        match re.captures(domstr.unwrap()) {
+            Some(cap) => if 2==cap.len() { cap[1].to_string() } else { "stonk".to_string()  }
+            _ => "sonk".to_string()
+        };
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
     let caps = re
@@ -130,7 +128,7 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
     }
     let price = caps[3].to_string();
 
-    return Some( str::replace( &(price+" "+title), " ", "+") );
+    return Some( str::replace( &(price+" "+&title), " ", "+") );
 }
 
 /// Incomming POST handler that extracts the ".message.text" field from JSON
@@ -159,8 +157,13 @@ fn parse_tickers (txt :&str) -> HashSet<String> {
 
 async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
 
-    let txt = &json["message"]["text"].as_str(); // might return null
-    if txt.is_none() { error!("ticker string .message.text = {:?}", txt); return; }
+    let mut txt = &json["message"]["text"].as_str(); // might return null
+    let qry = &json["inline_query"]["query"].as_str(); // might return null
+    if txt.is_none() && qry.is_none() {
+        error!("ticker string .message.text = {:?}", txt);
+        return;
+    }
+    if txt.is_none() { txt = qry; }
 
     let tickers = parse_tickers(&txt.unwrap());
     info!("tickers {:?}", tickers);
@@ -202,7 +205,7 @@ async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
     let to = &json["message"]["reply_to_message"]["from"]["id"].as_i64();
 
     if textfield != "+1" || from.is_none() || to.is_none() || from==to {
-        error!("plussy  txt {:?}  from {:?}  to {:?}", textfield, from, to);
+        error!("plussy txt {:?}  from {:?}  to {:?}", textfield, from, to);
         return;
     }
 
