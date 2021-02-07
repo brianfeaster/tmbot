@@ -155,14 +155,22 @@ fn parse_tickers (txt :&str) -> HashSet<String> {
     tickers
 }
 
-async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
 
-    let chat_id =
-        match json["message"]["chat"]["id"].as_number() {
-            Some(num) => num.to_string(),
-            _ => chat_id.to_string()
-        };
-    info!("chat is now {:?}", chat_id);
+fn json_chat_id (json :&JsonValue, default_chat_id :&str) -> String {
+    match json["message"]["chat"]["id"].as_number() {
+        Some(num) => {
+            let ns = num.to_string();
+            info!("ticker chat_id = {:?}", ns);
+            ns
+        },
+        _ => default_chat_id.to_string()
+    }
+}
+
+async fn do_ticker (botkey :&String, chat_id_default :&str, json :&JsonValue) {
+
+    // Who gets response?
+    let chat_id = json_chat_id(json, chat_id_default);
 
     let mut txt = &json["message"]["text"].as_str(); // might return null
     let qry = &json["inline_query"]["query"].as_str(); // might return null
@@ -186,7 +194,8 @@ async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
     }
 }
 
-async fn do_plussy_all (botkey :&String, chat_id :&str, json :&JsonValue) {
+async fn do_plussy_all (botkey :&String, chat_id_default :&str, json :&JsonValue) {
+    let chat_id = json_chat_id(json, chat_id_default);
     let textfield = &json["message"]["text"];
     if textfield != "+?" {
         error!("plussy_all  txt {:?}", textfield);
@@ -202,11 +211,12 @@ async fn do_plussy_all (botkey :&String, chat_id :&str, json :&JsonValue) {
             .unwrap_or("0".to_string());
 
         let text = format!("{}({})", nom, likes);
-        info!("{} {} -> msg telegram {:?}", id, text, sendmsg(botkey, chat_id, &text).await);
+        info!("{} {} -> msg telegram {:?}", id, text, sendmsg(botkey, &chat_id, &text).await);
     }
 }
 
-async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
+async fn do_plussy (botkey :&String, chat_id_default :&str, json :&JsonValue) {
+    let chat_id = json_chat_id(json, chat_id_default);
     let textfield = &json["message"]["text"];
     let from = &json["message"]["from"]["id"].as_i64();
     let to = &json["message"]["reply_to_message"]["from"]["id"].as_i64();
@@ -250,7 +260,7 @@ async fn do_plussy (botkey :&String, chat_id :&str, json :&JsonValue) {
         write("telegram/".to_string() + &to, tlikes.to_string()));
 
     let text = format!("{}({})+liked+{}({})", froms, flikes, tos, tlikes);
-    info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, chat_id, &text).await);
+    info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, &chat_id, &text).await);
 }
 
 async fn do_all(req: HttpRequest, body: web::Bytes) -> HttpResponse {
