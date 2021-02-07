@@ -157,6 +157,13 @@ fn parse_tickers (txt :&str) -> HashSet<String> {
 
 async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
 
+    let chat_id =
+        match json["message"]["chat"]["id"].as_number() {
+            Some(num) => num.to_string(),
+            _ => chat_id.to_string()
+        };
+    info!("chat is now {:?}", chat_id);
+
     let mut txt = &json["message"]["text"].as_str(); // might return null
     let qry = &json["inline_query"]["query"].as_str(); // might return null
     if txt.is_none() && qry.is_none() {
@@ -173,7 +180,7 @@ async fn do_ticker (botkey :&String, chat_id :&str, json :&JsonValue) {
         match get_ticker_quote(&ticker).await {
             Some(price) => {
                 let quote = String::new() + &ticker + "@" + &price;
-                info!("{:?} -> msg telegram {:?}", quote, sendmsg(botkey, chat_id, &quote).await);
+                info!("{:?} -> msg telegram {:?}", quote, sendmsg(botkey, &chat_id, &quote).await);
             }, _ => ()
         }
     }
