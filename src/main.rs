@@ -214,7 +214,7 @@ async fn do_plussy_all (botkey :&String, chat_id_default :&str, json :&JsonValue
 
         // Read the count file
         let count = read_to_string( "telegram/".to_string() + &id )
-            .unwrap_or("0".to_string()).parse::<i32>().unwrap();
+            .unwrap_or("0".to_string()).trim().parse::<i32>().unwrap();
 
         likes.push((count, nom));
     }
