@@ -173,7 +173,7 @@ fn json_message_chat_id (json :&JsonValue, default_chat_id :&str) -> String {
 async fn do_ticker (botkey :&String, chat_id_default :&str, json :&JsonValue) {
 
     // Who gets response?
-    let chat_id = json_message_chat_id(json, chat_id_default);
+    let mut chat_id = json_message_chat_id(json, chat_id_default);
 
     let mut txt = &json["message"]["text"].as_str(); // might return null
     let qry = &json["inline_query"]["query"].as_str(); // might return null
@@ -181,7 +181,10 @@ async fn do_ticker (botkey :&String, chat_id_default :&str, json :&JsonValue) {
         error!("ticker string .message.text = {:?}", txt);
         return;
     }
-    if txt.is_none() { txt = qry; }
+    if txt.is_none() {
+        txt = qry;
+        chat_id = json["inline_query"]["from"]["id"].as_str().unwrap_or(chat_id_default).to_string();
+    }
 
     let tickers = parse_tickers(&txt.unwrap());
     info!("tickers {:?}", tickers);
