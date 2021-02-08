@@ -183,7 +183,9 @@ async fn do_ticker (botkey :&String, chat_id_default :&str, json :&JsonValue) {
     }
     if txt.is_none() {
         txt = qry;
-        chat_id = json["inline_query"]["from"]["id"].as_str().unwrap_or(chat_id_default).to_string();
+        chat_id = json["inline_query"]["from"]["id"]
+            .as_number()
+            .map_or( chat_id_default.to_string(), |n| n.to_string())
     }
 
     let tickers = parse_tickers(&txt.unwrap());
