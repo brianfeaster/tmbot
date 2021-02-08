@@ -282,10 +282,12 @@ async fn do_plussy (botkey :&String, chat_id_default :&str, json :&JsonValue) {
 
     // Load/update/save likes
 
+    /*
     let flikes = read_to_string( "telegram/".to_string() + &from )
         .unwrap_or("0".to_string())
         .parse::<i32>()
         .unwrap();
+    */
 
     let tlikes = read_to_string( "telegram/".to_string() + &to )
         .unwrap_or("0\n".to_string())
@@ -302,8 +304,9 @@ async fn do_plussy (botkey :&String, chat_id_default :&str, json :&JsonValue) {
     info!("{:?} -> msg telegram {:?}", text, sendmsg(botkey, &chat_id, &text).await);
 }
 
-async fn do_all(args: web::Data<Args>, req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    info!("args {:?}", args);
+async fn do_all(argz: web::Data<Args>, req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    info!("args {:?}", args());
+    info!("args {:?}", argz);
     let botkey = &args().nth(1).unwrap();
     let chat_id = &args().nth(2).unwrap();
     let json = match body2json(&body) {
