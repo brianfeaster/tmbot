@@ -169,7 +169,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
 
     let price = caps[3].to_string();
 
-    let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9]+\.[0-9]+) \(([-+][0-9]+\.[0-9]+%)\)<"#).unwrap();
+    let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap();
     let caps_percentages = re
         .captures_iter(domstr.unwrap())
         .map( |cap| {
