@@ -26,8 +26,8 @@ const BGRN :&str = "\x1b[1;32m";
 fn ginfo<T: std::fmt::Debug>(e: T) { info!("{:?}", e); }
 fn gerror<T: std::fmt::Debug>(e: T) { error!("{:?}", e); }
 
-fn ginfod<T: std::fmt::Debug>(h:&str, e: T) { info!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\"", "\"")); }
-fn gerrord<T: std::fmt::Debug>(h:&str, e: T) { error!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\"", "\"")); }
+fn ginfod<T: std::fmt::Debug>(h:&str, e: T) { info!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
+fn gerrord<T: std::fmt::Debug>(h:&str, e: T) { error!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
 
 fn glogd<
     R: std::fmt::Debug,
@@ -99,14 +99,13 @@ async fn sendmsg (db :&mut DB, chat_id :i64, text: &str) {
                     .timeout(Duration::new(10,0))
                     .finish() )
         .finish() // -> Client
-        .get( db.url_bot.clone() +
-              "/sendmessage" +
-              "?chat_id=" + &chat_id.to_string() +
-              "&text=" + text +
-              //"&parse_mode=HTML" +
-              "&disable_notification=true" )
+        .get( db.url_bot.clone() + "/sendmessage")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
+        .query(&[["chat_id", &chat_id.to_string()],
+                 ["text", text],
+                 //"&parse_mode=HTML" +
+                 ["disable_notification", "true"]]).unwrap()
         .send()
         .await;
 
@@ -121,7 +120,7 @@ async fn sendmsg (db :&mut DB, chat_id :i64, text: &str) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn get_ticker_quote(ticker: &str) -> Option<String> {
+async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -161,30 +160,41 @@ async fn get_ticker_quote(ticker: &str) -> Option<String> {
         .map( |cap| cap[1].to_string() )
         .collect::<Vec<String>>();
 
-    if caps.is_empty() {
-         error!(r#"http dom prices regex empty for {:?}"#, ticker);
-         return None;
-    }
-
     info!(r#"http dom prices {:?} {:?}"#, ticker, caps);
-
-    let re = Regex::new(r#"data-reactid="[0-9]+">([-+.( 0-9]+%\))<"#).unwrap();
-    let mut caps_percentages = re
-        .captures_iter(domstr.unwrap())
-        .map( |cap| cap[1].to_string() )
-        .collect::<Vec<String>>();
-    info!(r#"http dom percentages {:?} {:?}"#, ticker, caps_percentages);
-
-    if caps_percentages.is_empty() { caps_percentages.push("".to_string()); }
 
     if caps.len() < 4 {
          error!(r#"http dom regex matched too few prices"#);
          return None;
     }
-    let price = caps[3].to_string();
-    let percentage = caps_percentages[0].replace("+", "%2B");
 
-    return Some( str::replace( &(price+" "+&percentage+" "+&title), " ", "+") );
+    let price = caps[3].to_string();
+
+    let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9]+\.[0-9]+) \(([-+][0-9]+\.[0-9]+%)\)<"#).unwrap();
+    let caps_percentages = re
+        .captures_iter(domstr.unwrap())
+        .map( |cap| {
+            let amt = &cap[1];
+            let per = &cap[2];
+            ( // delta as a colored emoji
+                if amt.chars().next().unwrap() == '+' { from_utf8(b"\xF0\x9F\x9F\xA2").unwrap() } else { from_utf8(b"\xF0\x9F\x9F\xA5").unwrap() }
+                .to_string()
+            , // the delta string
+                if amt.chars().next().unwrap() == '+' { from_utf8(b"\xE2\x86\x91").unwrap() } else { from_utf8(b"\xE2\x86\x93").unwrap() }
+                .to_string()
+                + &cap[1][1..]
+                + " "
+                + &per[1..]
+            )
+        } )
+        .collect::<Vec<(String, String)>>();
+    info!(r#"http dom percentages {:?} {:?}"#, ticker, caps_percentages);
+
+    if caps_percentages.is_empty() {
+        return Some( ("".to_string(), price + &title) );
+    } else {
+        let percentage = &caps_percentages[0];
+        return Some( (percentage.0.to_string(), price + " " + &percentage.1 + " " + &title) );
+    }
 }
 
 fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
@@ -253,7 +263,7 @@ async fn do_ticker (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serro
 
     for ticker in tickers {
         if let Some(price) = get_ticker_quote(&ticker).await {
-            let quote = String::from(&ticker) + "@" + &price;
+            let quote = price.0 + &ticker + "@" + &price.1;
             sendmsg(db, chat_id, &quote).await;
         }
     }
@@ -288,29 +298,30 @@ async fn do_plussy_all (db :&mut DB, json :&JsonValue) -> Result<&'static str, S
     likes.sort_by(|a,b| b.0.cmp(&a.0) );
     // %3c %2f b %3e
     for (likes,nom) in likes {
-        text.push_str(&format!("+{}{}", nom, num2heart(likes)));
+        text.push_str(&format!(" {}{}", nom, num2heart(likes)));
     }
-    //info!("HEARTS -> msg telegram {:?}", sendmsg(botkey, &chat_id, &(-11..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
+    //info!("HEARTS -> msg telegram {:?}", sendmsg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
     sendmsg(db, chat_id, &text[1..]).await;
     Ok("Ok do_plussy_all")
 }
 
 fn num2heart (n :i32) -> &'static str {
-    if n < -4  { return "%CE%BB"; } // lambda
-    if n < 0  { return "%F0%9F%96%A4"; } // black heart
-    if n == 0 { return "%F0%9F%92%94"; } // red broken heart
-    if n == 1 { return "%E2%9D%A4%EF%B8%8F"; } // red heart
-    if n == 2 { return "%F0%9F%A7%A1"; } // orange heart
-    if n == 3 { return "%F0%9F%92%9B"; } // yellow heart
-    if n == 4 { return "%F0%9F%92%9A"; } // green heart
-    if n == 5 { return "%F0%9F%92%99"; } // blue heart
-    if n == 6 { return "%F0%9F%92%9C"; } // violet heart
-    if n == 7 { return "%F0%9F%92%97"; } // pink growing heart
-    if n == 8 { return "%F0%9F%92%96"; } // pink sparkling heart
-    if n == 9 { return "%F0%9F%92%93"; } // beating heart
-    if n == 10 { return "%F0%9F%92%98"; } // heart with arrow
-    if n == 11 { return "%F0%9F%92%9D"; } // heart with ribbon
-    return "%F0%9F%92%9E" // revolving hearts
+    if n < -4 { return from_utf8(b"\xCE\xBB").unwrap(); } // lambda
+    if n <= -1{ return from_utf8(b"\xF0\x9F\x96\xA4").unwrap(); } // black heart
+    if n == 0 { return from_utf8(b"\xF0\x9F\x92\x94").unwrap(); } // red broken heart
+    if n == 1 { return from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F").unwrap(); } // red heart
+    if n == 2 { return from_utf8(b"\xF0\x9F\xA7\xA1").unwrap(); } // orange heart
+    if n == 3 { return from_utf8(b"\xF0\x9F\x92\x9B").unwrap(); } // yellow heart
+    if n == 4 { return from_utf8(b"\xF0\x9F\x92\x9A").unwrap(); } // green heart
+    if n == 5 { return from_utf8(b"\xF0\x9F\x92\x99").unwrap(); } // blue heart
+    if n == 6 { return from_utf8(b"\xF0\x9F\x92\x9C").unwrap(); } // violet heart
+    if n == 7 { return from_utf8(b"\xF0\x9F\x92\x97").unwrap(); } // pink growing heart
+    if n == 8 { return from_utf8(b"\xF0\x9F\x92\x96").unwrap(); } // pink sparkling heart
+    if n == 9 { return from_utf8(b"\xF0\x9F\x92\x93").unwrap(); } // beating heart
+    if n == 10 { return from_utf8(b"\xF0\x9F\x92\x98").unwrap(); } // heart with arrow
+    if n == 11 { return from_utf8(b"\xF0\x9F\x92\x9D").unwrap(); } // heart with ribbon
+    if n == 12 { return from_utf8(b"\xF0\x9F\x92\x9E").unwrap(); } // revolving hearts
+    return from_utf8(b"\xF0\x9F\x8D\x86").unwrap(); // egg plant
 }
 
 async fn do_plussy (db :&mut DB, json :&JsonValue) -> Result<String, Serror> {
