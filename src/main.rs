@@ -208,7 +208,7 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
-    let amt :i32 = match cmd.msg.as_ref() { "+1"=>1, "-1"=>-1, _=>0 };
+    let amt :i32 = match cmd.msg.as_ref() { "+1" => 1, "-1" => -1, _=>0 };
     if amt == 0 { return Ok("do_like SKIP".into()); }
 
     if cmd.from == cmd.to { return Ok( format!("do_like SKIP self plussed {}", cmd.from)); }
@@ -217,10 +217,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
     let mut people :HashMap<i64, String> = HashMap::new();
 
-    let userdb = read_to_string("tmbot/users.txt");
-    let dblines = userdb.unwrap();
-
-    for l in dblines.lines() {
+    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
         let mut v = l.split(" ");
         let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
         let name = v.next().ok_or("User DB malformed.")?.to_string();
@@ -228,26 +225,24 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
     }
     info!("{:?}", people);
 
-    let sfrom = cmd.from.to_string();
-    let sto = cmd.to.to_string();
-
-    let from = people.get(&cmd.from).unwrap_or(&sfrom);
-    let to   = people.get(&cmd.to).unwrap_or(&sto);
-
     // Load/update/save likes
 
-    let tlikes = read_to_string( "tmbot/".to_string() + to )
-        .unwrap_or("0\n".to_string())
+    let likes = read_to_string( format!("tmbot/{}", cmd.to) )
+        .unwrap_or("0".to_string())
         .lines()
         .nth(0).unwrap()
         .parse::<i32>()
         .unwrap() + amt;
 
     info!("update likes in filesystem {:?} {:?} {:?}",
-        cmd.to, tlikes,
-        write( format!("tmbot/{}", cmd.to), tlikes.to_string()));
+        cmd.to, likes,
+        write( format!("tmbot/{}", cmd.to), likes.to_string()));
 
-    let text = format!("{}{}{}", from, num2heart(tlikes), to);
+    let sfrom = cmd.from.to_string();
+    let sto = cmd.to.to_string();
+    let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
+    let toname   = people.get(&cmd.to).unwrap_or(&sto);
+    let text = format!("{}{}{}", fromname, num2heart(likes), toname);
     sendmsg(db, cmd.at, &text).await;
 
     Ok("Ok do_like".into())
