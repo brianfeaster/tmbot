@@ -1,5 +1,5 @@
 [package]
-name = "telegram"
+name = "tmbot"
 version = "0.0.0"
 authors = ["b f <brianf@geemale.kom>"]
 edition = "2018"

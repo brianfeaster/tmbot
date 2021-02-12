@@ -1,4 +1,4 @@
-use std::{
+use ::std::{
     time::{Duration},
     collections::{HashMap, HashSet},
     str::{from_utf8},
@@ -7,13 +7,11 @@ use std::{
     sync::{Mutex},
 };
 use ::log::*;
-use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
-use actix_web::client::{Client, Connector};
-use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
-use regex::{Regex};
-use ::json::{JsonValue};
-
-use ::telegram::*;
+use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
+use ::actix_web::client::{Client, Connector};
+use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
+use ::regex::{Regex};
+use ::tmbot::*;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -27,7 +25,7 @@ type MDB = Mutex<DB>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn sendmsg (db :&mut DB, chat_id :i64, text: &str) {
+async fn sendmsg (db :&DB, chat_id :i64, text: &str) {
     info!("\x1b[33m<- {}", text);
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
@@ -157,24 +155,14 @@ fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_ticker (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serror> {
+async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    // It's either a @bot query or text message
-    let txt =
-        json_getin_str(json, &["message", "text"])
-        .or_else( || json_getin_str(json, &["inline_query", "query"]))
-        .ok_or(Serror::Err("ticker text/query field not found"))?;
-
-    // Who gets response?
-    let chat_id :i64 =
-        json_getin_i64(json, &["inline_query", "from", "id"])
-        .unwrap_or_else( || json_message_chat_id(json, db.chat_id_default));
+    let txt = &cmd.msg;
+    let chat_id = cmd.at; // Message destination
 
     let tickers = text_parse_for_tickers(&txt);
 
-    if tickers.is_empty() {
-        return Ok("do_ticker SKIP no tickers");
-    }
+    if tickers.is_empty() { return Ok("do_ticker SKIP no tickers"); }
 
     info!("tickers {:?}", tickers);
 
@@ -188,91 +176,67 @@ async fn do_ticker (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serro
     Ok("Ok do_ticker")
 }
 
-async fn do_plussy_all (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serror> {
+async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let textfield = json_getin_str(json, &["message", "text"]);
-    if textfield.is_none() || textfield.unwrap() != "+?" {
-        return Ok("do_plussy_all SKIP");
-    }
-
-    let chat_id = json_message_chat_id(json, db.chat_id_default);
+    if cmd.msg != "+?" { return Ok("do_like_info SKIP"); }
 
     let mut likes = Vec::new();
     // Over each user in file
-    for l in read_to_string("telegram/users.txt").unwrap().lines() {
-        let v = l.split(" ").collect::<Vec<&str>>();
-        let id = v[0];
-        let nom = v[1].to_string();
-
-        // Read the count file
-        let count = read_to_string( "telegram/".to_string() + &id )
-            .unwrap_or("0".to_string()).trim().parse::<i32>().unwrap();
-
-        likes.push((count, nom));
+    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+        let mut v = l.split(" ");
+        let id = v.next().ok_or("User DB malformed.")?;
+        let name = v.next().ok_or("User DB malformed.")?.to_string();
+        // Read the user's count file
+        let count =
+            read_to_string( "tmbot/".to_string() + &id )
+            .unwrap_or("0".to_string())
+            .trim()
+            .parse::<i32>().or(Err("user like count parse i32 error"))?;
+        likes.push((count, name));
     }
 
     let mut text = String::new();
     likes.sort_by(|a,b| b.0.cmp(&a.0) );
-    // %3c %2f b %3e
+    // %3c %2f b %3e </b>
     for (likes,nom) in likes {
-        text.push_str(&format!(" {}{}", nom, num2heart(likes)));
+        text.push_str(&format!("{}{} ", nom, num2heart(likes)));
     }
-    //info!("HEARTS -> msg telegram {:?}", sendmsg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    sendmsg(db, chat_id, &text[1..]).await;
-    Ok("Ok do_plussy_all")
+    //info!("HEARTS -> msg tmbot {:?}", sendmsg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
+    sendmsg(db, cmd.at, &text).await;
+    Ok("Ok do_like_info")
 }
 
-fn num2heart (n :i32) -> &'static str {
-    if n < -4 { return from_utf8(b"\xCE\xBB").unwrap(); } // lambda
-    if n <= -1{ return from_utf8(b"\xF0\x9F\x96\xA4").unwrap(); } // black heart
-    if n == 0 { return from_utf8(b"\xF0\x9F\x92\x94").unwrap(); } // red broken heart
-    if n == 1 { return from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F").unwrap(); } // red heart
-    if n == 2 { return from_utf8(b"\xF0\x9F\xA7\xA1").unwrap(); } // orange heart
-    if n == 3 { return from_utf8(b"\xF0\x9F\x92\x9B").unwrap(); } // yellow heart
-    if n == 4 { return from_utf8(b"\xF0\x9F\x92\x9A").unwrap(); } // green heart
-    if n == 5 { return from_utf8(b"\xF0\x9F\x92\x99").unwrap(); } // blue heart
-    if n == 6 { return from_utf8(b"\xF0\x9F\x92\x9C").unwrap(); } // violet heart
-    if n == 7 { return from_utf8(b"\xF0\x9F\x92\x97").unwrap(); } // pink growing heart
-    if n == 8 { return from_utf8(b"\xF0\x9F\x92\x96").unwrap(); } // pink sparkling heart
-    if n == 9 { return from_utf8(b"\xF0\x9F\x92\x93").unwrap(); } // beating heart
-    if n == 10 { return from_utf8(b"\xF0\x9F\x92\x98").unwrap(); } // heart with arrow
-    if n == 11 { return from_utf8(b"\xF0\x9F\x92\x9D").unwrap(); } // heart with ribbon
-    if n == 12 { return from_utf8(b"\xF0\x9F\x92\x9E").unwrap(); } // revolving hearts
-    return from_utf8(b"\xF0\x9F\x8D\x86").unwrap(); // egg plant
-}
+async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
-async fn do_plussy (db :&mut DB, json :&JsonValue) -> Result<String, Serror> {
+    let amt :i32 = match cmd.msg.as_ref() { "+1"=>1, "-1"=>-1, _=>0 };
+    if amt == 0 { return Ok("do_like SKIP".into()); }
 
-    let textfield = json_getin_str(json, &["message", "text"]).unwrap_or("");
-    let amt :i32 = match textfield { "+1"=>1, "-1"=>-1, _=>0 };
+    if cmd.from == cmd.to { return Ok( format!("do_like SKIP self plussed {}", cmd.from)); }
 
-    if amt == 0 { return Ok("do_plussy SKIP".into()); }
+    // Load database of users
 
-    let chat_id = json_message_chat_id(json, db.chat_id_default);
-    let from = json_getin_i64(json, &["message", "from", "id"]).ok_or("wat")?;
-    let to = json_getin_i64(json, &["message", "reply_to_message", "from", "id"]).ok_or("oh no")?;
+    let mut people :HashMap<i64, String> = HashMap::new();
 
-    if from == to { return Ok( format!("do_plussy SKIP self plussed {}", from)); }
+    let userdb = read_to_string("tmbot/users.txt");
+    let dblines = userdb.unwrap();
 
-
-    // Load database of peoplekkkkkkk
-
-    let mut people :HashMap<String, String> = HashMap::new();
-    for l in read_to_string("telegram/users.txt").unwrap().lines() {
-        let v = l.split(" ").collect::<Vec<&str>>();
-        people.insert(v[0].to_string(), v[1].to_string());
+    for l in dblines.lines() {
+        let mut v = l.split(" ");
+        let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
+        let name = v.next().ok_or("User DB malformed.")?.to_string();
+        people.insert(id, name);
     }
     info!("{:?}", people);
 
-    let from = from.to_string();
-    let to = to.to_string();
+    let sfrom = cmd.from.to_string();
+    let sto = cmd.to.to_string();
 
-    let froms = people.get(&from).unwrap_or(&from);
-    let tos   = people.get(&to).unwrap_or(&to);
+    let from = people.get(&cmd.from).unwrap_or(&sfrom);
+    let to   = people.get(&cmd.to).unwrap_or(&sto);
 
     // Load/update/save likes
 
-    let tlikes = read_to_string( "telegram/".to_string() + &to )
+    let tlikes = read_to_string( "tmbot/".to_string() + to )
         .unwrap_or("0\n".to_string())
         .lines()
         .nth(0).unwrap()
@@ -280,50 +244,79 @@ async fn do_plussy (db :&mut DB, json :&JsonValue) -> Result<String, Serror> {
         .unwrap() + amt;
 
     info!("update likes in filesystem {:?} {:?} {:?}",
-        to, tlikes,
-        write("telegram/".to_string() + &to, tlikes.to_string()));
+        cmd.to, tlikes,
+        write( format!("tmbot/{}", cmd.to), tlikes.to_string()));
 
-    let text = format!("{}{}{}", froms, num2heart(tlikes), tos);
-    sendmsg(db, chat_id, &text).await;
+    let text = format!("{}{}{}", from, num2heart(tlikes), to);
+    sendmsg(db, cmd.at, &text).await;
 
-    Ok("Ok do_plussy".into())
+    Ok("Ok do_like".into())
 }
 
+#[derive(Debug)]
+struct Cmd {
+    from :i64,
+    at   :i64,
+    to   :i64,
+    msg  :String
+}
 
-async fn do_all(mdb: &web::Data<MDB>, body: &web::Bytes) -> Result<(), Serror> {
-    let mut db = mdb.lock().unwrap();
+fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 
-    let json = bytes2json(&body)?; // UnexpectedEndOfJson
+    let json: JsonValue = bytes2json(&body)?;
 
-    let j_message_text = &json["message"]["text"];
-    let j_inline_query_query = &json["inline_query"]["query"];
+    let inline_query = &json["inline_query"];
+    if inline_query.is_object() {
+        let from = getin_i64(inline_query, &["from", "id"])?;
+        let msg = getin_str(inline_query, &["query"])?.to_string();
+        return Ok(Cmd { from:from, at:from, to:from, msg:msg });
+    }
 
-    ginfo(j_message_text);
-    ginfo(j_inline_query_query);
+    let message = &json["message"];
+    if message.is_object() {
+        let from = getin_i64(message, &["from", "id"])?;
+        let at = getin_i64(message, &["chat", "id"])?;
+        let msg = getin_str(message, &["text"])?.to_string();
 
-    glogd("do_ticker", do_ticker(&mut db, &json).await);
-    glogd("do_plussy", do_plussy(&mut db, &json).await);
-    glogd("do_plussy_all", do_plussy_all(&mut db, &json).await);
+        return Ok(
+            if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
+                Cmd { from:from, at:at, to:to, msg:msg }
+            } else {
+                Cmd { from:from, at:at, to:from, msg:msg }
+            }
+        );
+    }
+
+    Err("Nothing to do.")?
+}
+
+async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
+    let cmd = parse_cmd(&body)?;
+    warn!("\x1b[33m{:?}", &cmd);
+    info!("{:?}", do_like(&db, &cmd).await?);
+    info!("{:?}", do_like_info(&db, &cmd).await?);
+    info!("{:?}", do_ticker(&db, &cmd).await?);
     Ok(())
 }
 
-async fn handle_silently(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     info!("\x1b[1;34m ™™™ ™™ ™™ |    ___   _   _     ");
     info!("\x1b[1;34m  ™  ™ ™ ™ |\\ /\\ |   | | | |   |");
     info!("\x1b[1;34m  ™  ™   ™ |/ \\/ |   |_|.|_|.  |");
-    ginfo(&req.connection_info());
-    //ginfod("\x1b[1m", &req.app_config().host());
-    let mdb = req.app_data::<web::Data<MDB>>().unwrap();
-    ginfo(format!("{:?}", &req).replace("\n", "").replace("  ", " "));
-    ginfod("\x1b[1m", &mdb.lock().unwrap());
-    do_all(&mdb, &body)
+
+    let db = req.app_data::<web::Data<MDB>>().unwrap().lock().unwrap();
+    info!("\x1b[1m{:?}", &db);
+    info!("\x1b[35m{:?}", &req.connection_info());
+    info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace("  ", " "));
+
+    do_all(&db, &body)
     .await
     .map_or_else(
         |r| {
-            gerrord("\x1b[31mbody:", &body);
-            gerror(r)
+            error!("\x1b[31mbody {:?}", &body);
+            error!("End. {:?}", r)
         },
-        |r| ginfod("Done", r)
+        |r| info!("End. {:?}", r)
     );
     HttpResponse::from("")
 }
@@ -344,7 +337,7 @@ async fn main() -> std::io::Result<()>{
                 chat_id_default: chat_id_default
             } ) )
         .service( web::resource("*")
-                    .route( Route::new().to(handle_silently) ) ) )
+                    .route( Route::new().to(dispatch) ) ) )
     .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
     .workers(1)
     .run();
