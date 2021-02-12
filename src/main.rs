@@ -43,6 +43,38 @@ async fn sendmsg (db :&DB, chat_id :i64, text: &str) {
         .timeout(Duration::new(10,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", text],
+                 ["disable_notification", "true"]]).unwrap()
+        .send()
+        .await;
+
+    match response {
+        Err(e) => error!("\x1b[31m-> {:?}", e),
+        Ok(mut r) => {
+            ginfod("\x1b[32m->", &r);
+            ginfod("\x1b[1;32m->", r.body().await);
+        }
+    }
+}
+
+async fn sendmsgmd (db :&DB, chat_id :i64, text: &str) {
+    let text = text.replace(".", "\\.").replace("(", "\\(").replace(")", "\\)");
+    info!("\x1b[33m<- {}", text);
+    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
+    builder.set_certificate_chain_file("cert.pem").unwrap();
+
+    let response =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( builder.build() )
+                    .timeout(Duration::new(10,0))
+                    .finish() )
+        .finish() // -> Client
+        .get( db.url_bot.clone() + "/sendmessage")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(10,0))
+        .query(&[["chat_id", &chat_id.to_string()],
+                 ["text", &text],
                  ["parse_mode", "MarkdownV2"],
                  ["disable_notification", "true"]]).unwrap()
         .send()
@@ -51,7 +83,7 @@ async fn sendmsg (db :&DB, chat_id :i64, text: &str) {
     match response {
         Err(e) => error!("\x1b[31m-> {:?}", e),
         Ok(mut r) => {
-            ginfod("\x1b[32m->", &r); 
+            ginfod("\x1b[32m->", &r);
             ginfod("\x1b[1;32m->", r.body().await);
         }
     }
@@ -217,7 +249,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         return Ok("do_def SKIP");
     }
     let word = &cap.unwrap()[1];
-    
+
     info!("looking up {:?}", word);
 
     let json = get_definition(word).await?;
@@ -229,7 +261,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         msg.push_str(&defs[i].to_string()[2..]);
         msg.push_str(". ");
     }
-    sendmsg(db, cmd.at, &msg.replace(".", "\\.").replace("(", "\\(").replace(")", "\\)")).await;
+    sendmsgmd(db, cmd.at, &msg).await;
 
     Ok("Ok do_def")
 }
