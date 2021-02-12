@@ -1,78 +1,19 @@
 use std::{
     time::{Duration},
     collections::{HashMap, HashSet},
-    str::{from_utf8, Utf8Error},
+    str::{from_utf8},
     fs::{read_to_string, write},
     env::{args},
     sync::{Mutex},
 };
-use log::*;
+use ::log::*;
 use actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use actix_web::client::{Client, Connector};
 use openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use regex::{Regex};
-use json::{JsonValue};
+use ::json::{JsonValue};
 
-////////////////////////////////////////////////////////////////////////////////
-
-/*
-use ::serde::{Serialize, Deserialize};
-use ::serde_json::{Value, from_str, to_string_pretty};
-const  OFF :&str = "\x1b[0m";
-const  MAG :&str = "\x1b[36m";
-const  GRN :&str = "\x1b[32m";
-const BGRN :&str = "\x1b[1;32m";
-*/
-fn ginfo<T: std::fmt::Debug>(e: T) { info!("{:?}", e); }
-fn gerror<T: std::fmt::Debug>(e: T) { error!("{:?}", e); }
-
-fn ginfod<T: std::fmt::Debug>(h:&str, e: T) { info!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
-fn gerrord<T: std::fmt::Debug>(h:&str, e: T) { error!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
-
-fn glogd<
-    R: std::fmt::Debug,
-    T: std::fmt::Debug
-> (
-    h:&str,
-    e: Result<R, T>
-) {
-    match e {
-        Ok(r) => ginfod(h, r),
-       Err(r) => gerrord(h, r)
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-#[derive(Debug)]
-enum Serror {
-   StdIoError(std::io::Error),
-   Error(json::Error),
-   Utf8Error(Utf8Error),
-   SetLoggerError(log::SetLoggerError),
-   SslErrorStack(openssl::error::ErrorStack),
-   Msg(&'static str),
-   Err(&'static str)
-}
-
-impl From<std::io::Error> for Serror {
-    fn from(e: std::io::Error) -> Self { Serror::StdIoError(e) }
-}
-impl From<Utf8Error> for Serror {
-    fn from(e: Utf8Error) -> Self { Serror::Utf8Error(e) }
-}
-impl From<json::Error> for Serror {
-    fn from(e: json::Error) -> Self { Serror::Error(e) }
-}
-impl From<&'static str> for Serror {
-    fn from(s: &'static str) -> Self { Serror::Msg(s) }
-}
-impl From<openssl::error::ErrorStack> for Serror {
-    fn from(e: openssl::error::ErrorStack) -> Self { Serror::SslErrorStack(e) }
-}
-impl From<log::SetLoggerError> for Serror {
-    fn from(e: log::SetLoggerError) -> Self { Serror::SetLoggerError(e) }
-}
+use ::telegram::*;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -216,30 +157,6 @@ fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-fn bytes2json(body: &web::Bytes) -> Result<JsonValue, Serror> {
-    let json = json::parse( from_utf8(&body)? )?;
-    info!("json = \x1b[1;35m{}\x1b[0m", json);
-    Ok(json)
-}
-
-fn json_getin_i64 (json :&JsonValue, keys :&[&str]) -> Option<i64> {
-    let mut j = json;
-    for k in keys { j = &j[*k] }
-    j.as_i64()
-}
-fn json_getin_str <'t> (json :&'t JsonValue, keys :&[&str]) -> Option<&'t str> {
-    let mut j = json;
-    for k in keys { j = &j[*k] }
-    j.as_str()
-}
-
-fn json_message_chat_id (db :&DB, json :&JsonValue) -> i64 {
-    json_getin_i64(json, &["message", "chat", "id"])
-    .unwrap_or(db.chat_id_default)
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
 async fn do_ticker (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serror> {
 
     // It's either a @bot query or text message
@@ -251,7 +168,7 @@ async fn do_ticker (db :&mut DB, json :&JsonValue) -> Result<&'static str, Serro
     // Who gets response?
     let chat_id :i64 =
         json_getin_i64(json, &["inline_query", "from", "id"])
-        .unwrap_or_else( || json_message_chat_id(db, json));
+        .unwrap_or_else( || json_message_chat_id(json, db.chat_id_default));
 
     let tickers = text_parse_for_tickers(&txt);
 
@@ -278,7 +195,7 @@ async fn do_plussy_all (db :&mut DB, json :&JsonValue) -> Result<&'static str, S
         return Ok("do_plussy_all SKIP");
     }
 
-    let chat_id = json_message_chat_id(db, json);
+    let chat_id = json_message_chat_id(json, db.chat_id_default);
 
     let mut likes = Vec::new();
     // Over each user in file
@@ -331,7 +248,7 @@ async fn do_plussy (db :&mut DB, json :&JsonValue) -> Result<String, Serror> {
 
     if amt == 0 { return Ok("do_plussy SKIP".into()); }
 
-    let chat_id = json_message_chat_id(db, json);
+    let chat_id = json_message_chat_id(json, db.chat_id_default);
     let from = json_getin_i64(json, &["message", "from", "id"]).ok_or("wat")?;
     let to = json_getin_i64(json, &["message", "reply_to_message", "from", "id"]).ok_or("oh no")?;
 
@@ -376,16 +293,29 @@ async fn do_plussy (db :&mut DB, json :&JsonValue) -> Result<String, Serror> {
 async fn do_all(mdb: &web::Data<MDB>, body: &web::Bytes) -> Result<(), Serror> {
     let mut db = mdb.lock().unwrap();
 
-    let json = bytes2json(&body)?;
+    let json = bytes2json(&body)?; // UnexpectedEndOfJson
+
+    let j_message_text = &json["message"]["text"];
+    let j_inline_query_query = &json["inline_query"]["query"];
+
+    ginfo(j_message_text);
+    ginfo(j_inline_query_query);
+
     glogd("do_ticker", do_ticker(&mut db, &json).await);
     glogd("do_plussy", do_plussy(&mut db, &json).await);
     glogd("do_plussy_all", do_plussy_all(&mut db, &json).await);
     Ok(())
 }
 
-async fn handle_silently(mdb: web::Data<MDB>, req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    ginfod("\x1b[35mdb:", &mdb.lock().unwrap());
-    ginfod("\x1b[35mreq:", format!("{:?}", &req).replace("\n", "").replace("  ", " "));
+async fn handle_silently(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    info!("\x1b[1;34m ™™™ ™™ ™™ |    ___   _   _     ");
+    info!("\x1b[1;34m  ™  ™ ™ ™ |\\ /\\ |   | | | |   |");
+    info!("\x1b[1;34m  ™  ™   ™ |/ \\/ |   |_|.|_|.  |");
+    ginfo(&req.connection_info());
+    //ginfod("\x1b[1m", &req.app_config().host());
+    let mdb = req.app_data::<web::Data<MDB>>().unwrap();
+    ginfo(format!("{:?}", &req).replace("\n", "").replace("  ", " "));
+    ginfod("\x1b[1m", &mdb.lock().unwrap());
     do_all(&mdb, &body)
     .await
     .map_or_else(
@@ -393,7 +323,7 @@ async fn handle_silently(mdb: web::Data<MDB>, req: HttpRequest, body: web::Bytes
             gerrord("\x1b[31mbody:", &body);
             gerror(r)
         },
-        |r| ginfo(r)
+        |r| ginfod("Done", r)
     );
     HttpResponse::from("")
 }
