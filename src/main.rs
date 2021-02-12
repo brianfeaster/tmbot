@@ -43,7 +43,7 @@ async fn sendmsg (db :&DB, chat_id :i64, text: &str) {
         .timeout(Duration::new(10,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", text],
-                 //"&parse_mode=HTML" +
+                 ["parse_mode", "MarkdownV2"],
                  ["disable_notification", "true"]]).unwrap()
         .send()
         .await;
@@ -136,6 +136,39 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     }
 }
 
+async fn get_definition (word: &str) -> Result<JsonValue, Serror> {
+    let body =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .timeout( Duration::new(10,0) )
+                    .finish() )
+        .finish() // -> Client
+        .get("https://api.onelook.com/words")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(10,0))
+        .query(&[["ml", word],
+                 ["md", "dp"],
+                 ["max", "1"]]).unwrap()
+        .send()
+        .await.unwrap()
+        .body().limit(1_000_000).await;
+
+    if body.is_err() {
+         error!(r#"http body {:?} for {:?}"#, body, word);
+         Err("get_definition http error")?;
+    }
+
+    let body = body.unwrap();
+    let domstr = from_utf8(&body);
+    if domstr.is_err() {
+         error!(r#"http body2str {:?} for {:?}"#, domstr, word);
+         Err("get_body2str error")?;
+    }
+
+    bytes2json(&body)
+}
+
 fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
     let re = Regex::new(r"[^A-Za-z^.-]").unwrap();
@@ -174,6 +207,31 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
 
     Ok("Ok do_ticker")
+}
+
+async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
+
+    if cap.is_none() {
+        return Ok("do_def SKIP");
+    }
+    let word = &cap.unwrap()[1];
+    
+    info!("looking up {:?}", word);
+
+    let json = get_definition(word).await?;
+
+    let defs = &json[0]["defs"];
+
+    let mut msg = String::new() + "*" + word + ":* ";
+    for i in 0..defs.len() {
+        msg.push_str(&defs[i].to_string()[2..]);
+        msg.push_str(". ");
+    }
+    sendmsg(db, cmd.at, &msg.replace(".", "\\.").replace("(", "\\(").replace(")", "\\)")).await;
+
+    Ok("Ok do_def")
 }
 
 async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
@@ -291,6 +349,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_like(&db, &cmd).await?);
     info!("{:?}", do_like_info(&db, &cmd).await?);
     info!("{:?}", do_ticker(&db, &cmd).await?);
+    info!("{:?}", do_def(&db, &cmd).await?);
     Ok(())
 }
 
