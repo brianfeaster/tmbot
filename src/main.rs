@@ -257,8 +257,13 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
 
     let mut msg = String::new() + "*" + word + ":* ";
-    for i in 0..defs.len() {
-        msg.push_str( &format!("*({})* {}. ", i, &defs[i].to_string()[2..]));
+
+    if 1 == defs.len() {
+        msg.push_str( &format!("{}. ", &defs[0].to_string()[2..]));
+    } else {
+        for i in 0..defs.len() {
+            msg.push_str( &format!("*({})* {}. ", i+1, &defs[i].to_string()[2..]));
+        }
     }
     sendmsgmd(db, cmd.at, &msg).await;
 
