@@ -244,17 +244,17 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
-
-    if cap.is_none() {
-        return Ok("do_def SKIP");
-    }
+    if cap.is_none() { return Ok("do_def SKIP"); }
     let word = &cap.unwrap()[1];
 
     info!("looking up {:?}", word);
 
-    let json = get_definition(word).await?;
+    let defs = &get_definition(word).await?[0]["defs"];
 
-    let defs = &json[0]["defs"];
+    if 0 == defs.len() {
+        sendmsgmd(db, cmd.from, &format!("*{}* definition is empty", word)).await;
+        return Ok("do_def empty definition");
+    }
 
     let mut msg = String::new() + "*" + word + ":* ";
     for i in 0..defs.len() {
