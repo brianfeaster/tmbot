@@ -25,39 +25,43 @@ type MDB = Mutex<DB>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn sendmsg (db :&DB, chat_id :i64, text: &str) {
+async fn send_msg (db :&DB, chat_id :i64, text: &str) {
     info!("\x1b[33m<- {}", text);
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
 
-    let response =
+    match 
         Client::builder()
         .connector( Connector::new()
                     .ssl( builder.build() )
                     .timeout(Duration::new(10,0))
                     .finish() )
-        .finish() // -> Client
+        .finish()
         .get( db.url_bot.clone() + "/sendmessage")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", text],
                  ["disable_notification", "true"]]).unwrap()
-        .send()
-        .await;
+        .send().await {
 
-    match response {
+        }
         Err(e) => error!("\x1b[31m-> {:?}", e),
-        Ok(mut r) => {
-            ginfod("\x1b[32m->", &r);
-            ginfod("\x1b[1;32m->", r.body().await);
+        Ok(mut result) => {
+            ginfod("\x1b[32m->", &result);
+            ginfod("\x1b[1;32m->", result.body().await);
         }
     }
 }
 
-async fn sendmsgmd (db :&DB, chat_id :i64, text: &str) {
-    let text = text.replace(".", "\\.").replace("(", "\\(").replace(")", "\\)");
+async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
+    let text = text
+    .replacen(".", "\\.", 10000)
+    .replacen("(", "\\(", 10000)
+    .replacen(")", "\\)", 10000)
+    .replacen("-", "\\-", 10000);
+
     info!("\x1b[33m<- {}", text);
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
@@ -202,7 +206,7 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
         .collect::<Vec<String>>() )
 }
 
-fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
+fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
     let mut tickers = HashSet::new();
     let re = Regex::new(r"[^A-Za-z^.-]").unwrap();
     for s in txt.split(" ") {
@@ -216,26 +220,18 @@ fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
             }
         }
     }
-    tickers
+    if tickers.is_empty() { None } else { Some(tickers) }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let txt = &cmd.msg;
-    let chat_id = cmd.at; // Message destination
-
-    let tickers = text_parse_for_tickers(&txt);
-
-    if tickers.is_empty() { return Ok("do_ticker SKIP no tickers"); }
-
-    info!("tickers {:?}", tickers);
+    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_ticker SKIP no tickers")?;
 
     for ticker in tickers {
         if let Some(price) = get_ticker_quote(&ticker).await {
-            let quote = price.0 + &ticker + "@" + &price.1;
-            sendmsg(db, chat_id, &quote).await;
+            send_msg(db, cmd.at, &format!("{}{}@{}", price.0, ticker, price.1)).await;
         }
     }
 
@@ -286,7 +282,7 @@ async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let defs = &get_definition_old(word).await?[0]["defs"];
 
     if 0 == defs.len() {
-        sendmsgmd(db, cmd.from, &format!("*{}* definition is empty", word)).await;
+        send_msg_markdown(db, cmd.from, &format!("*{}* definition is empty", word)).await;
         return Ok("do_def_old empty definition");
     }
 
@@ -299,7 +295,7 @@ async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             msg.push_str( &format!("*({})* {}. ", i+1, &defs[i].to_string()[2..]));
         }
     }
-    sendmsgmd(db, cmd.at, &msg).await;
+    send_msg_markdown(db, cmd.at, &msg).await;
 
     Ok("Ok do_def_old")
 }
@@ -313,7 +309,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let defs = get_definition(word).await?;
 
     if defs.is_empty() {
-        sendmsgmd(db, cmd.from, &format!("*{}* def is empty", word)).await;
+        send_msg_markdown(db, cmd.from, &format!("*{}* def is empty", word)).await;
         return Ok("do_def def is empty");
     }
 
@@ -322,18 +318,17 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if 1 == defs.len() {
         msg.push_str( &format!(" {}", defs[0].to_string()));
     } else {
-        for i in 0..std::cmp::min(3, defs.len()) {
+        for i in 0..std::cmp::min(4, defs.len()) {
             msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
         }
     }
 
     let msg = msg // Poor person's uni/url decode
-        .replace("%20", " ")
-        .replace("%2C", ",")
-        .replace("-", "\\-")
-        .replace("%26%238217%3B", "'");
+        .replacen("%20", " ", 10000)
+        .replacen("%2C", ",", 10000)
+        .replacen("%26%238217%3B", "'", 10000);
 
-    sendmsgmd(db, cmd.at, &msg).await;
+    send_msg_markdown(db, cmd.at, &msg).await;
 
     Ok("Ok do_def")
 }
@@ -363,8 +358,8 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     for (likes,nom) in likes {
         text.push_str(&format!("{}{} ", nom, num2heart(likes)));
     }
-    //info!("HEARTS -> msg tmbot {:?}", sendmsg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    sendmsg(db, cmd.at, &text).await;
+    //info!("HEARTS -> msg tmbot {:?}", send_msg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
+    send_msg(db, cmd.at, &text).await;
     Ok("Ok do_like_info")
 }
 
@@ -405,7 +400,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
     let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
     let toname   = people.get(&cmd.to).unwrap_or(&sto);
     let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    sendmsg(db, cmd.at, &text).await;
+    send_msg(db, cmd.at, &text).await;
 
     Ok("Ok do_like".into())
 }
