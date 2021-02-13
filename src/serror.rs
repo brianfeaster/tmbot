@@ -8,7 +8,9 @@ pub enum Serror {
    Message(String),
    ParseIntError(std::num::ParseIntError),
    Msg(&'static str),
-   Err(&'static str)
+   Err(&'static str),
+   SerUrlEnc(serde_urlencoded::ser::Error),
+   SendRequestError(actix_web::client::SendRequestError)
 }
 
 impl From<std::num::ParseIntError> for Serror {
@@ -34,4 +36,10 @@ impl From<openssl::error::ErrorStack> for Serror {
 }
 impl From<log::SetLoggerError> for Serror {
     fn from(e: log::SetLoggerError) -> Self { Serror::SetLoggerError(e) }
+}
+impl From<serde_urlencoded::ser::Error> for Serror {
+    fn from(e: serde_urlencoded::ser::Error) -> Self { Serror::SerUrlEnc(e) }
+}
+impl From<actix_web::client::SendRequestError> for Serror {
+    fn from(e: actix_web::client::SendRequestError) -> Self { Serror::SendRequestError(e) }
 }

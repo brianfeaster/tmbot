@@ -168,7 +168,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     }
 }
 
-async fn get_definition (word: &str) -> Result<JsonValue, Serror> {
+async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -176,14 +176,12 @@ async fn get_definition (word: &str) -> Result<JsonValue, Serror> {
                     .timeout( Duration::new(10,0) )
                     .finish() )
         .finish() // -> Client
-        .get("https://api.onelook.com/words")
+        .get("https://www.onelook.com/")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
-        .query(&[["ml", word],
-                 ["md", "dp"],
-                 ["max", "1"]]).unwrap()
+        .query(&[["q", word]])?
         .send()
-        .await.unwrap()
+        .await?
         .body().limit(1_000_000).await;
 
     if body.is_err() {
@@ -198,7 +196,10 @@ async fn get_definition (word: &str) -> Result<JsonValue, Serror> {
          Err("get_body2str error")?;
     }
 
-    bytes2json(&body)
+    Ok( Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
+        .captures_iter(&domstr.unwrap())
+        .map( |cap| cap[1].to_string() )
+        .collect::<Vec<String>>() )
 }
 
 fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
@@ -243,28 +244,34 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_def SKIP"); }
-    let word = &cap.unwrap()[1];
+    let word =
+     &Regex::new(r"^([a-z]+):$").unwrap()
+     .captures(&cmd.msg)
+     .ok_or("do_def SKIP")?[1];
 
-    info!("looking up {:?}", word);
+    let defs = get_definition(word).await?;
 
-    let defs = &get_definition(word).await?[0]["defs"];
-
-    if 0 == defs.len() {
-        sendmsgmd(db, cmd.from, &format!("*{}* definition is empty", word)).await;
-        return Ok("do_def empty definition");
+    if defs.is_empty() {
+        sendmsgmd(db, cmd.from, &format!("*{}* def is empty", word)).await;
+        return Ok("do_def def is empty");
     }
 
-    let mut msg = String::new() + "*" + word + ":* ";
+    let mut msg = String::new() + "*" + word + ":*";
 
     if 1 == defs.len() {
-        msg.push_str( &format!("{}. ", &defs[0].to_string()[2..]));
+        msg.push_str( &format!(" {}", defs[0].to_string()));
     } else {
         for i in 0..defs.len() {
-            msg.push_str( &format!("*({})* {}. ", i+1, &defs[i].to_string()[2..]));
+            msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
         }
     }
+
+    let msg = msg // Poor person's uni/url decode
+        .replace("%20", " ")
+        .replace("%2C", ",")
+        .replace("-", "\\-")
+        .replace("%26%238217%3B", "'");
+
     sendmsgmd(db, cmd.at, &msg).await;
 
     Ok("Ok do_def")
