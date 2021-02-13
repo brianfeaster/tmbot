@@ -44,9 +44,8 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) {
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", text],
                  ["disable_notification", "true"]]).unwrap()
-        .send().await {
-
-        }
+        .send().await
+    {
         Err(e) => error!("\x1b[31m-> {:?}", e),
         Ok(mut result) => {
             ginfod("\x1b[32m->", &result);
