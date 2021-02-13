@@ -242,12 +242,73 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_ticker")
 }
 
+async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
+    let body =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .timeout( Duration::new(10,0) )
+                    .finish() )
+        .finish() // -> Client
+        .get("https://api.onelook.com/words")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(10,0))
+        .query(&[["ml", word],
+                 ["md", "dp"],
+                 ["max", "1"]]).unwrap()
+        .send()
+        .await.unwrap()
+        .body().limit(1_000_000).await;
+
+    if body.is_err() {
+         error!(r#"http body {:?} for {:?}"#, body, word);
+         Err("get_definition_old http error")?;
+    }
+
+    let body = body.unwrap();
+    let domstr = from_utf8(&body);
+    if domstr.is_err() {
+         error!(r#"http body2str {:?} for {:?}"#, domstr, word);
+         Err("get_body2str error")?;
+    }
+
+    bytes2json(&body)
+}
+
+async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_def_old SKIP"); }
+    let word = &cap.unwrap()[1];
+
+    info!("looking up {:?}", word);
+
+    let defs = &get_definition_old(word).await?[0]["defs"];
+
+    if 0 == defs.len() {
+        sendmsgmd(db, cmd.from, &format!("*{}* definition is empty", word)).await;
+        return Ok("do_def_old empty definition");
+    }
+
+    let mut msg = String::new() + "*" + word + ":* ";
+
+    if 1 == defs.len() {
+        msg.push_str( &format!("{}. ", &defs[0].to_string()[2..]));
+    } else {
+        for i in 0..defs.len() {
+            msg.push_str( &format!("*({})* {}. ", i+1, &defs[i].to_string()[2..]));
+        }
+    }
+    sendmsgmd(db, cmd.at, &msg).await;
+
+    Ok("Ok do_def_old")
+}
+
 async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let word =
-     &Regex::new(r"^([a-z]+):$").unwrap()
-     .captures(&cmd.msg)
-     .ok_or("do_def SKIP")?[1];
+    let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_def SKIP"); }
+    let word = &cap.unwrap()[1];
 
     let defs = get_definition(word).await?;
 
@@ -261,7 +322,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if 1 == defs.len() {
         msg.push_str( &format!(" {}", defs[0].to_string()));
     } else {
-        for i in 0..defs.len() {
+        for i in 0..std::cmp::min(3, defs.len()) {
             msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
         }
     }
@@ -389,10 +450,11 @@ fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     let cmd = parse_cmd(&body)?;
     warn!("\x1b[33m{:?}", &cmd);
-    info!("{:?}", do_like(&db, &cmd).await?);
-    info!("{:?}", do_like_info(&db, &cmd).await?);
-    info!("{:?}", do_ticker(&db, &cmd).await?);
-    info!("{:?}", do_def(&db, &cmd).await?);
+    info!("{:?}", do_like(&db, &cmd).await);
+    info!("{:?}", do_like_info(&db, &cmd).await);
+    info!("{:?}", do_ticker(&db, &cmd).await);
+    info!("{:?}", do_def(&db, &cmd).await);
+    info!("{:?}", do_def_old(&db, &cmd).await);
     Ok(())
 }
 
