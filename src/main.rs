@@ -270,6 +270,10 @@ async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
     bytes2json(&body)
 }
 
+fn str_after_str<'t> (heystack :&'t str, needle :&str) -> &'t str {
+    &heystack[(heystack.find(needle).map_or(-2, |n| n as i32) + 1) as usize ..]
+}
+
 async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
@@ -285,13 +289,14 @@ async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         return Ok("do_def_old empty definition");
     }
 
-    let mut msg = String::new() + "*" + word + ":* ";
+    let mut msg = String::new() + "*\"" + word;
 
     if 1 == defs.len() {
-        msg.push_str( &format!("{}. ", &defs[0].to_string()[2..]));
+        msg.push_str( &format!("\"* {}", str_after_str(&defs[0].to_string(), "\t")) );
     } else {
-        for i in 0..defs.len() {
-            msg.push_str( &format!("*({})* {}. ", i+1, &defs[i].to_string()[2..]));
+         msg.push_str( &format!("\" ({})* {}", 1, str_after_str(&defs[0].to_string(), "\t")) );
+        for i in 1..defs.len() {
+            msg.push_str( &format!(" *({})* {}", i+1, str_after_str(&defs[i].to_string(), "\t")) );
         }
     }
     send_msg_markdown(db, cmd.at, &msg).await;
@@ -312,12 +317,13 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         return Ok("do_def def is empty");
     }
 
-    let mut msg = String::new() + "*" + word + ":*";
+    let mut msg = String::new() + "*" + word;
 
     if 1 == defs.len() {
-        msg.push_str( &format!(" {}", defs[0].to_string()));
+        msg.push_str( &format!(":* {}", defs[0].to_string()));
     } else {
-        for i in 0..std::cmp::min(4, defs.len()) {
+        msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string()));
+        for i in 1..std::cmp::min(4, defs.len()) {
             msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
         }
     }
