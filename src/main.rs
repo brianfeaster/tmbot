@@ -59,7 +59,9 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
     .replacen(".", "\\.", 10000)
     .replacen("(", "\\(", 10000)
     .replacen(")", "\\)", 10000)
-    .replacen("-", "\\-", 10000);
+    .replacen("-", "\\-", 10000)
+    .replacen("`", "\\`", 10000)
+    .replacen("'", "\\'", 10000);
 
     info!("\x1b[33m<- {}", text);
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
@@ -271,7 +273,7 @@ async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
 }
 
 fn str_after_str<'t> (heystack :&'t str, needle :&str) -> &'t str {
-    &heystack[(heystack.find(needle).map_or(-2, |n| n as i32) + 1) as usize ..]
+    &heystack[(heystack.find(needle).map_or(-(needle.len() as i32), |n| n as i32) + needle.len() as i32) as usize ..]
 }
 
 async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
