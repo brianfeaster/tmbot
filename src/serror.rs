@@ -10,7 +10,8 @@ pub enum Serror {
    Msg(&'static str),
    Err(&'static str),
    SerUrlEnc(serde_urlencoded::ser::Error),
-   SendRequestError(actix_web::client::SendRequestError)
+   SendRequestError(actix_web::client::SendRequestError),
+   SqliteError(sqlite::Error),
 }
 
 impl From<std::num::ParseIntError> for Serror {
@@ -42,4 +43,7 @@ impl From<serde_urlencoded::ser::Error> for Serror {
 }
 impl From<actix_web::client::SendRequestError> for Serror {
     fn from(e: actix_web::client::SendRequestError) -> Self { Serror::SendRequestError(e) }
+}
+impl From<sqlite::Error> for Serror {
+    fn from(e: sqlite::Error) -> Self { Serror::SqliteError(e) }
 }

@@ -4,7 +4,7 @@ use ::std::{
     str::{from_utf8},
     fs::{read_to_string, write},
     env::{args},
-    sync::{Mutex},
+    sync::{Mutex, mpsc::{channel, Sender} },
 };
 use ::log::*;
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
@@ -412,6 +412,33 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
     Ok("Ok do_like".into())
 }
 
+async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    if cmd.from != 308188500 {
+        return Ok("do_sql invalid user");
+    }
+
+    let cap = Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_sql SKIP"); }
+    let expr = &cap.unwrap()[1];
+
+    let results = get_sql(expr)?;
+
+    if results.is_empty() {
+        send_msg_markdown(db, cmd.from, &format!("*{}* results is empty", expr)).await;
+        return Ok("do_sql def is empty");
+    }
+
+    for res in results {
+        let mut buff = String::new();
+        res.iter().for_each( |s| buff.push_str(s) );
+        let res = format!("{}\n", buff);
+        send_msg(db, cmd.at, &res).await;
+    }
+
+    Ok("Ok do_sql")
+}
+
 #[derive(Debug)]
 struct Cmd {
     from :i64,
@@ -457,6 +484,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_ticker(&db, &cmd).await);
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_def_old(&db, &cmd).await);
+    info!("{:?}", do_sql(&db, &cmd).await);
     Ok(())
 }
 
@@ -507,5 +535,50 @@ async fn main() -> std::io::Result<()>{
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
+    //info!("SQLITE -> {:?}", fun_sqlite());
+
     srv.await
+}
+
+fn fun_sqlite () -> Result<(), Serror> {
+    let sql = ::sqlite::open( "tmbot.sqlite")?;
+
+    ::sqlite::Connection::execute(&sql, "
+        DROP TABLE users;
+        CREATE TABLE users (name TEXT, age INTEGER);
+        INSERT INTO users VALUES ('Alice', 42);
+        INSERT INTO users VALUES ('Zed', null);
+        INSERT INTO users VALUES ('Bob', 69);
+    ")?;
+
+    let (snd, rcv) = channel::<Vec<String>>();
+    sql.iterate("
+        --select * from users
+        INSERT INTO users VALUES ('Brian', 64)
+    ", move |r| snarf(snd.clone(), r) )?;
+
+   rcv.iter() //.collect::<Vec<String>>().iter()
+   .for_each( |e| info!("SQLITE resp -> {:?}", e) );
+
+    Ok(())
+}
+
+fn snarf (snd :Sender<Vec<String>>, res :&[(&str, Option<&str>)]) -> bool {
+    let mut v = Vec::new();
+    for r in res {
+        info!("snarf <- {:?}", r);
+        v.push( format!("{}:{} ", r.0, r.1.unwrap_or("NULL")) );
+    }
+    info!("snarf -> {:?}", snd.send( v ) );
+    true
+}
+
+fn get_sql (cmd :&str) -> Result<Vec<Vec<String>>, Serror> {
+    let sql = ::sqlite::open( "tmbot.sqlite" )?;
+
+    let (snd, rcv) = channel::<Vec<String>>();
+
+    sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
+
+    Ok(rcv.iter().collect::<Vec<Vec<String>>>())
 }
