@@ -31,7 +31,7 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) {
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
     builder.set_certificate_chain_file("cert.pem").unwrap();
 
-    match 
+    match
         Client::builder()
         .connector( Connector::new()
                     .ssl( builder.build() )
@@ -42,7 +42,7 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) {
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .query(&[["chat_id", &chat_id.to_string()],
-                 ["text", text],
+                 ["text", &text],
                  ["disable_notification", "true"]]).unwrap()
         .send().await
     {
@@ -59,8 +59,12 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
     .replacen(".", "\\.", 10000)
     .replacen("(", "\\(", 10000)
     .replacen(")", "\\)", 10000)
+    .replacen("{", "\\{", 10000)
+    .replacen("}", "\\}", 10000)
     .replacen("-", "\\-", 10000)
+    .replacen("+", "\\+", 10000)
     .replacen("`", "\\`", 10000)
+    .replacen("=", "\\=", 10000)
     .replacen("'", "\\'", 10000);
 
     info!("\x1b[33m<- {}", text);
@@ -201,10 +205,25 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
          Err("get_body2str error")?;
     }
 
-    Ok( Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
-        .captures_iter(&domstr.unwrap())
+    // The optional US definitions
+
+    let usdef =
+        Regex::new(r"var mm_US_def = '[^']+").unwrap()
+        .find(&domstr.unwrap())
+        .map_or("", |r| r.as_str() );
+
+    let mut lst = Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
+        .captures_iter(&usdef)
         .map( |cap| cap[1].to_string() )
-        .collect::<Vec<String>>() )
+        .collect::<Vec<String>>();
+
+    // WordNet definitions
+
+    Regex::new(r#"easel_def_+[0-9]+">([^<]+)"#).unwrap()
+        .captures_iter(&domstr.unwrap())
+        .for_each( |cap| lst.push( cap[1].to_string() ) );
+
+    Ok(lst)
 }
 
 fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
@@ -239,7 +258,7 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_ticker")
 }
 
-async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
+async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -247,19 +266,17 @@ async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
                     .timeout( Duration::new(10,0) )
                     .finish() )
         .finish() // -> Client
-        .get("https://api.onelook.com/words")
+        .get("https://onelook.com/")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
-        .query(&[["ml", word],
-                 ["md", "dp"],
-                 ["max", "1"]]).unwrap()
+        .query(&[["clue", word]]).unwrap()
         .send()
         .await.unwrap()
         .body().limit(1_000_000).await;
 
     if body.is_err() {
          error!(r#"http body {:?} for {:?}"#, body, word);
-         Err("get_definition_old http error")?;
+         Err("get_syns http error")?;
     }
 
     let body = body.unwrap();
@@ -269,41 +286,37 @@ async fn get_definition_old (word: &str) -> Result<JsonValue, Serror> {
          Err("get_body2str error")?;
     }
 
-    bytes2json(&body)
+    Ok( Regex::new("w=([^:&\"<>]+)").unwrap()
+        .captures_iter(&domstr.unwrap())
+        .map( |cap| cap[1].to_string() )
+        .collect::<Vec<String>>() )
 }
 
 fn str_after_str<'t> (heystack :&'t str, needle :&str) -> &'t str {
     &heystack[(heystack.find(needle).map_or(-(needle.len() as i32), |n| n as i32) + needle.len() as i32) as usize ..]
 }
 
-async fn do_def_old (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_def_old SKIP"); }
+    if cap.is_none() { return Ok("do_syn SKIP"); }
     let word = &cap.unwrap()[1];
 
     info!("looking up {:?}", word);
 
-    let defs = &get_definition_old(word).await?[0]["defs"];
+    let mut defs = get_syns(word).await?;
 
     if 0 == defs.len() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* definition is empty", word)).await;
-        return Ok("do_def_old empty definition");
+        send_msg_markdown(db, cmd.from, &format!("*{}* synonyms is empty", word)).await;
+        return Ok("do_syn empty synonyms");
     }
 
-    let mut msg = String::new() + "*\"" + word;
-
-    if 1 == defs.len() {
-        msg.push_str( &format!("\"* {}", str_after_str(&defs[0].to_string(), "\t")) );
-    } else {
-         msg.push_str( &format!("\" ({})* {}", 1, str_after_str(&defs[0].to_string(), "\t")) );
-        for i in 1..defs.len() {
-            msg.push_str( &format!(" *({})* {}", i+1, str_after_str(&defs[i].to_string(), "\t")) );
-        }
-    }
+    let mut msg = String::new() + "*\"" + word + "\"* ";
+    defs.truncate(10);
+    msg.push_str( &defs.join(", ") );
     send_msg_markdown(db, cmd.at, &msg).await;
 
-    Ok("Ok do_def_old")
+    Ok("Ok do_syn")
 }
 
 async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
@@ -422,7 +435,12 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if cap.is_none() { return Ok("do_sql SKIP"); }
     let expr = &cap.unwrap()[1];
 
-    let results = get_sql(expr)?;
+    let result = get_sql(expr);
+    if let Err(e) = result {
+        send_msg_markdown(db, cmd.from, &format!("{:?}", e)).await;
+        return Err(e);
+    }
+    let results = result.unwrap();
 
     if results.is_empty() {
         send_msg_markdown(db, cmd.from, &format!("*{}* results is empty", expr)).await;
@@ -437,6 +455,26 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
 
     Ok("Ok do_sql")
+}
+
+fn snarf (
+    snd :Sender<Vec<String>>,
+    res :&[(&str, Option<&str>)] // [ (column, value) ]
+) -> bool {
+    let mut v = Vec::new();
+    for r in res {
+        info!("snarf vec <- {:?}", r);
+        v.push( format!("{}:{} ", r.0, r.1.unwrap_or("NULL")) );
+    }
+    info!("snarf snd <- {:?}", snd.send( v ) );
+    true
+}
+
+fn get_sql ( cmd :&str ) -> Result<Vec<Vec<String>>, Serror> {
+    let sql = ::sqlite::open( "tmbot.sqlite" )?;
+    let (snd, rcv) = channel::<Vec<String>>();
+    sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
+    Ok(rcv.iter().collect::<Vec<Vec<String>>>())
 }
 
 #[derive(Debug)]
@@ -483,7 +521,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_like_info(&db, &cmd).await);
     info!("{:?}", do_ticker(&db, &cmd).await);
     info!("{:?}", do_def(&db, &cmd).await);
-    info!("{:?}", do_def_old(&db, &cmd).await);
+    info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
     Ok(())
 }
@@ -535,50 +573,13 @@ async fn main() -> std::io::Result<()>{
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    //info!("SQLITE -> {:?}", fun_sqlite());
-
     srv.await
 }
 
-fn fun_sqlite () -> Result<(), Serror> {
-    let sql = ::sqlite::open( "tmbot.sqlite")?;
-
-    ::sqlite::Connection::execute(&sql, "
+/*
+    sql.execute("
         DROP TABLE users;
         CREATE TABLE users (name TEXT, age INTEGER);
         INSERT INTO users VALUES ('Alice', 42);
-        INSERT INTO users VALUES ('Zed', null);
-        INSERT INTO users VALUES ('Bob', 69);
     ")?;
-
-    let (snd, rcv) = channel::<Vec<String>>();
-    sql.iterate("
-        --select * from users
-        INSERT INTO users VALUES ('Brian', 64)
-    ", move |r| snarf(snd.clone(), r) )?;
-
-   rcv.iter() //.collect::<Vec<String>>().iter()
-   .for_each( |e| info!("SQLITE resp -> {:?}", e) );
-
-    Ok(())
-}
-
-fn snarf (snd :Sender<Vec<String>>, res :&[(&str, Option<&str>)]) -> bool {
-    let mut v = Vec::new();
-    for r in res {
-        info!("snarf <- {:?}", r);
-        v.push( format!("{}:{} ", r.0, r.1.unwrap_or("NULL")) );
-    }
-    info!("snarf -> {:?}", snd.send( v ) );
-    true
-}
-
-fn get_sql (cmd :&str) -> Result<Vec<Vec<String>>, Serror> {
-    let sql = ::sqlite::open( "tmbot.sqlite" )?;
-
-    let (snd, rcv) = channel::<Vec<String>>();
-
-    sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
-
-    Ok(rcv.iter().collect::<Vec<Vec<String>>>())
-}
+*/
