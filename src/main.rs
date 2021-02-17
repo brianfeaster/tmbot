@@ -55,7 +55,14 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) {
 }
 
 async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
-    let text = text
+    let text = text // Poor person's uni/url decode
+    .replacen("%20", " ", 10000)
+    .replacen("%28", "(", 10000)
+    .replacen("%29", ")", 10000)
+    .replacen("%3D", "=", 10000)
+    .replacen("%2C", ",", 10000)
+    .replacen("%26%238217%3B", "'", 10000)
+    // Telegram required markdown escapes
     .replacen(".", "\\.", 10000)
     .replacen("(", "\\(", 10000)
     .replacen(")", "\\)", 10000)
@@ -342,11 +349,6 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
         }
     }
-
-    let msg = msg // Poor person's uni/url decode
-        .replacen("%20", " ", 10000)
-        .replacen("%2C", ",", 10000)
-        .replacen("%26%238217%3B", "'", 10000);
 
     send_msg_markdown(db, cmd.at, &msg).await;
 
