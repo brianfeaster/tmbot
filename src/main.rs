@@ -11,7 +11,121 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use ::actix_web::client::{Client, Connector};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
+use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday, Month};
+
 use ::tmbot::*;
+
+////////////////////////////////////////////////////////////////////////////////
+/// Datetime details:
+/// * Time is seconds since epoch, UTC
+/// * Trading hours is 6.5 hours long from 1430-2100 , 1330-2000 if US in DST)
+/// ? trading time is pegged to max("closing bell", "after opening bell")
+/// ? cache ticker values:  Update only if cached time is before trading time
+
+/// For now simple M-F check.  TODO: check for holidays, half days
+fn trading_day_p (date :LocalDate) -> bool {
+    match date.weekday() {
+        Weekday::Saturday|Weekday::Sunday => false,
+        _ => true
+    }
+}
+
+fn trading_time_next (date :LocalDate) -> i64 {
+}
+
+fn days_diff (a :LocalDate, b: LocalDate) -> i64 {
+    (LocalDateTime::new(b, LocalTime::midnight()).to_instant().seconds()
+     -
+     LocalDateTime::new(a, LocalTime::midnight()).to_instant().seconds()
+    ) / 86400
+}
+
+
+/// Decide if a ticker should be updated given its last update time.
+///
+fn update_ticker_p (cached :i64, now :i64) -> bool {
+    // Consider cached now times as dates (floored to midnight UTC)
+    let cachedday = LocalDateTime::from_instant(Instant::at(cached)).date();
+    let cached_is_tradingday = trading_day_p(cachedday);
+    let cacheopen = LocalDateTime::new(cachedday, LocalTime::hms(14, 30, 0).unwrap()).to_instant().seconds();
+    let cacheclose = LocalDateTime::new(cachedday, LocalTime::hms(21, 0, 0).unwrap()).to_instant().seconds();
+
+    let nowday = LocalDateTime::from_instant(Instant::at(now)).date();
+    let now_is_tradingday = trading_day_p(nowday);
+    let nowopen = LocalDateTime::new(nowday, LocalTime::hms(14, 30, 0).unwrap()).to_instant().seconds();
+    let nowclose = LocalDateTime::new(nowday, LocalTime::hms(21, 0, 0).unwrap()).to_instant().seconds();
+
+    let days_diff = days_diff(cachedday, nowday);
+    // Guaranteed two days difference will include a weekday
+
+    //                               cached on a weekend          now another weekend
+    // |_________*********______|____________C___________| ... |____________N___________|________**********______|
+    //     c1       c1      c3             c3                          c3                   c2      c2       c2
+    // c1 cached on incomplete trading day
+
+    // * now will always be equal or past cache
+    // * If now is past nowOpen,
+
+    // Clear your mind II !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    if "cached.isTradingDay()" && "cached.beforeClosing()" {
+        if "not-throttled" || "cached.closing <= now "{  Yahoo!() }
+    } else { // cached on nontrading-day || cached after closing
+        goal = cached.next_open_day_time()
+        if "goal.afterOpenHour() <= now" {
+            if "not-throttled" || "goal.closing <= now "{  Yahoo!() }
+        }
+    }
+
+
+
+        if  "not throttled" || "now past cachedClosing" { // Doesn't matter when now is, as long as it's after cached closing
+            // Yahoo!
+        }
+    } else { // cached on non-trading day
+
+    }
+
+    // Clear your mind!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    if "cached on a trading day && cached before closing" {
+        if  "not throttled" || "now past cachedClosing" { // Doesn't matter when now is, as long as it's after cached closing
+            // Yahoo!
+        }
+    } else if "now on a trading day" {  // cached after closing || cached on a no-market day
+        // Yahoo!
+    } else {  // (cached after closing || cached on a no-market day) && "now not a trading day"
+        // If there has been a trading day between cached and now... (the secret sauce)
+    }
+
+    if 3 <= days_diff {
+        return true;
+
+    } else if 0 == days_diff { // Only one day is an option
+
+        // Do we need to catch-up to same-day market hours?  Might cache on any future day.
+        if cached_is_tradingday                        && gwarn("update_ticker_p A Is a trading day...")
+            && cached < cacheclose                     && gwarn("update_ticker_p A cached before closing...")
+            && cacheopen <= now                        && gwarn("update_ticker_p A now after cached open...")
+            && (cacheclose <= now || cached+60 <= now) && gwarn("update_ticker_p A not throttled...")
+        {
+            gwarn("update_ticker_p A -> \x1b[32mTRUE\x1b[0m");
+            return true;
+        }
+    } 1 == days_diff { // two possible days four combinations [[ __  _*  **  *_ ]]
+        if !cached_is_trading_day && !now_is_trading_day { return false; }
+    }
+
+    if cached_is_tradingday && cached < cachedclose {
+        // maybe cachedday?
+
+    } else { // cached is on a weekend
+    }
+
+    if cached <= nowclose && nowopen <= now && (nowclose <= now || cached+60 <= now) {
+        warn!("update_ticker_p -> YES ticker needs to ");
+        return true
+    }
+    false
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -107,7 +221,7 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
+async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -137,8 +251,15 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     let re = Regex::new(r#"<title>([^(<]+)"#).unwrap();
     let title =
         match re.captures(domstr.unwrap()) {
-            Some(cap) => if 2==cap.len() { cap[1].to_string() } else { "stonk".to_string()  }
-            _ => "sonk".to_string()
+            Some(cap) =>
+                if 2==cap.len() {
+                    cap[1].trim()
+                    .trim_end_matches(|c|c=='.')
+                    .replace("&amp;", "&")
+                    .to_string()
+                } else { "stonk".to_string() },
+            _ =>
+                "stonk".to_string()
         };
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
@@ -155,6 +276,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     }
 
     let price = caps[3].to_string();
+    let price_bare = price.replacen(",", "", 1000);
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap();
     let caps_percentages = re
@@ -177,10 +299,14 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String)> {
     info!(r#"http dom percentages {:?} {:?}"#, ticker, caps_percentages);
 
     if caps_percentages.is_empty() {
-        return Some( ("".to_string(), price + &title) );
+        return Some( ( "".to_string(),
+                       price + &title,
+                       price_bare ) );
     } else {
         let percentage = &caps_percentages[0];
-        return Some( (percentage.0.to_string(), price + " " + &percentage.1 + " " + &title) );
+        return Some( ( percentage.0.to_string(),
+                       price + " " + &percentage.1 + " " + &title,
+                       price_bare ) );
     }
 }
 
@@ -256,9 +382,41 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_ticker SKIP no tickers")?;
 
-    for ticker in tickers {
+    for ticker in &tickers {
+        let ticker = ticker.to_uppercase();
+        let sql = format!("SELECT * FROM stonk WHERE ticker='{}'", ticker);
+        warn!("sql = {}", &sql);
+        let res = get_sql(&sql).unwrap();
+        let nowsecs :i64 = Instant::now().seconds();
+        let mut is_cached = false;
+        if !res.is_empty() {
+            let hm = &res[0];
+            let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
+            let time = LocalDateTime::from_instant(Instant::at(timesecs));
+            let should_update = update_ticker_p(timesecs, nowsecs);
+            info!("{}@{} {} {:?} {} {}",
+                hm.get("ticker").unwrap(),
+                hm.get("price").unwrap(),
+                timesecs, time, should_update,
+                hm.get("pretty").unwrap());
+            if !should_update {
+                 send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await;
+                 continue;
+            }
+            is_cached = true;
+        }
+
+        // Update
         if let Some(price) = get_ticker_quote(&ticker).await {
-            send_msg(db, cmd.at, &format!("{}{}@{}", price.0, ticker, price.1)).await;
+            let pretty = format!("{}{}@{}", price.0, ticker, price.1);
+            send_msg(db, cmd.at, &(pretty.to_string() + "·")).await;
+            let sql = if is_cached {
+                format!("UPDATE stonk SET price={}, time={}, pretty='{}' WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
+            } else {
+                format!("INSERT INTO stonk VALUES ('{}', {}, {}, '{}')", ticker, price.2, nowsecs, pretty)
+            };
+            warn!("sql = {}", &sql);
+            info!("Stonks update row results {:?}", get_sql(&sql));
         }
     }
 
@@ -299,9 +457,11 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
         .collect::<Vec<String>>() )
 }
 
+/*
 fn str_after_str<'t> (heystack :&'t str, needle :&str) -> &'t str {
     &heystack[(heystack.find(needle).map_or(-(needle.len() as i32), |n| n as i32) + needle.len() as i32) as usize ..]
 }
+*/
 
 async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
@@ -445,13 +605,13 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let results = result.unwrap();
 
     if results.is_empty() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* results is empty", expr)).await;
+        send_msg(db, cmd.from, &format!("\"{}\" results is empty", expr)).await;
         return Ok("do_sql def is empty");
     }
 
     for res in results {
         let mut buff = String::new();
-        res.iter().for_each( |s| buff.push_str(s) );
+        res.iter().for_each( |(k,v)| buff.push_str(&format!("{}:{} ", k, v)) );
         let res = format!("{}\n", buff);
         send_msg(db, cmd.at, &res).await;
     }
@@ -460,23 +620,24 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 }
 
 fn snarf (
-    snd :Sender<Vec<String>>,
+    snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
 ) -> bool {
-    let mut v = Vec::new();
+    let mut v = HashMap::new();
     for r in res {
-        info!("snarf vec <- {:?}", r);
-        v.push( format!("{}:{} ", r.0, r.1.unwrap_or("NULL")) );
+        trace!("snarf vec <- {:?}", r);
+        v.insert( r.0.to_string(), r.1.unwrap_or("NULL").to_string() );
     }
-    info!("snarf snd <- {:?}", snd.send( v ) );
+    let res = snd.send(v);
+    trace!("snarf snd <- {:?}", res);
     true
 }
 
-fn get_sql ( cmd :&str ) -> Result<Vec<Vec<String>>, Serror> {
+fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
-    let (snd, rcv) = channel::<Vec<String>>();
+    let (snd, rcv) = channel::<HashMap<String, String>>();
     sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
-    Ok(rcv.iter().collect::<Vec<Vec<String>>>())
+    Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
 }
 
 #[derive(Debug)]
@@ -525,6 +686,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
+    //info!("{:?}", do_stonks(&db, &cmd).await);
     Ok(())
 }
 
@@ -550,8 +712,63 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
+fn do_schema() -> Result<(), Serror> {
+    let sql = ::sqlite::open("tmbot.sqlite")?;
+
+    sql.execute("
+        CREATE TABLE entity (
+            id INTEGER  NOT NULL UNIQUE,
+            name  TEXT  NOT NULL);
+    ").map_or_else(gwarn, ginfo);
+
+    sql.execute("
+        CREATE TABLE bank (
+            id    INTEGER  NOT NULL UNIQUE,
+            amount  FLOAT  NOT NULL);
+    ").map_or_else(gwarn, ginfo);
+
+    /*
+    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+        let mut v = l.split(" ");
+        let id = v.next().ok_or("User DB malformed.")?;
+        let name = v.next().ok_or("User DB malformed.")?.to_string();
+        sql.execute(
+            format!("INSERT INTO entity VALUES ( {}, '{}' )", id, name)
+        ).map_or_else(gwarn, ginfo);
+    }
+    */
+
+    sql.execute("
+        --DROP TABLE stonk;
+        CREATE TABLE stonk (
+            ticker  TEXT  NOT NULL UNIQUE,
+            price  FLOAT  NOT NULL,
+            time INTEGER  NOT NULL,
+            pretty  TEXT  NOT NULL);
+    ").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO stonk VALUES ( 'TWNK', 14.97, 1613630678, '14.97')").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO stonk VALUES ( 'GOOG', 2128.31, 1613630678, '2,128.31')").map_or_else(gwarn, ginfo);
+    //sql.execute("UPDATE stonk SET time=1613630678 WHERE ticker='TWNK'").map_or_else(gwarn, ginfo);
+    //sql.execute("UPDATE stonk SET time=1613630678 WHERE ticker='GOOG'").map_or_else(gwarn, ginfo);
+
+    sql.execute("
+        --DROP TABLE orders;
+        CREATE TABLE orders (
+            entity INTEGER  NOT NULL,
+            ticker    TEXT  NOT NULL,
+            amount   FLOAT  NOT NULL,
+            cost     FLOAT  NOT NULL,
+            time   INTEGER  NOT NULL);
+    ").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO orders VALUES ( 241726795, 'TWNK', 500, 14.95, 1613544000 )").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO orders VALUES ( 241726795, 'GOOG', 0.25, 2121.90, 1613544278 )").map_or_else(gwarn, ginfo);
+
+    Ok(())
+}
+
+
 #[actix_web::main]
-async fn main() -> std::io::Result<()>{
+async fn main() -> Result<(), Serror> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
@@ -575,9 +792,10 @@ async fn main() -> std::io::Result<()>{
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    srv.await
-}
+    do_schema()?;
 
+    Ok(srv.await?)
+}
 /*
     sql.execute("
         DROP TABLE users;

@@ -12,6 +12,8 @@ pub enum Serror {
    SerUrlEnc(serde_urlencoded::ser::Error),
    SendRequestError(actix_web::client::SendRequestError),
    SqliteError(sqlite::Error),
+   IoError(std::io::Error),
+   SysTimeError(std::time::SystemTimeError),
 }
 
 impl From<std::num::ParseIntError> for Serror {
@@ -46,4 +48,21 @@ impl From<actix_web::client::SendRequestError> for Serror {
 }
 impl From<sqlite::Error> for Serror {
     fn from(e: sqlite::Error) -> Self { Serror::SqliteError(e) }
+}
+impl From<std::time::SystemTimeError> for Serror {
+    fn from(e: std::time::SystemTimeError) -> Self { Serror::SysTimeError(e) }
+}
+/*
+impl From<Serror> for std::io::Error {
+    fn from(e: Serror) -> Self { std::io::Error::new( std::io::ErrorKind::Other, e.str() ) }
+}
+*/
+
+impl Serror {
+    pub fn str(&self) -> String {
+        match self {
+            Serror::SqliteError(e) => format!("A {:?}", e),
+            _ => format!("B {:?}", self)
+        }
+    }
 }

@@ -6,15 +6,11 @@ edition = "2018"
 
 [dependencies]
 log = "*"
-regex = "*"
 pretty_env_logger = "*"
+regex = "*"
 actix-web = { version = "3", features = ["openssl"] }
-tokio = "*"
-http = "*"
 openssl = { version = "0.10" }
 json = "*"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "*"
-awc = "*"
 serde_urlencoded = "*"
 sqlite = "*"
+datetime = "*"
