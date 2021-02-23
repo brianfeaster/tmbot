@@ -607,19 +607,6 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
-    /*
-    let sql = format!("SELECT ticker, price, pretty FROM stonks");
-    let stonks = get_sql(&sql)?;
-    warn!("=> {:?}", stonks);
-    let stonks =
-        stonks.iter()
-        .map( |h| (h.get("ticker").unwrap().to_string(),
-                    (h.get("price").unwrap().to_string(),
-                     h.get("pretty").unwrap().to_string() ) ) )
-        .collect::<HashMap<String, (String, String)>>();
-    warn!("=> {:?}", stonks);
-    */
-
     let sql = format!("SELECT * FROM orders WHERE id={}", cmd.from);
     let res = get_sql(&sql)?;
     warn!("=> {:?}", res);
@@ -652,7 +639,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("OK do_stonks")
 }
 
-async fn do_trade (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_trade (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([A-Za-z^.-]+)([+-])(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_syn SKIP"); }
@@ -671,6 +658,12 @@ async fn do_trade (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if is_dollars { amt = amt / price; } 
 
     let basis = amt * price;
+    let new_balance = bank_balance - basis;
+
+    if new_balance < 0.0 {
+        send_msg(db, cmd.from, "You need more $$$ to YOLO like that.").await?;
+        return Ok("OK do_trade not enough cash");
+    }
     let now :i64 = Instant::now().seconds();
 
     info!("trading {} {} dollars:{} {:.2}  balance:{:.2} basis:{:.2}", ticker, is_buy, is_dollars, amt, bank_balance, basis);
@@ -681,7 +674,7 @@ async fn do_trade (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.2}, {:.2})", cmd.from, ticker, amt, basis);
     info!("Trade add position result {:?}", get_sql(&sql));
 
-    let sql = format!("UPDATE accounts set amount={:.2} where id={}", bank_balance - basis, cmd.from);
+    let sql = format!("UPDATE accounts set amount={:.2} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
     Ok("OK do_trade")
