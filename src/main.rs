@@ -59,7 +59,7 @@ fn update_ticker_p (time :i64, now :i64) -> bool {
 
     return
         if market_open  &&  time < bell_close {
-            bell_open <= now  &&  (time+60 < now  ||  bell_close <= now)
+            bell_open <= now  &&  (time+(5*60) < now  ||  bell_close <= now) // Five minute delay/throttle
         } else {
             update_ticker_p(next_trading_day(day), now)
         }
@@ -87,12 +87,12 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( builder.build() )
-                    .timeout(Duration::new(10,0))
+                    .timeout(Duration::new(30,0))
                     .finish() )
         .finish()
         .get( db.url_bot.clone() + "/sendmessage")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(10,0))
+        .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", &text],
                  ["disable_notification", "true"]]).unwrap()
@@ -135,12 +135,12 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
         Client::builder()
         .connector( Connector::new()
                     .ssl( builder.build() )
-                    .timeout(Duration::new(10,0))
+                    .timeout(Duration::new(30,0))
                     .finish() )
         .finish() // -> Client
         .get( db.url_bot.clone() + "/sendmessage")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(10,0))
+        .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["text", &text],
                  ["parse_mode", "MarkdownV2"],
@@ -166,12 +166,12 @@ async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, Strin
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( Duration::new(10,0) )
+                    .timeout( Duration::new(30,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://finance.yahoo.com/quote/".to_string() + ticker + "/")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(10,0))
+        .timeout(Duration::new(30,0))
         .send()
         .await?
         .body().limit(1_000_000).await;
@@ -256,12 +256,12 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( Duration::new(10,0) )
+                    .timeout( Duration::new(30,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://www.onelook.com/")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(10,0))
+        .timeout(Duration::new(30,0))
         .query(&[["q",word]])?
         .send()
         .await?
@@ -300,15 +300,15 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
 
 fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"[^A-Za-z^.-]").unwrap();
+    let re = Regex::new(r"^[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
             let mut idx = 42;
             if w[0]!=""  &&  w[1]=="" { idx = 0; } // "$" is to the right of ticker symbol
             if w[0]==""  &&  w[1]!="" { idx = 1; } // "$" is to the left of ticker symbol
-            if 42!=idx && re.captures(w[idx]).is_none() { // ticker characters only
-               tickers.insert(w[idx].to_string());
+            if 42!=idx && re.find(w[idx]).is_some() { // ticker characters only
+               tickers.insert(w[idx].to_string().to_uppercase());
             }
         }
     }
@@ -317,52 +317,73 @@ fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
 
-    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_ticker SKIP no tickers")?;
+    let sql = format!("SELECT * FROM stonks WHERE ticker='{}'", ticker);
+    let res = get_sql(&sql).unwrap();
+    let nowsecs :i64 = Instant::now().seconds();
+    let mut is_in_table = false;
+
+    if !res.is_empty() { // Stonks table contains this ticker
+        let hm = &res[0];
+        let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
+        let time = LocalDateTime::from_instant(Instant::at(timesecs));
+        let should_update = update_ticker_p(timesecs, nowsecs);
+        info!("{}@{} {} {:?} {} {}",
+            hm.get("ticker").unwrap(),
+            hm.get("price").unwrap(),
+            timesecs, time, should_update,
+            hm.get("pretty").unwrap());
+        if !should_update {
+            return Ok(hm.clone());
+                //send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await?;
+                //continue;
+        }
+        is_in_table = true;
+    }
+
+    // Either not in table or need to update table
+
+    if let Some(price) = get_ticker_quote(&ticker).await? {
+        let pretty = format!("{}{}@{}", price.0, ticker, price.1);
+        //send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
+        let sql = if is_in_table {
+            format!("UPDATE stonks SET price={}, time={}, pretty='{}' WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
+        } else {
+            format!("INSERT INTO stonks VALUES ('{}', {}, {}, '{}')", ticker, price.2, nowsecs, pretty)
+        };
+        info!("Stonks update row results {:?}", get_sql(&sql));
+        let mut hm :HashMap::<String, String> = HashMap::new();
+        hm.insert("ticker".into(), ticker.to_string());
+        hm.insert("price".into(),  price.2);
+        hm.insert("time".into(),   nowsecs.to_string());
+        hm.insert("pretty".into(), pretty);
+        hm.insert("updated".into(), "".into());
+        return Ok(hm);
+    }
+
+    Err(Serror::Err("ticker not found"))
+}
+
+async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers_stonks SKIP no tickers")?;
 
     for ticker in &tickers {
-        let ticker = ticker.to_uppercase();
         if ticker == "STONKS" {
-            continue
+            continue;
         }
-        let sql = format!("SELECT * FROM stonk WHERE ticker='{}'", ticker);
-        warn!("sql = {}", &sql);
-        let res = get_sql(&sql).unwrap();
-        let nowsecs :i64 = Instant::now().seconds();
-        let mut is_cached = false;
-        if !res.is_empty() {
-            let hm = &res[0];
-            let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
-            let time = LocalDateTime::from_instant(Instant::at(timesecs));
-            let should_update = update_ticker_p(timesecs, nowsecs);
-            info!("{}@{} {} {:?} {} {}",
-                hm.get("ticker").unwrap(),
-                hm.get("price").unwrap(),
-                timesecs, time, should_update,
-                hm.get("pretty").unwrap());
-            if !should_update {
-                 send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await?;
-                 continue;
-            }
-            is_cached = true;
-        }
-
-        // Update
-        if let Some(price) = get_ticker_quote(&ticker).await? {
-            let pretty = format!("{}{}@{}", price.0, ticker, price.1);
-            send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
-            let sql = if is_cached {
-                format!("UPDATE stonk SET price={}, time={}, pretty='{}' WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
-            } else {
-                format!("INSERT INTO stonk VALUES ('{}', {}, {}, '{}')", ticker, price.2, nowsecs, pretty)
-            };
-            warn!("sql = {}", &sql);
-            info!("Stonks update row results {:?}", get_sql(&sql));
+        let stonk = get_stonk(ticker).await?;
+        if stonk.contains_key("updated") {
+            send_msg(db, cmd.at, &format!("{}·", stonk.get("pretty").unwrap())).await?;
+        } else {
+            send_msg(db, cmd.at, &stonk.get("pretty").unwrap()).await?;
         }
     }
 
-    Ok("Ok do_ticker")
+    if tickers.contains("STONKS") { info!("{:?}", crate::do_stonks(db, cmd).await); }
+
+    Ok("Ok do_tickers_stonks")
 }
 
 async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
@@ -370,12 +391,12 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
-                    .timeout( Duration::new(10,0) )
+                    .timeout( Duration::new(30,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://onelook.com/")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(10,0))
+        .timeout(Duration::new(30,0))
         .query(&[["clue", word]]).unwrap()
         .send()
         .await.unwrap()
@@ -566,25 +587,27 @@ fn maybe_decimal(f :f64) -> String {
     s.trim_end_matches(&".00").to_string()
 }
 
-async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-
-    if Regex::new(r"^stonks\$$").unwrap().find(&cmd.msg).is_none() {
-        return Ok("do_stonks SKIP");
-    }
-
-    let sql = format!("SELECT * FROM bank WHERE id={}", cmd.from);
+fn get_bank_balance (id :i64) -> Result<f64, Serror> {
+    let sql = format!("SELECT * FROM accounts WHERE id={}", id);
     let res = get_sql(&sql)?;
-    warn!("=> {:?}", res);
-
-    let bank_balance =
+    info!("=> {:?}", res);
+    Ok(
         if res.is_empty() {
-            info!("{:?}", get_sql(&format!("INSERT INTO bank VALUES ({}, {})", cmd.from, 1000.0))?);
+            info!("{:?}", get_sql(&format!("INSERT INTO accounts VALUES ({}, {})", id, 1000.0))?);
             1000.0
         } else {
-            res[0].get("amount".into()).ok_or("amount missing from bank table")?.parse::<f64>().unwrap()
-        };
+            res[0].get("amount".into()).ok_or("amount missing from accounts table")?.parse::<f64>().or(Err("can't parse amount field from accounts table"))?
+        }
+    )
+}
 
-    let sql = format!("SELECT ticker, price, pretty FROM stonk");
+async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    /* if Regex::new(r"^stonks\$$").unwrap().find(&cmd.msg).is_none() { return Ok("do_stonks SKIP"); }*/
+
+    let bank_balance = get_bank_balance(cmd.from)?;
+
+    let sql = format!("SELECT ticker, price, pretty FROM stonks");
     let stonks = get_sql(&sql)?;
     warn!("=> {:?}", stonks);
     let stonks =
@@ -595,7 +618,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         .collect::<HashMap<String, (String, String)>>();
     warn!("=> {:?}", stonks);
 
-    let sql = format!("SELECT * FROM orders WHERE entity={}", cmd.from);
+    let sql = format!("SELECT * FROM orders WHERE id={}", cmd.from);
     let res = get_sql(&sql)?;
     warn!("=> {:?}", res);
 
@@ -627,6 +650,41 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("OK do_stonks")
 }
 
+async fn do_trade (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let cap = Regex::new(r"^([A-Za-z^.-]+)([+-])(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_syn SKIP"); }
+    let trade = &cap.unwrap();
+
+    let ticker = trade[1].to_uppercase();
+    let is_buy = &trade[2] == "+";
+    let is_dollars = !trade[3].is_empty();
+    let mut amt = trade[4].parse::<f64>().unwrap();
+
+    let bank_balance = get_bank_balance(cmd.from)?;
+    let stonk = get_stonk(&ticker).await?;
+    let price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
+
+    // Convert to shares if amount in dollars.
+    if is_dollars { amt = amt / price; } 
+
+    let basis = amt * price;
+    let now :i64 = Instant::now().seconds();
+
+    info!("trading {} {} dollars:{} {:.2}  balance:{:.2} basis:{:.2}", ticker, is_buy, is_dollars, amt, bank_balance, basis);
+
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.2}, {:.2}, {} )", cmd.from, ticker, amt, price, now);
+    info!("Trade add order result {:?}", get_sql(&sql));
+
+    let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.2}, {:.2})", cmd.from, ticker, amt, basis);
+    info!("Trade add position result {:?}", get_sql(&sql));
+
+    let sql = format!("UPDATE accounts set amount={:.2} where id={}", bank_balance - basis, cmd.from);
+    info!("Update bank balance result {:?}", get_sql(&sql));
+
+    Ok("OK do_trade")
+}
+
 fn snarf (
     snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
@@ -642,7 +700,7 @@ fn snarf (
 }
 
 fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
-    info!("get_sql <= {}", cmd);
+    info!("\x1b[36mSQLite <= {}\x1b[0m", cmd);
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
     let (snd, rcv) = channel::<HashMap<String, String>>();
     sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
@@ -691,11 +749,11 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     warn!("\x1b[33m{:?}", &cmd);
     info!("{:?}", do_like(&db, &cmd).await);
     info!("{:?}", do_like_info(&db, &cmd).await);
-    info!("{:?}", do_ticker(&db, &cmd).await);
+    info!("{:?}", do_tickers_stonks(&db, &cmd).await);
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
-    info!("{:?}", do_stonks(&db, &cmd).await);
+    info!("{:?}", do_trade(&db, &cmd).await);
     Ok(())
 }
 
@@ -725,13 +783,13 @@ fn do_schema() -> Result<(), Serror> {
     let sql = ::sqlite::open("tmbot.sqlite")?;
 
     sql.execute("
-        CREATE TABLE entity (
+        CREATE TABLE entitys (
             id INTEGER  NOT NULL UNIQUE,
             name  TEXT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     sql.execute("
-        CREATE TABLE bank (
+        CREATE TABLE accounts (
             id    INTEGER  NOT NULL UNIQUE,
             amount  FLOAT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
@@ -748,29 +806,36 @@ fn do_schema() -> Result<(), Serror> {
     */
 
     sql.execute("
-        --DROP TABLE stonk;
-        CREATE TABLE stonk (
+        --DROP TABLE stonks;
+        CREATE TABLE stonks (
             ticker  TEXT  NOT NULL UNIQUE,
             price  FLOAT  NOT NULL,
             time INTEGER  NOT NULL,
             pretty  TEXT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO stonk VALUES ( 'TWNK', 14.97, 1613630678, '14.97')").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO stonk VALUES ( 'GOOG', 2128.31, 1613630678, '2,128.31')").map_or_else(gwarn, ginfo);
-    //sql.execute("UPDATE stonk SET time=1613630678 WHERE ticker='TWNK'").map_or_else(gwarn, ginfo);
-    //sql.execute("UPDATE stonk SET time=1613630678 WHERE ticker='GOOG'").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO stonks VALUES ( 'TWNK', 14.97, 1613630678, '14.97')").map_or_else(gwarn, ginfo);
+    //sql.execute("INSERT INTO stonks VALUES ( 'GOOG', 2128.31, 1613630678, '2,128.31')").map_or_else(gwarn, ginfo);
+    //sql.execute("UPDATE stonks SET time=1613630678 WHERE ticker='TWNK'").map_or_else(gwarn, ginfo);
+    //sql.execute("UPDATE stonks SET time=1613630678 WHERE ticker='GOOG'").map_or_else(gwarn, ginfo);
 
     sql.execute("
         --DROP TABLE orders;
         CREATE TABLE orders (
-            entity INTEGER  NOT NULL,
-            ticker    TEXT  NOT NULL,
-            amount   FLOAT  NOT NULL,
-            cost     FLOAT  NOT NULL,
-            time   INTEGER  NOT NULL);
+            id   INTEGER  NOT NULL,
+            ticker  TEXT  NOT NULL,
+            amount FLOAT  NOT NULL,
+            cost   FLOAT  NOT NULL,
+            time INTEGER  NOT NULL);
     ").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO orders VALUES ( 241726795, 'TWNK', 500, 14.95, 1613544000 )").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO orders VALUES ( 241726795, 'GOOG', 0.25, 2121.90, 1613544278 )").map_or_else(gwarn, ginfo);
+    sql.execute("
+        CREATE TABLE positions (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            amount FLOAT NOT NULL,
+            basis  FLOAT NOT NULL);
+    ").map_or_else(gwarn, ginfo);
 
     Ok(())
 }
