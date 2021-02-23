@@ -794,7 +794,6 @@ fn do_schema() -> Result<(), Serror> {
             amount  FLOAT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
-    /*
     for l in read_to_string("tmbot/users.txt").unwrap().lines() {
         let mut v = l.split(" ");
         let id = v.next().ok_or("User DB malformed.")?;
@@ -803,7 +802,6 @@ fn do_schema() -> Result<(), Serror> {
             format!("INSERT INTO entity VALUES ( {}, '{}' )", id, name)
         ).map_or_else(gwarn, ginfo);
     }
-    */
 
     sql.execute("
         --DROP TABLE stonks;
