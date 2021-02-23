@@ -799,7 +799,7 @@ fn do_schema() -> Result<(), Serror> {
         let id = v.next().ok_or("User DB malformed.")?;
         let name = v.next().ok_or("User DB malformed.")?.to_string();
         sql.execute(
-            format!("INSERT INTO entity VALUES ( {}, '{}' )", id, name)
+            format!("INSERT INTO entitys VALUES ( {}, '{}' )", id, name)
         ).map_or_else(gwarn, ginfo);
     }
 
