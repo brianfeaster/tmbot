@@ -11,7 +11,7 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use ::actix_web::client::{Client, Connector};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
-use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*};
+use ::datetime::{ISO, Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*};
 
 use ::tmbot::*;
 
@@ -123,7 +123,6 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
     .replacen("}", "\\}", 10000)
     .replacen("-", "\\-", 10000)
     .replacen("+", "\\+", 10000)
-    .replacen("`", "\\`", 10000)
     .replacen("=", "\\=", 10000)
     .replacen("'", "\\'", 10000);
 
@@ -324,6 +323,9 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     for ticker in &tickers {
         let ticker = ticker.to_uppercase();
+        if ticker == "STONKS" {
+            continue
+        }
         let sql = format!("SELECT * FROM stonk WHERE ticker='{}'", ticker);
         warn!("sql = {}", &sql);
         let res = get_sql(&sql).unwrap();
@@ -559,6 +561,72 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_sql")
 }
 
+fn maybe_decimal(f :f64) -> String {
+    let s = format!("{:.2}", f);
+    s.trim_end_matches(&".00").to_string()
+}
+
+async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    if Regex::new(r"^stonks\$$").unwrap().find(&cmd.msg).is_none() {
+        return Ok("do_stonks SKIP");
+    }
+
+    let sql = format!("SELECT * FROM bank WHERE id={}", cmd.from);
+    let res = get_sql(&sql)?;
+    warn!("=> {:?}", res);
+
+    let bank_balance =
+        if res.is_empty() {
+            info!("{:?}", get_sql(&format!("INSERT INTO bank VALUES ({}, {})", cmd.from, 1000.0))?);
+            1000.0
+        } else {
+            res[0].get("amount".into()).ok_or("amount missing from bank table")?.parse::<f64>().unwrap()
+        };
+
+    let sql = format!("SELECT ticker, price, pretty FROM stonk");
+    let stonks = get_sql(&sql)?;
+    warn!("=> {:?}", stonks);
+    let stonks =
+        stonks.iter()
+        .map( |h| (h.get("ticker").unwrap().to_string(),
+                    (h.get("price").unwrap().to_string(),
+                     h.get("pretty").unwrap().to_string() ) ) )
+        .collect::<HashMap<String, (String, String)>>();
+    warn!("=> {:?}", stonks);
+
+    let sql = format!("SELECT * FROM orders WHERE entity={}", cmd.from);
+    let res = get_sql(&sql)?;
+    warn!("=> {:?}", res);
+
+    let mut msg = String::new();
+    let mut total = bank_balance;
+
+    for order in res {
+        let ticker = order.get("ticker").unwrap();
+        let cost = order.get("cost").unwrap().parse::<f64>().unwrap();
+        let amount = order.get("amount").unwrap().parse::<f64>().unwrap();
+        let price = stonks.get(order.get("ticker").unwrap()).unwrap().0.parse::<f64>().unwrap();
+        let buydate = LocalDateTime::from_instant(Instant::at(order.get("time").unwrap().parse::<i64>().unwrap()));
+        let basis = amount * cost;
+        let value = amount * price;
+        let gain = amount*(price-cost);
+        total += value;
+
+        msg.push_str(
+            &format!("\n`{:5}{:9.2}` *{:+.2}* {:.2} {}@{:.2} {}Z",
+                ticker, value, gain,
+                basis, maybe_decimal(amount), cost,
+                buydate.date().iso() ) );
+    }
+    msg.push_str(&format!("\n`Cash {:9.2}`", bank_balance));
+    msg.push_str(&format!("\n`Total{:.>9.2}`", total));
+
+    send_msg_markdown(db, cmd.at, &msg).await?;
+
+    Ok("OK do_stonks")
+}
+
 fn snarf (
     snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
@@ -574,6 +642,7 @@ fn snarf (
 }
 
 fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
+    info!("get_sql <= {}", cmd);
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
     let (snd, rcv) = channel::<HashMap<String, String>>();
     sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
@@ -626,7 +695,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
-    //info!("{:?}", do_stonks(&db, &cmd).await);
+    info!("{:?}", do_stonks(&db, &cmd).await);
     Ok(())
 }
 
