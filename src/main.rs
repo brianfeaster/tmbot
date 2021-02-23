@@ -607,6 +607,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
+    /*
     let sql = format!("SELECT ticker, price, pretty FROM stonks");
     let stonks = get_sql(&sql)?;
     warn!("=> {:?}", stonks);
@@ -617,6 +618,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
                      h.get("pretty").unwrap().to_string() ) ) )
         .collect::<HashMap<String, (String, String)>>();
     warn!("=> {:?}", stonks);
+    */
 
     let sql = format!("SELECT * FROM orders WHERE id={}", cmd.from);
     let res = get_sql(&sql)?;
@@ -629,7 +631,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let ticker = order.get("ticker").unwrap();
         let cost = order.get("cost").unwrap().parse::<f64>().unwrap();
         let amount = order.get("amount").unwrap().parse::<f64>().unwrap();
-        let price = stonks.get(order.get("ticker").unwrap()).unwrap().0.parse::<f64>().unwrap();
+        let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
         let buydate = LocalDateTime::from_instant(Instant::at(order.get("time").unwrap().parse::<i64>().unwrap()));
         let basis = amount * cost;
         let value = amount * price;
