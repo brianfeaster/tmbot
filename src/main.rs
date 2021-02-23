@@ -11,7 +11,7 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use ::actix_web::client::{Client, Connector};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
-use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday, Month};
+use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*};
 
 use ::tmbot::*;
 
@@ -22,109 +22,47 @@ use ::tmbot::*;
 /// ? trading time is pegged to max("closing bell", "after opening bell")
 /// ? cache ticker values:  Update only if cached time is before trading time
 
-/// For now simple M-F check.  TODO: check for holidays, half days
-fn trading_day_p (date :LocalDate) -> bool {
-    match date.weekday() {
-        Weekday::Saturday|Weekday::Sunday => false,
-        _ => true
-    }
+// Return time (seconds midnight UTC) for the next trading day
+fn next_trading_day (day :LocalDate) -> i64 {
+    let skip_days =
+        match day.weekday() {
+            Friday => 3,
+            Saturday => 2,
+            _ => 1
+        };
+    LocalDateTime::new(day, LocalTime::midnight())
+        .add_seconds( skip_days * 24 * 60 * 60 )
+        .to_instant()
+        .seconds()
 }
 
-fn trading_time_next (date :LocalDate) -> i64 {
-}
+/// Decide if a ticker's price should be refreshed given its last lookup time.
+fn update_ticker_p (time :i64, now :i64) -> bool {
+    let day =
+        LocalDateTime::from_instant(Instant::at(time))
+        .date();
 
-fn days_diff (a :LocalDate, b: LocalDate) -> i64 {
-    (LocalDateTime::new(b, LocalTime::midnight()).to_instant().seconds()
-     -
-     LocalDateTime::new(a, LocalTime::midnight()).to_instant().seconds()
-    ) / 86400
-}
+    let market_open =
+        match day.weekday() {
+            Saturday | Sunday => false,
+            _ => true
+        };
 
+    // TODO: Check if time is DST and adjust hours below by -1
+    let bell_open =
+        LocalDateTime::new(day, LocalTime::hms(14, 30, 0).unwrap())
+        .to_instant().seconds();
 
-/// Decide if a ticker should be updated given its last update time.
-///
-fn update_ticker_p (cached :i64, now :i64) -> bool {
-    // Consider cached now times as dates (floored to midnight UTC)
-    let cachedday = LocalDateTime::from_instant(Instant::at(cached)).date();
-    let cached_is_tradingday = trading_day_p(cachedday);
-    let cacheopen = LocalDateTime::new(cachedday, LocalTime::hms(14, 30, 0).unwrap()).to_instant().seconds();
-    let cacheclose = LocalDateTime::new(cachedday, LocalTime::hms(21, 0, 0).unwrap()).to_instant().seconds();
+    let bell_close =
+        LocalDateTime::new(day, LocalTime::hms(21, 0, 0).unwrap())
+        .to_instant().seconds();
 
-    let nowday = LocalDateTime::from_instant(Instant::at(now)).date();
-    let now_is_tradingday = trading_day_p(nowday);
-    let nowopen = LocalDateTime::new(nowday, LocalTime::hms(14, 30, 0).unwrap()).to_instant().seconds();
-    let nowclose = LocalDateTime::new(nowday, LocalTime::hms(21, 0, 0).unwrap()).to_instant().seconds();
-
-    let days_diff = days_diff(cachedday, nowday);
-    // Guaranteed two days difference will include a weekday
-
-    //                               cached on a weekend          now another weekend
-    // |_________*********______|____________C___________| ... |____________N___________|________**********______|
-    //     c1       c1      c3             c3                          c3                   c2      c2       c2
-    // c1 cached on incomplete trading day
-
-    // * now will always be equal or past cache
-    // * If now is past nowOpen,
-
-    // Clear your mind II !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    if "cached.isTradingDay()" && "cached.beforeClosing()" {
-        if "not-throttled" || "cached.closing <= now "{  Yahoo!() }
-    } else { // cached on nontrading-day || cached after closing
-        goal = cached.next_open_day_time()
-        if "goal.afterOpenHour() <= now" {
-            if "not-throttled" || "goal.closing <= now "{  Yahoo!() }
+    return
+        if market_open  &&  time < bell_close {
+            bell_open <= now  &&  (time+60 < now  ||  bell_close <= now)
+        } else {
+            update_ticker_p(next_trading_day(day), now)
         }
-    }
-
-
-
-        if  "not throttled" || "now past cachedClosing" { // Doesn't matter when now is, as long as it's after cached closing
-            // Yahoo!
-        }
-    } else { // cached on non-trading day
-
-    }
-
-    // Clear your mind!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    if "cached on a trading day && cached before closing" {
-        if  "not throttled" || "now past cachedClosing" { // Doesn't matter when now is, as long as it's after cached closing
-            // Yahoo!
-        }
-    } else if "now on a trading day" {  // cached after closing || cached on a no-market day
-        // Yahoo!
-    } else {  // (cached after closing || cached on a no-market day) && "now not a trading day"
-        // If there has been a trading day between cached and now... (the secret sauce)
-    }
-
-    if 3 <= days_diff {
-        return true;
-
-    } else if 0 == days_diff { // Only one day is an option
-
-        // Do we need to catch-up to same-day market hours?  Might cache on any future day.
-        if cached_is_tradingday                        && gwarn("update_ticker_p A Is a trading day...")
-            && cached < cacheclose                     && gwarn("update_ticker_p A cached before closing...")
-            && cacheopen <= now                        && gwarn("update_ticker_p A now after cached open...")
-            && (cacheclose <= now || cached+60 <= now) && gwarn("update_ticker_p A not throttled...")
-        {
-            gwarn("update_ticker_p A -> \x1b[32mTRUE\x1b[0m");
-            return true;
-        }
-    } 1 == days_diff { // two possible days four combinations [[ __  _*  **  *_ ]]
-        if !cached_is_trading_day && !now_is_trading_day { return false; }
-    }
-
-    if cached_is_tradingday && cached < cachedclose {
-        // maybe cachedday?
-
-    } else { // cached is on a weekend
-    }
-
-    if cached <= nowclose && nowopen <= now && (nowclose <= now || cached+60 <= now) {
-        warn!("update_ticker_p -> YES ticker needs to ");
-        return true
-    }
-    false
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -139,11 +77,11 @@ type MDB = Mutex<DB>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn send_msg (db :&DB, chat_id :i64, text: &str) {
+async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
     info!("\x1b[33m<- {}", text);
-    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
-    builder.set_certificate_chain_file("cert.pem").unwrap();
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
+    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("cert.pem")?;
 
     match
         Client::builder()
@@ -166,9 +104,10 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) {
             ginfod("\x1b[1;32m->", result.body().await);
         }
     }
+    Ok(())
 }
 
-async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
+async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
     let text = text // Poor person's uni/url decode
     .replacen("%20", " ", 10000)
     .replacen("%28", "(", 10000)
@@ -189,9 +128,9 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
     .replacen("'", "\\'", 10000);
 
     info!("\x1b[33m<- {}", text);
-    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM).unwrap();
-    builder.set_certificate_chain_file("cert.pem").unwrap();
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
+    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("cert.pem")?;
 
     let response =
         Client::builder()
@@ -217,15 +156,17 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) {
             ginfod("\x1b[1;32m->", r.body().await);
         }
     }
+    Ok(())
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
+async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, String)>, Serror> {
+    info!("get_ticker_quote {}", ticker);
     let body =
         Client::builder()
         .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
                     .timeout( Duration::new(10,0) )
                     .finish() )
         .finish() // -> Client
@@ -233,24 +174,25 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
         .send()
-        .await.unwrap()
+        .await?
         .body().limit(1_000_000).await;
 
     if body.is_err() {
-         error!(r#"http body {:?} for {:?}"#, body, ticker);
-         return None;
+         error!(r#"get_ticker_quote http body {:?} for {:?}"#, body, ticker);
+         return Ok(None);
     }
-
     let body = body.unwrap();
+
     let domstr = from_utf8(&body);
     if domstr.is_err() {
-         error!(r#"http body2str {:?} for {:?}"#, domstr, ticker);
-         return None;
+         error!(r#"get_ticker_quote http body2str {:?} for {:?}"#, domstr, ticker);
+         return Ok(None);
     }
+    let domstr = domstr.unwrap();
 
     let re = Regex::new(r#"<title>([^(<]+)"#).unwrap();
     let title =
-        match re.captures(domstr.unwrap()) {
+        match re.captures(domstr) {
             Some(cap) =>
                 if 2==cap.len() {
                     cap[1].trim()
@@ -264,7 +206,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
     let caps = re
-        .captures_iter(domstr.unwrap())
+        .captures_iter(domstr)
         .map( |cap| cap[1].to_string() )
         .collect::<Vec<String>>();
 
@@ -272,7 +214,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
 
     if caps.len() < 4 {
          error!(r#"http dom regex matched too few prices"#);
-         return None;
+         return Ok(None);
     }
 
     let price = caps[3].to_string();
@@ -280,7 +222,7 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
 
     let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap();
     let caps_percentages = re
-        .captures_iter(domstr.unwrap())
+        .captures_iter(domstr)
         .map( |cap| {
             let amt = &cap[1];
             let per = &cap[2];
@@ -299,14 +241,14 @@ async fn get_ticker_quote (ticker: &str) -> Option<(String, String, String)> {
     info!(r#"http dom percentages {:?} {:?}"#, ticker, caps_percentages);
 
     if caps_percentages.is_empty() {
-        return Some( ( "".to_string(),
+        return Ok(Some( ( "".to_string(),
                        price + &title,
-                       price_bare ) );
+                       price_bare ) ) );
     } else {
         let percentage = &caps_percentages[0];
-        return Some( ( percentage.0.to_string(),
+        return Ok(Some( ( percentage.0.to_string(),
                        price + " " + &percentage.1 + " " + &title,
-                       price_bare ) );
+                       price_bare ) ) );
     }
 }
 
@@ -314,35 +256,33 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
     let body =
         Client::builder()
         .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
                     .timeout( Duration::new(10,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://www.onelook.com/")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(10,0))
-        .query(&[["q", word]])?
+        .query(&[["q",word]])?
         .send()
         .await?
-        .body().limit(1_000_000).await;
+        .body().limit(1_000_000).await
+        .or_else( |e| {
+            error!(r#"get_definition http body {:?} for {:?}"#, e, word);
+            Err(e)
+        } )?;
 
-    if body.is_err() {
-         error!(r#"http body {:?} for {:?}"#, body, word);
-         Err("get_definition http error")?;
-    }
-
-    let body = body.unwrap();
-    let domstr = from_utf8(&body);
-    if domstr.is_err() {
-         error!(r#"http body2str {:?} for {:?}"#, domstr, word);
-         Err("get_body2str error")?;
-    }
+    let domstr = from_utf8(&body)
+        .or_else( |e| {
+            error!(r#"get_definition http body2str {:?} for {:?}"#, e, word);
+            Err(e)
+        } )?;
 
     // The optional US definitions
 
     let usdef =
         Regex::new(r"var mm_US_def = '[^']+").unwrap()
-        .find(&domstr.unwrap())
+        .find(&domstr)
         .map_or("", |r| r.as_str() );
 
     let mut lst = Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
@@ -353,7 +293,7 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
     // WordNet definitions
 
     Regex::new(r#"easel_def_+[0-9]+">([^<]+)"#).unwrap()
-        .captures_iter(&domstr.unwrap())
+        .captures_iter(&domstr)
         .for_each( |cap| lst.push( cap[1].to_string() ) );
 
     Ok(lst)
@@ -400,16 +340,16 @@ async fn do_ticker (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
                 timesecs, time, should_update,
                 hm.get("pretty").unwrap());
             if !should_update {
-                 send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await;
+                 send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await?;
                  continue;
             }
             is_cached = true;
         }
 
         // Update
-        if let Some(price) = get_ticker_quote(&ticker).await {
+        if let Some(price) = get_ticker_quote(&ticker).await? {
             let pretty = format!("{}{}@{}", price.0, ticker, price.1);
-            send_msg(db, cmd.at, &(pretty.to_string() + "·")).await;
+            send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
             let sql = if is_cached {
                 format!("UPDATE stonk SET price={}, time={}, pretty='{}' WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
             } else {
@@ -440,14 +380,14 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
         .body().limit(1_000_000).await;
 
     if body.is_err() {
-         error!(r#"http body {:?} for {:?}"#, body, word);
+         error!(r#"get_syns http body {:?} for {:?}"#, body, word);
          Err("get_syns http error")?;
     }
 
     let body = body.unwrap();
     let domstr = from_utf8(&body);
     if domstr.is_err() {
-         error!(r#"http body2str {:?} for {:?}"#, domstr, word);
+         error!(r#"get_syns http body2str {:?} for {:?}"#, domstr, word);
          Err("get_body2str error")?;
     }
 
@@ -474,14 +414,14 @@ async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let mut defs = get_syns(word).await?;
 
     if 0 == defs.len() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* synonyms is empty", word)).await;
+        send_msg_markdown(db, cmd.from, &format!("*{}* synonyms is empty", word)).await?;
         return Ok("do_syn empty synonyms");
     }
 
     let mut msg = String::new() + "*\"" + word + "\"* ";
     defs.truncate(10);
     msg.push_str( &defs.join(", ") );
-    send_msg_markdown(db, cmd.at, &msg).await;
+    send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("Ok do_syn")
 }
@@ -495,7 +435,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let defs = get_definition(word).await?;
 
     if defs.is_empty() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* def is empty", word)).await;
+        send_msg_markdown(db, cmd.from, &format!("*{}* def is empty", word)).await?;
         return Ok("do_def def is empty");
     }
 
@@ -510,7 +450,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         }
     }
 
-    send_msg_markdown(db, cmd.at, &msg).await;
+    send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("Ok do_def")
 }
@@ -541,7 +481,7 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         text.push_str(&format!("{}{} ", nom, num2heart(likes)));
     }
     //info!("HEARTS -> msg tmbot {:?}", send_msg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    send_msg(db, cmd.at, &text).await;
+    send_msg(db, cmd.at, &text).await?;
     Ok("Ok do_like_info")
 }
 
@@ -582,7 +522,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
     let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
     let toname   = people.get(&cmd.to).unwrap_or(&sto);
     let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    send_msg(db, cmd.at, &text).await;
+    send_msg(db, cmd.at, &text).await?;
 
     Ok("Ok do_like".into())
 }
@@ -599,13 +539,13 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let result = get_sql(expr);
     if let Err(e) = result {
-        send_msg_markdown(db, cmd.from, &format!("{:?}", e)).await;
+        send_msg_markdown(db, cmd.from, &format!("{:?}", e)).await?;
         return Err(e);
     }
     let results = result.unwrap();
 
     if results.is_empty() {
-        send_msg(db, cmd.from, &format!("\"{}\" results is empty", expr)).await;
+        send_msg(db, cmd.from, &format!("\"{}\" results is empty", expr)).await?;
         return Ok("do_sql def is empty");
     }
 
@@ -613,7 +553,7 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let mut buff = String::new();
         res.iter().for_each( |(k,v)| buff.push_str(&format!("{}:{} ", k, v)) );
         let res = format!("{}\n", buff);
-        send_msg(db, cmd.at, &res).await;
+        send_msg(db, cmd.at, &res).await?;
     }
 
     Ok("Ok do_sql")

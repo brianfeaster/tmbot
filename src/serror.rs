@@ -11,6 +11,7 @@ pub enum Serror {
    Err(&'static str),
    SerUrlEnc(serde_urlencoded::ser::Error),
    SendRequestError(actix_web::client::SendRequestError),
+   PayloadError(actix_web::error::PayloadError),
    SqliteError(sqlite::Error),
    IoError(std::io::Error),
    SysTimeError(std::time::SystemTimeError),
@@ -45,6 +46,9 @@ impl From<serde_urlencoded::ser::Error> for Serror {
 }
 impl From<actix_web::client::SendRequestError> for Serror {
     fn from(e: actix_web::client::SendRequestError) -> Self { Serror::SendRequestError(e) }
+}
+impl From<actix_web::error::PayloadError> for Serror {
+    fn from(e: actix_web::error::PayloadError) -> Self { Serror::PayloadError(e) }
 }
 impl From<sqlite::Error> for Serror {
     fn from(e: sqlite::Error) -> Self { Serror::SqliteError(e) }
