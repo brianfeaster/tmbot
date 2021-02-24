@@ -11,7 +11,7 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use ::actix_web::client::{Client, Connector};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
-use ::datetime::{ISO, Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*};
+use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*}; // ISO
 
 use ::tmbot::*;
 
@@ -582,11 +582,6 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_sql")
 }
 
-fn maybe_decimal(f :f64) -> String {
-    let s = format!("{:.2}", f);
-    s.trim_end_matches(&".00").to_string()
-}
-
 fn get_bank_balance (id :i64) -> Result<f64, Serror> {
     let sql = format!("SELECT * FROM accounts WHERE id={}", id);
     let res = get_sql(&sql)?;
@@ -607,37 +602,51 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
-    let sql = format!("SELECT * FROM orders WHERE id={}", cmd.from);
-    let res = get_sql(&sql)?;
-    warn!("=> {:?}", res);
+    let sql = format!("SELECT * FROM positions WHERE id={}", cmd.from);
+    let positions = get_sql(&sql)?;
+    warn!("=> {:?}", positions);
 
     let mut msg = String::new();
-    let mut total = bank_balance;
+    let mut total = 0.0;
+    let mut total_gain = 0.0;
 
-    for order in res {
-        let ticker = order.get("ticker").unwrap();
-        let cost = order.get("cost").unwrap().parse::<f64>().unwrap();
-        let amount = order.get("amount").unwrap().parse::<f64>().unwrap();
+    for pos in positions {
+        let ticker = pos.get("ticker").unwrap();
+        let amount = pos.get("amount").unwrap().parse::<f64>().unwrap();
+        let basis = pos.get("basis").unwrap().parse::<f64>().unwrap();
+
+        let cost = basis / amount;
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-        let buydate = LocalDateTime::from_instant(Instant::at(order.get("time").unwrap().parse::<i64>().unwrap()));
-        let basis = amount * cost;
         let value = amount * price;
-        let gain = amount*(price-cost);
-        total += value;
 
+        let gain = value-basis;
         msg.push_str(
-            &format!("\n`{:5}{:9.2}` *{:+.2}* {:.2} {}@{:.2} {}Z",
-                ticker, value, gain,
-                basis, maybe_decimal(amount), cost,
-                buydate.date().iso() ) );
+            &format!("\n`{:8}{:>8.2}{:>+8.2}` *{}*_@{:.2}_",
+                ticker,  value, gain,
+                amount, cost
+             ) );
+
+        total += value;
+        total_gain += gain;
     }
-    msg.push_str(&format!("\n`Cash {:9.2}`", bank_balance));
-    msg.push_str(&format!("\n`Total{:.>9.2}`", total));
+    msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
+    msg.push_str(&format!("\n`Cash{:.>12.2}`", bank_balance));
+    msg.push_str(&format!("\n`YOLO{:.>12.2}`", total+bank_balance));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("OK do_stonks")
 }
+
+/*
+fn maybe_decimal (f :f64) -> String {
+    let s = format!("{:.2}", f);
+    s.trim_end_matches(&"0")
+    .trim_end_matches(&"0")
+    .trim_end_matches(&".").to_string()
+}
+*/
+
 
 async fn do_trade (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
@@ -859,14 +868,13 @@ async fn main() -> Result<(), Serror> {
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    do_schema()?;
+    //do_schema()?;
 
     Ok(srv.await?)
 }
 /*
-    sql.execute("
-        DROP TABLE users;
-        CREATE TABLE users (name TEXT, age INTEGER);
-        INSERT INTO users VALUES ('Alice', 42);
-    ")?;
+DROP TABLE users
+CREATE TABLE users (name TEXT, age INTEGER)
+INSERT INTO users VALUES ('Alice', 42)
+DELETE FROM positions WHERE id=107258721 AND amount=0.1
 */
