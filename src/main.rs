@@ -370,7 +370,7 @@ async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> 
     let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers_stonks SKIP no tickers")?;
 
     for ticker in &tickers {
-        if ticker == "STONKS" {
+        if ticker == "STONKS" || ticker == "YOLO" {
             continue;
         }
         let stonk = get_stonk(ticker).await?;
@@ -608,7 +608,8 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let mut msg = String::new();
     let mut total = 0.0;
-    let mut total_gain = 0.0;
+    //let mut total_gain = 0.0;
+
 
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
@@ -617,21 +618,27 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
         let cost = basis / amount;
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+
         let value = amount * price;
 
         let gain = value-basis;
+        let gain_percent = (100.0*(price-cost)/cost).abs();
+        let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
+        let greenred = if basis <= value { from_utf8(b"\xF0\x9F\x9F\xA2")?} else { from_utf8(b"\xF0\x9F\x9F\xA5")? }; // green red block
+
         msg.push_str(
-            &format!("\n`{:8}{:>8.2}{:>+8.2}` *{}*_@{:.2}_",
-                ticker,  value, gain,
-                amount, cost
+            &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
+                value, ticker, greenred, 
+                format!("{:.2}", gain), format!("{}{:.2}%",  updown, gain_percent),
+                amount, cost,
              ) );
 
         total += value;
-        total_gain += gain;
+        //total_gain += gain;
     }
-    msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
-    msg.push_str(&format!("\n`Cash{:.>12.2}`", bank_balance));
-    msg.push_str(&format!("\n`YOLO{:.>12.2}`", total+bank_balance));
+    //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
+    msg.push_str(&format!("\n`{:7.2}``cash`", bank_balance));
+    msg.push_str(&format!("\n`{:7.2}``YOLO`", total + bank_balance));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
@@ -783,7 +790,7 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
-fn do_schema() -> Result<(), Serror> {
+fn _do_schema() -> Result<(), Serror> {
     let sql = ::sqlite::open("tmbot.sqlite")?;
 
     sql.execute("
