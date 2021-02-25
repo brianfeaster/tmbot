@@ -381,7 +381,9 @@ async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> 
         }
     }
 
-    if tickers.contains("STONKS") { info!("{:?}", crate::do_stonks(db, cmd).await); }
+    if tickers.contains("STONKS")
+    || tickers.contains("YOLO")
+    { info!("{:?}", crate::do_stonks(db, cmd).await); }
 
     Ok("Ok do_tickers_stonks")
 }
@@ -655,9 +657,37 @@ fn maybe_decimal (f :f64) -> String {
 */
 
 
-async fn do_trade (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+    let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_syn SKIP"); }
+    let trade = &cap.unwrap();
 
-    let cap = Regex::new(r"^([A-Za-z^.-]+)([+-])(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
+    let ticker = trade[1].to_uppercase();
+
+    let sql = format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
+    let positions = get_sql(&sql)?;
+    warn!("=> {:?}", positions);
+
+    if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
+
+    let amount = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
+    let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+
+    let new_bank_balance = get_bank_balance(cmd.from)? + amount*price;
+
+    let sql = format!("UPDATE accounts set amount={:.2} where id={}", new_bank_balance, cmd.from);
+    info!("Update bank balance result {:?}", get_sql(&sql));
+
+
+    let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
+    info!("Remove position result {:?}", get_sql(&sql));
+
+    Ok("OK do_trade_buy")
+}
+
+async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let cap = Regex::new(r"^([A-Za-z^.-]+)([+])(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_syn SKIP"); }
     let trade = &cap.unwrap();
 
@@ -678,7 +708,7 @@ async fn do_trade (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     if new_balance < 0.0 {
         send_msg(db, cmd.from, "You need more $$$ to YOLO like that.").await?;
-        return Ok("OK do_trade not enough cash");
+        return Ok("OK do_trade_buy not enough cash");
     }
     let now :i64 = Instant::now().seconds();
 
@@ -693,7 +723,7 @@ async fn do_trade (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("UPDATE accounts set amount={:.2} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
-    Ok("OK do_trade")
+    Ok("OK do_trade_buy")
 }
 
 fn snarf (
@@ -764,7 +794,8 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
-    info!("{:?}", do_trade(&db, &cmd).await);
+    info!("{:?}", do_trade_buy(&db, &cmd).await);
+    info!("{:?}", do_trade_sell(&db, &cmd).await);
     Ok(())
 }
 
@@ -884,4 +915,5 @@ DROP TABLE users
 CREATE TABLE users (name TEXT, age INTEGER)
 INSERT INTO users VALUES ('Alice', 42)
 DELETE FROM positions WHERE id=107258721 AND amount=0.1
+UPDATE z SET a=1, b=2 where c=3;
 */
