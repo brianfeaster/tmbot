@@ -657,7 +657,7 @@ fn maybe_decimal (f :f64) -> String {
 */
 
 
-async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_syn SKIP"); }
     let trade = &cap.unwrap();
@@ -688,13 +688,17 @@ async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
     info!("Remove position result {:?}", get_sql(&sql));
 
-    Ok("OK do_trade_buy")
+    // Send current portfolio
+    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("yolo$")};
+    info!("via do_trade_sell {:?}", do_tickers_stonks(db, &cmd2).await);
+
+    Ok("OK do_trade_sell")
 }
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_syn SKIP"); }
+    if cap.is_none() { return Ok("do_trade_buy SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
@@ -750,6 +754,10 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let sql = format!("UPDATE accounts set amount={} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
+
+    // Send current portfolio
+    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("yolo$")};
+    info!("via do_trade_buy {:?}", do_tickers_stonks(db, &cmd2).await);
 
     Ok("OK do_trade_buy")
 }
