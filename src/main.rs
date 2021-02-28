@@ -679,7 +679,7 @@ async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let now :i64 = Instant::now().seconds();
 
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, amount, price, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -amount, price, now);
     info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
     let sql = format!("UPDATE accounts SET amount={} WHERE id={}", new_bank_balance, cmd.from);
@@ -721,7 +721,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let now :i64 = Instant::now().seconds();
 
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, -amt, cost, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, amt, cost, now);
     info!("Trade add order result {:?}", get_sql(&sql));
 
      // Maybe add to existing position
