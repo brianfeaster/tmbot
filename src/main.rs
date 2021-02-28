@@ -626,7 +626,14 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let gain = value-basis;
         let gain_percent = (100.0*(price-cost)/cost).abs();
         let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
-        let greenred = if basis <= value { from_utf8(b"\xF0\x9F\x9F\xA2")?} else { from_utf8(b"\xF0\x9F\x9F\xA5")? }; // green red block
+        let greenred =
+            if basis < value {
+                from_utf8(b"\xF0\x9F\x9F\xA2")? // green circle
+            } else if basis == value {
+                from_utf8(b"\xF0\x9F\x94\xB7")? // blue diamond
+            } else {
+                from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
+            };
 
         msg.push_str(
             &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
