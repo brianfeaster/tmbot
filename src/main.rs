@@ -672,12 +672,18 @@ async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let amount = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
     let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    let value = (amount * price * 100.0).round() / 100.0;
 
-    let new_bank_balance = get_bank_balance(cmd.from)? + amount*price;
+    let bank_balance = get_bank_balance(cmd.from)?;
+    let new_bank_balance = bank_balance + value;
 
-    let sql = format!("UPDATE accounts set amount={} where id={}", new_bank_balance, cmd.from);
-    info!("Update bank balance result {:?}", get_sql(&sql));
+    let now :i64 = Instant::now().seconds();
 
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, amount, price, now);
+    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
+
+    let sql = format!("UPDATE accounts SET amount={} WHERE id={}", new_bank_balance, cmd.from);
+    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
     let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
     info!("Remove position result {:?}", get_sql(&sql));
@@ -693,32 +699,54 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let ticker = trade[1].to_uppercase();
     let is_dollars = !trade[2].is_empty();
-    let mut amt = trade[3].parse::<f64>().unwrap();
+    let amt_or_dollars = trade[3].parse::<f64>().unwrap();
 
     let bank_balance = get_bank_balance(cmd.from)?;
     let stonk = get_stonk(&ticker).await?;
-    let price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
+    let mut cost = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
 
     // Convert to shares if amount in dollars.
-    if is_dollars { amt = amt / price; } 
-    amt = ((amt * 10000.0) as i64) as f64 / 10000.0;
+    let mut amt = if is_dollars { amt_or_dollars / cost } else { amt_or_dollars };
+    amt = (amt * 10000.0).floor() / 10000.0;
 
-    let basis = amt * price;
+    let basis = (100.0 * amt * cost).round() / 100.0;
     let new_balance = bank_balance - basis;
 
     if new_balance < 0.0 {
         send_msg(db, cmd.from, "You need more $$$ to YOLO like that.").await?;
         return Ok("OK do_trade_buy not enough cash");
     }
+
+    info!("trading_buy {} amt_or_dollars:{}  shares:{} cost:{} basis:{}  bank_balance:{}=>{}", ticker, amt_or_dollars, amt, cost, basis, bank_balance, new_balance);
+
     let now :i64 = Instant::now().seconds();
 
-    info!("trading_buy {} dollars?:{} {:.2}  balance:{:.2} price:{:.2} basis:{:.2}", ticker, is_dollars, amt, bank_balance, price, basis);
-
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.4}, {} )", cmd.from, ticker, amt, price, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, -amt, cost, now);
     info!("Trade add order result {:?}", get_sql(&sql));
 
-    let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.4})", cmd.from, ticker, amt, price);
-    info!("Trade add position result {:?}", get_sql(&sql));
+     // Maybe add to existing position
+
+    let sql = format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
+    let positions = get_sql(&sql)?;
+    warn!("=> {:?}", positions);
+
+    match positions.len() {
+        0 => {
+            let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.8})", cmd.from, ticker, amt, cost);
+            info!("Trade add position result {:?}", get_sql(&sql));
+        },
+        1 => {
+            let amt_old = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
+            let cost_old = positions[0].get("cost").unwrap().parse::<f64>().unwrap();
+            cost = (amt*cost + amt_old*cost_old) / (amt+amt_old);
+            amt += amt_old;
+            info!("trading_buy adding to existing position:  new_amt:{}  new_cost:{}", amt, cost);
+            let sql = format!("UPDATE positions SET amount={:.4}, cost={:.8} WHERE id='{}' AND ticker='{}'", amt, cost, cmd.from, ticker);
+            info!("Trade update position result {:?}", get_sql(&sql));
+        },
+        _ => return Err(Serror::Message(format!("Ticker {} has {} positions, expect 0 or 1", ticker, positions.len())))
+    };
+
 
     let sql = format!("UPDATE accounts set amount={} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
@@ -821,7 +849,7 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
-fn _do_schema() -> Result<(), Serror> {
+fn do_schema() -> Result<(), Serror> {
     let sql = ::sqlite::open("tmbot.sqlite")?;
 
     sql.execute("
@@ -874,7 +902,7 @@ fn _do_schema() -> Result<(), Serror> {
             id   INTEGER NOT NULL,
             ticker  TEXT NOT NULL,
             amount FLOAT NOT NULL,
-            basis  FLOAT NOT NULL);
+            cost   FLOAT NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     Ok(())
@@ -906,7 +934,7 @@ async fn main() -> Result<(), Serror> {
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    //do_schema()?;
+    if !true { do_schema()?; }
 
     Ok(srv.await?)
 }
