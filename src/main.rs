@@ -616,9 +616,9 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
         let amount = pos.get("amount").unwrap().parse::<f64>().unwrap();
-        let basis = pos.get("basis").unwrap().parse::<f64>().unwrap();
+        let cost = pos.get("cost").unwrap().parse::<f64>().unwrap();
 
-        let cost = basis / amount;
+        let basis = amount * cost;
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
 
         let value = amount * price;
@@ -675,7 +675,7 @@ async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let new_bank_balance = get_bank_balance(cmd.from)? + amount*price;
 
-    let sql = format!("UPDATE accounts set amount={:.2} where id={}", new_bank_balance, cmd.from);
+    let sql = format!("UPDATE accounts set amount={} where id={}", new_bank_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
 
@@ -687,14 +687,13 @@ async fn do_trade_sell (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let cap = Regex::new(r"^([A-Za-z^.-]+)([+])(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_syn SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
-    let is_buy = &trade[2] == "+";
-    let is_dollars = !trade[3].is_empty();
-    let mut amt = trade[4].parse::<f64>().unwrap();
+    let is_dollars = !trade[2].is_empty();
+    let mut amt = trade[3].parse::<f64>().unwrap();
 
     let bank_balance = get_bank_balance(cmd.from)?;
     let stonk = get_stonk(&ticker).await?;
@@ -702,6 +701,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Convert to shares if amount in dollars.
     if is_dollars { amt = amt / price; } 
+    amt = ((amt * 10000.0) as i64) as f64 / 10000.0;
 
     let basis = amt * price;
     let new_balance = bank_balance - basis;
@@ -712,31 +712,31 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
     let now :i64 = Instant::now().seconds();
 
-    info!("trading {} {} dollars:{} {:.2}  balance:{:.2} basis:{:.2}", ticker, is_buy, is_dollars, amt, bank_balance, basis);
+    info!("trading_buy {} dollars?:{} {:.2}  balance:{:.2} price:{:.2} basis:{:.2}", ticker, is_dollars, amt, bank_balance, price, basis);
 
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.2}, {:.2}, {} )", cmd.from, ticker, amt, price, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.4}, {} )", cmd.from, ticker, amt, price, now);
     info!("Trade add order result {:?}", get_sql(&sql));
 
-    let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.2}, {:.2})", cmd.from, ticker, amt, basis);
+    let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.4})", cmd.from, ticker, amt, price);
     info!("Trade add position result {:?}", get_sql(&sql));
 
-    let sql = format!("UPDATE accounts set amount={:.2} where id={}", new_balance, cmd.from);
+    let sql = format!("UPDATE accounts set amount={} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
     Ok("OK do_trade_buy")
 }
 
-fn snarf (
+fn sql_results_handler (
     snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
 ) -> bool {
     let mut v = HashMap::new();
     for r in res {
-        trace!("snarf vec <- {:?}", r);
+        trace!("sql_results_handler vec <- {:?}", r);
         v.insert( r.0.to_string(), r.1.unwrap_or("NULL").to_string() );
     }
     let res = snd.send(v);
-    trace!("snarf snd <- {:?}", res);
+    trace!("sql_results_handler snd <- {:?}", res);
     true
 }
 
@@ -744,7 +744,7 @@ fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
     info!("\x1b[36mSQLite <= {}\x1b[0m", cmd);
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
     let (snd, rcv) = channel::<HashMap<String, String>>();
-    sql.iterate(cmd, move |r| snarf(snd.clone(), r) )?;
+    sql.iterate(cmd, move |r| sql_results_handler(snd.clone(), r) )?;
     Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
 }
 
