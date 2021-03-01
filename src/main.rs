@@ -387,12 +387,14 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
     Err(Serror::Err("ticker not found"))
 }
 
-async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_tickers (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers_stonks SKIP no tickers")?;
+    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers SKIP no tickers")?;
+    let mut do_stonks = false;
 
     for ticker in &tickers {
-        if ticker == "STONKS" || ticker == "YOLO" {
+        if ticker == "STONKS" {
+            do_stonks = true;
             continue;
         }
         let stonk = get_stonk(ticker).await?;
@@ -403,11 +405,12 @@ async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> 
         }
     }
 
-    if ["STONKS", "YOLO"].iter().any(|e|tickers.contains(*e)) {
-        info!("{:?}", crate::do_stonks(db, cmd).await);
+    if do_stonks {
+        let cmd = Cmd{from:cmd.from, at:cmd.at, to:cmd.to, msg:"stonks?".into() };
+        info!("{:?}", crate::do_stonks(db, &cmd).await);
     }
 
-    Ok("Ok do_tickers_stonks")
+    Ok("Ok do_tickers")
 }
 
 async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
@@ -622,7 +625,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    /* if Regex::new(r"^stonks\$$").unwrap().find(&cmd.msg).is_none() { return Ok("do_stonks SKIP"); }*/
+     if Regex::new(r"^stonks[!?]$").unwrap().find(&cmd.msg).is_none() { return Ok("do_stonks SKIP"); }
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
@@ -658,7 +661,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
         msg.push_str(
             &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
-                value, ticker, greenred, 
+                value, ticker, greenred,
                 format!("{:.2}", gain), format!("{}{:.2}%",  updown, gain_percent),
                 amount, cost,
              ) );
@@ -673,6 +676,15 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("OK do_stonks")
+}
+
+async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+     if Regex::new(r"^yolo[!?]$").unwrap().find(&cmd.msg).is_none() { return Ok("do_yolo SKIP"); }
+
+    send_msg(db, cmd.at, "coming soon...").await?;
+
+    Ok("OK do_yolo")
 }
 
 /*
@@ -718,7 +730,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("yolo$")};
-    info!("via do_trade_sell {:?}", do_tickers_stonks(db, &cmd2).await);
+    info!("via do_trade_sell {:?}", do_tickers(db, &cmd2).await);
 
     Ok("OK do_trade_sell")
 }
@@ -785,7 +797,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("yolo$")};
-    info!("via do_trade_buy {:?}", do_tickers_stonks(db, &cmd2).await);
+    info!("via do_trade_buy {:?}", do_tickers(db, &cmd2).await);
 
     Ok("OK do_trade_buy")
 }
@@ -854,10 +866,12 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     warn!("\x1b[33m{:?}", &cmd);
     info!("{:?}", do_like(&db, &cmd).await);
     info!("{:?}", do_like_info(&db, &cmd).await);
-    info!("{:?}", do_tickers_stonks(&db, &cmd).await);
     info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
+    info!("{:?}", do_tickers(&db, &cmd).await);
+    info!("{:?}", do_stonks(&db, &cmd).await);
+    info!("{:?}", do_yolo(&db, &cmd).await);
     info!("{:?}", do_trade_buy(&db, &cmd).await);
     info!("{:?}", do_trade_sell(&db, &cmd).await);
     Ok(())
@@ -933,12 +947,32 @@ fn do_schema() -> Result<(), Serror> {
     ").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO orders VALUES ( 241726795, 'TWNK', 500, 14.95, 1613544000 )").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO orders VALUES ( 241726795, 'GOOG', 0.25, 2121.90, 1613544278 )").map_or_else(gwarn, ginfo);
+
     sql.execute("
         CREATE TABLE positions (
             id   INTEGER NOT NULL,
             ticker  TEXT NOT NULL,
             amount FLOAT NOT NULL,
-            cost   FLOAT NOT NULL);
+            price  FLOAT NOT NULL);
+    ").map_or_else(gwarn, ginfo);
+
+    // Users will create bids (stocks to sell, recorded as a negative price)
+    // and asks (stocks to buy as a positive price)
+    //
+    //
+    //                                      Active buyer's bid "the max price someone has yet to buy at"
+    // ((Everyone wants to buy at 0)-v            v
+    // [-∞ ... -8.00 -6.50 -6.00       2.50 5.00 5.99]
+    //                       ^--Lowest active seller's ask "the min price someone has yet to sell"
+    //   ^---- ((Everyone wants to sell at infinity))
+    //                         `@shrewm-1@5.00`  create an ask/sell quote
+    sql.execute("
+        CREATE TABLE exchange (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            amount FLOAT NOT NULL,
+            price  FLOAT NOT NULL,
+            time INTEGER NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     Ok(())
