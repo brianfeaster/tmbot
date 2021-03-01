@@ -390,24 +390,14 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
 async fn do_tickers (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers SKIP no tickers")?;
-    let mut do_stonks = false;
 
     for ticker in &tickers {
-        if ticker == "STONKS" {
-            do_stonks = true;
-            continue;
-        }
         let stonk = get_stonk(ticker).await?;
         if stonk.contains_key("updated") {
             send_msg(db, cmd.at, &format!("{}·", stonk.get("pretty").unwrap())).await?;
         } else {
             send_msg(db, cmd.at, &stonk.get("pretty").unwrap()).await?;
         }
-    }
-
-    if do_stonks {
-        let cmd = Cmd{from:cmd.from, at:cmd.at, to:cmd.to, msg:"stonks?".into() };
-        info!("{:?}", crate::do_stonks(db, &cmd).await);
     }
 
     Ok("Ok do_tickers")
@@ -625,7 +615,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-     if Regex::new(r"^stonks[!?]$").unwrap().find(&cmd.msg).is_none() { return Ok("do_stonks SKIP"); }
+     if Regex::new(r"^stonks[!?]|[!?]stonks$").unwrap().find(&cmd.msg).is_none() { return Ok("do_stonks SKIP"); }
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
@@ -680,9 +670,18 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-     if Regex::new(r"^yolo[!?]$").unwrap().find(&cmd.msg).is_none() { return Ok("do_yolo SKIP"); }
+    if Regex::new(r"^yolo[!?]|[!?]yolo$").unwrap().find(&cmd.msg).is_none() { return Ok("do_yolo SKIP"); }
 
-    send_msg(db, cmd.at, "coming soon...").await?;
+    let sql = "select * from (select name, round(sum(amount),2) as yolo from ((select positions.id, amount*price as amount from positions left join entitys on positions.id=entitys.id left join stonks on positions.ticker=stonks.ticker UNION select * from accounts) as T left join entitys on T.id=entitys.id) group by name) order by yolo desc";
+    let results = get_sql(&sql)?;
+    warn!("=> {:?}", results);
+
+    let mut msg = "*YOLOlians*".to_string();
+    for row in results {
+        msg.push_str( &format!(" `{}@{}`", row.get("yolo").unwrap(), row.get("name").unwrap()) );
+    }
+
+    send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("OK do_yolo")
 }
