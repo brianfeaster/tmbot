@@ -728,8 +728,8 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     info!("Remove position result {:?}", get_sql(&sql));
 
     // Send current portfolio
-    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("stonks?")};
-    info!("via do_trade_sell {:?}", do_tickers(db, &cmd2).await);
+    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
+    info!("via do_trade_sell {:?}", do_stonks(db, &cmd2).await);
 
     Ok("OK do_trade_sell")
 }
@@ -795,8 +795,8 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     info!("Update bank balance result {:?}", get_sql(&sql));
 
     // Send current portfolio
-    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("stonks?")};
-    info!("via do_trade_buy {:?}", do_tickers(db, &cmd2).await);
+    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
+    info!("via do_trade_buy {:?}", do_stonks(db, &cmd2).await);
 
     Ok("OK do_trade_buy")
 }
