@@ -77,6 +77,46 @@ type MDB = Mutex<DB>;
 
 ////////////////////////////////////////////////////////////////////////////////
 
+#[derive(Debug)]
+struct Cmd {
+    from :i64,
+    at   :i64,
+    to   :i64,
+    msg  :String
+}
+
+/// Creates a Cmd object from the useful details of a Telegram message.
+fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
+
+    let json: JsonValue = bytes2json(&body)?;
+
+    let inline_query = &json["inline_query"];
+    if inline_query.is_object() {
+        let from = getin_i64(inline_query, &["from", "id"])?;
+        let msg = getin_str(inline_query, &["query"])?.to_string();
+        return Ok(Cmd { from:from, at:from, to:from, msg:msg });
+    }
+
+    let message = &json["message"];
+    if message.is_object() {
+        let from = getin_i64(message, &["from", "id"])?;
+        let at = getin_i64(message, &["chat", "id"])?;
+        let msg = getin_str(message, &["text"])?.to_string();
+
+        return Ok(
+            if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
+                Cmd { from:from, at:at, to:to, msg:msg }
+            } else {
+                Cmd { from:from, at:at, to:from, msg:msg }
+            }
+        );
+    }
+
+    Err("Nothing to do.")?
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
     info!("\x1b[33m<- {}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
@@ -159,6 +199,89 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
+    let body =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
+                    .timeout( Duration::new(30,0) )
+                    .finish() )
+        .finish() // -> Client
+        .get("https://www.onelook.com/")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(30,0))
+        .query(&[["q",word]])?
+        .send()
+        .await?
+        .body().limit(1_000_000).await
+        .or_else( |e| {
+            error!(r#"get_definition http body {:?} for {:?}"#, e, word);
+            Err(e)
+        } )?;
+
+    let domstr = from_utf8(&body)
+        .or_else( |e| {
+            error!(r#"get_definition http body2str {:?} for {:?}"#, e, word);
+            Err(e)
+        } )?;
+
+    // The optional US definitions
+
+    let usdef =
+        Regex::new(r"var mm_US_def = '[^']+").unwrap()
+        .find(&domstr)
+        .map_or("", |r| r.as_str() );
+
+    let mut lst = Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
+        .captures_iter(&usdef)
+        .map( |cap| cap[1].to_string() )
+        .collect::<Vec<String>>();
+
+    // WordNet definitions
+
+    Regex::new(r#"easel_def_+[0-9]+">([^<]+)"#).unwrap()
+        .captures_iter(&domstr)
+        .for_each( |cap| lst.push( cap[1].to_string() ) );
+
+    Ok(lst)
+}
+
+
+async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
+    let body =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
+                    .timeout( Duration::new(30,0) )
+                    .finish() )
+        .finish() // -> Client
+        .get("https://onelook.com/")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(30,0))
+        .query(&[["clue", word]]).unwrap()
+        .send()
+        .await.unwrap()
+        .body().limit(1_000_000).await;
+
+    if body.is_err() {
+         error!(r#"get_syns http body {:?} for {:?}"#, body, word);
+         Err("get_syns http error")?;
+    }
+
+    let body = body.unwrap();
+    let domstr = from_utf8(&body);
+    if domstr.is_err() {
+         error!(r#"get_syns http body2str {:?} for {:?}"#, domstr, word);
+         Err("get_body2str error")?;
+    }
+
+    Ok( Regex::new("w=([^:&\"<>]+)").unwrap()
+        .captures_iter(&domstr.unwrap())
+        .map( |cap| cap[1].to_string() )
+        .collect::<Vec<String>>() )
+}
+
 
 async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, String)>, Serror> {
     info!("get_ticker_quote {}", ticker);
@@ -251,75 +374,6 @@ async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, Strin
     }
 }
 
-async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
-    let body =
-        Client::builder()
-        .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( Duration::new(30,0) )
-                    .finish() )
-        .finish() // -> Client
-        .get("https://www.onelook.com/")
-        .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(30,0))
-        .query(&[["q",word]])?
-        .send()
-        .await?
-        .body().limit(1_000_000).await
-        .or_else( |e| {
-            error!(r#"get_definition http body {:?} for {:?}"#, e, word);
-            Err(e)
-        } )?;
-
-    let domstr = from_utf8(&body)
-        .or_else( |e| {
-            error!(r#"get_definition http body2str {:?} for {:?}"#, e, word);
-            Err(e)
-        } )?;
-
-    // The optional US definitions
-
-    let usdef =
-        Regex::new(r"var mm_US_def = '[^']+").unwrap()
-        .find(&domstr)
-        .map_or("", |r| r.as_str() );
-
-    let mut lst = Regex::new(r"%3Cdiv%20class%3D%22def%22%3E([^/]+)%3C/div%3E").unwrap()
-        .captures_iter(&usdef)
-        .map( |cap| cap[1].to_string() )
-        .collect::<Vec<String>>();
-
-    // WordNet definitions
-
-    Regex::new(r#"easel_def_+[0-9]+">([^<]+)"#).unwrap()
-        .captures_iter(&domstr)
-        .for_each( |cap| lst.push( cap[1].to_string() ) );
-
-    Ok(lst)
-}
-
-fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
-    let mut tickers = HashSet::new();
-    let re = Regex::new(r"^@?[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
-    for s in txt.split(" ") {
-        let w = s.split("$").collect::<Vec<&str>>();
-        if 2 == w.len() {
-            let mut idx = 42;
-            if w[0]!=""  &&  w[1]=="" { idx = 0; } // "$" is to the right of ticker symbol
-            if w[0]==""  &&  w[1]!="" { idx = 1; } // "$" is to the left of ticker symbol
-            if 42!=idx && re.find(w[idx]).is_some() { // ticker characters only
-                let ticker = if &w[idx][0..1] == "@" {
-                    w[idx].to_string()
-                } else {
-                    w[idx].to_string().to_uppercase()
-                };
-                tickers.insert(ticker );
-            }
-        }
-    }
-    if tickers.is_empty() { None } else { Some(tickers) }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
@@ -387,61 +441,118 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
     Err(Serror::Err("ticker not found"))
 }
 
-async fn do_tickers (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-
-    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_tickers SKIP no tickers")?;
-
-    for ticker in &tickers {
-        let stonk = get_stonk(ticker).await?;
-        if stonk.contains_key("updated") {
-            send_msg(db, cmd.at, &format!("{}·", stonk.get("pretty").unwrap())).await?;
+fn get_bank_balance (id :i64) -> Result<f64, Serror> {
+    let sql = format!("SELECT * FROM accounts WHERE id={}", id);
+    let res = get_sql(&sql)?;
+    info!("=> {:?}", res);
+    Ok(
+        if res.is_empty() {
+            info!("{:?}", get_sql(&format!("INSERT INTO accounts VALUES ({}, {})", id, 1000.0))?);
+            1000.0
         } else {
-            send_msg(db, cmd.at, &stonk.get("pretty").unwrap()).await?;
+            res[0].get("amount".into()).ok_or("amount missing from accounts table")?.parse::<f64>().or(Err("can't parse amount field from accounts table"))?
+        }
+    )
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
+    let mut tickers = HashSet::new();
+    let re = Regex::new(r"^@?[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    for s in txt.split(" ") {
+        let w = s.split("$").collect::<Vec<&str>>();
+        if 2 == w.len() {
+            let mut idx = 42;
+            if w[0]!=""  &&  w[1]=="" { idx = 0; } // "$" is to the right of ticker symbol
+            if w[0]==""  &&  w[1]!="" { idx = 1; } // "$" is to the left of ticker symbol
+            if 42!=idx && re.find(w[idx]).is_some() { // ticker characters only
+                let ticker = if &w[idx][0..1] == "@" {
+                    w[idx].to_string()
+                } else {
+                    w[idx].to_string().to_uppercase()
+                };
+                tickers.insert(ticker );
+            }
         }
     }
-
-    Ok("Ok do_tickers")
+    if tickers.is_empty() { None } else { Some(tickers) }
 }
 
-async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
-    let body =
-        Client::builder()
-        .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
-                    .timeout( Duration::new(30,0) )
-                    .finish() )
-        .finish() // -> Client
-        .get("https://onelook.com/")
-        .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(30,0))
-        .query(&[["clue", word]]).unwrap()
-        .send()
-        .await.unwrap()
-        .body().limit(1_000_000).await;
+////////////////////////////////////////////////////////////////////////////////
 
-    if body.is_err() {
-         error!(r#"get_syns http body {:?} for {:?}"#, body, word);
-         Err("get_syns http error")?;
+async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
+
+    let amt :i32 = match cmd.msg.as_ref() { "+1" => 1, "-1" => -1, _=>0 };
+    if amt == 0 { return Ok("do_like SKIP".into()); }
+
+    if cmd.from == cmd.to { return Ok( format!("do_like SKIP self plussed {}", cmd.from)); }
+
+    // Load database of users
+
+    let mut people :HashMap<i64, String> = HashMap::new();
+
+    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+        let mut v = l.split(" ");
+        let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
+        let name = v.next().ok_or("User DB malformed.")?.to_string();
+        people.insert(id, name);
+    }
+    info!("{:?}", people);
+
+    // Load/update/save likes
+
+    let likes = read_to_string( format!("tmbot/{}", cmd.to) )
+        .unwrap_or("0".to_string())
+        .lines()
+        .nth(0).unwrap()
+        .parse::<i32>()
+        .unwrap() + amt;
+
+    info!("update likes in filesystem {:?} {:?} {:?}",
+        cmd.to, likes,
+        write( format!("tmbot/{}", cmd.to), likes.to_string()));
+
+    let sfrom = cmd.from.to_string();
+    let sto = cmd.to.to_string();
+    let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
+    let toname   = people.get(&cmd.to).unwrap_or(&sto);
+    let text = format!("{}{}{}", fromname, num2heart(likes), toname);
+    send_msg(db, cmd.at, &text).await?;
+
+    Ok("Ok do_like".into())
+}
+
+async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    if cmd.msg != "+?" { return Ok("do_like_info SKIP"); }
+
+    let mut likes = Vec::new();
+    // Over each user in file
+    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+        let mut v = l.split(" ");
+        let id = v.next().ok_or("User DB malformed.")?;
+        let name = v.next().ok_or("User DB malformed.")?.to_string();
+        // Read the user's count file
+        let count =
+            read_to_string( "tmbot/".to_string() + &id )
+            .unwrap_or("0".to_string())
+            .trim()
+            .parse::<i32>().or(Err("user like count parse i32 error"))?;
+        likes.push((count, name));
     }
 
-    let body = body.unwrap();
-    let domstr = from_utf8(&body);
-    if domstr.is_err() {
-         error!(r#"get_syns http body2str {:?} for {:?}"#, domstr, word);
-         Err("get_body2str error")?;
+    let mut text = String::new();
+    likes.sort_by(|a,b| b.0.cmp(&a.0) );
+    // %3c %2f b %3e </b>
+    for (likes,nom) in likes {
+        text.push_str(&format!("{}{} ", nom, num2heart(likes)));
     }
-
-    Ok( Regex::new("w=([^:&\"<>]+)").unwrap()
-        .captures_iter(&domstr.unwrap())
-        .map( |cap| cap[1].to_string() )
-        .collect::<Vec<String>>() )
+    //info!("HEARTS -> msg tmbot {:?}", send_msg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
+    send_msg(db, cmd.at, &text).await?;
+    Ok("Ok do_like_info")
 }
-
-/*
-fn str_after_str<'t> (heystack :&'t str, needle :&str) -> &'t str {
-    &heystack[(heystack.find(needle).map_or(-(needle.len() as i32), |n| n as i32) + needle.len() as i32) as usize ..]
-}
-*/
 
 async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
@@ -495,78 +606,6 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_def")
 }
 
-async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-
-    if cmd.msg != "+?" { return Ok("do_like_info SKIP"); }
-
-    let mut likes = Vec::new();
-    // Over each user in file
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?;
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        // Read the user's count file
-        let count =
-            read_to_string( "tmbot/".to_string() + &id )
-            .unwrap_or("0".to_string())
-            .trim()
-            .parse::<i32>().or(Err("user like count parse i32 error"))?;
-        likes.push((count, name));
-    }
-
-    let mut text = String::new();
-    likes.sort_by(|a,b| b.0.cmp(&a.0) );
-    // %3c %2f b %3e </b>
-    for (likes,nom) in likes {
-        text.push_str(&format!("{}{} ", nom, num2heart(likes)));
-    }
-    //info!("HEARTS -> msg tmbot {:?}", send_msg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    send_msg(db, cmd.at, &text).await?;
-    Ok("Ok do_like_info")
-}
-
-async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
-
-    let amt :i32 = match cmd.msg.as_ref() { "+1" => 1, "-1" => -1, _=>0 };
-    if amt == 0 { return Ok("do_like SKIP".into()); }
-
-    if cmd.from == cmd.to { return Ok( format!("do_like SKIP self plussed {}", cmd.from)); }
-
-    // Load database of users
-
-    let mut people :HashMap<i64, String> = HashMap::new();
-
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        people.insert(id, name);
-    }
-    info!("{:?}", people);
-
-    // Load/update/save likes
-
-    let likes = read_to_string( format!("tmbot/{}", cmd.to) )
-        .unwrap_or("0".to_string())
-        .lines()
-        .nth(0).unwrap()
-        .parse::<i32>()
-        .unwrap() + amt;
-
-    info!("update likes in filesystem {:?} {:?} {:?}",
-        cmd.to, likes,
-        write( format!("tmbot/{}", cmd.to), likes.to_string()));
-
-    let sfrom = cmd.from.to_string();
-    let sto = cmd.to.to_string();
-    let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
-    let toname   = people.get(&cmd.to).unwrap_or(&sto);
-    let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    send_msg(db, cmd.at, &text).await?;
-
-    Ok("Ok do_like".into())
-}
-
 async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     if cmd.from != 308188500 {
@@ -599,18 +638,20 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_sql")
 }
 
-fn get_bank_balance (id :i64) -> Result<f64, Serror> {
-    let sql = format!("SELECT * FROM accounts WHERE id={}", id);
-    let res = get_sql(&sql)?;
-    info!("=> {:?}", res);
-    Ok(
-        if res.is_empty() {
-            info!("{:?}", get_sql(&format!("INSERT INTO accounts VALUES ({}, {})", id, 1000.0))?);
-            1000.0
+async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+
+    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_quotes SKIP no tickers")?;
+
+    for ticker in &tickers {
+        let stonk = get_stonk(ticker).await?;
+        if stonk.contains_key("updated") {
+            send_msg(db, cmd.at, &format!("{}·", stonk.get("pretty").unwrap())).await?;
         } else {
-            res[0].get("amount".into()).ok_or("amount missing from accounts table")?.parse::<f64>().or(Err("can't parse amount field from accounts table"))?
+            send_msg(db, cmd.at, &stonk.get("pretty").unwrap()).await?;
         }
-    )
+    }
+
+    Ok("Ok do_quotes")
 }
 
 async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
@@ -686,57 +727,10 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("OK do_yolo")
 }
 
-/*
-fn maybe_decimal (f :f64) -> String {
-    let s = format!("{:.2}", f);
-    s.trim_end_matches(&"0")
-    .trim_end_matches(&"0")
-    .trim_end_matches(&".").to_string()
-}
-*/
-
-
-async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-    let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_syn SKIP"); }
-    let trade = &cap.unwrap();
-
-    let ticker = trade[1].to_uppercase();
-
-    let sql = format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
-    let positions = get_sql(&sql)?;
-    warn!("=> {:?}", positions);
-
-    if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
-
-    let amount = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
-    let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-    let value = (amount * price * 100.0).round() / 100.0;
-
-    let bank_balance = get_bank_balance(cmd.from)?;
-    let new_bank_balance = bank_balance + value;
-
-    let now :i64 = Instant::now().seconds();
-
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -amount, price, now);
-    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
-
-    let sql = format!("UPDATE accounts SET amount={} WHERE id={}", new_bank_balance, cmd.from);
-    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
-
-    let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
-    info!("Remove position result {:?}", get_sql(&sql));
-
-    // Send current portfolio
-    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("via do_trade_sell {:?}", do_stonks(db, &cmd2).await);
-
-    Ok("OK do_trade_sell")
-}
-
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2})?)$").unwrap().captures(&cmd.msg);
+    //                           GME       +  $    50.55
+    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2}))$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_trade_buy SKIP"); }
     let trade = &cap.unwrap();
 
@@ -801,6 +795,46 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("OK do_trade_buy")
 }
 
+async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+    let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_trade_sell SKIP"); }
+    let trade = &cap.unwrap();
+
+    let ticker = trade[1].to_uppercase();
+
+    let sql = format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
+    let positions = get_sql(&sql)?;
+    warn!("=> {:?}", positions);
+
+    if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
+
+    let amount = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
+    let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    let value = (amount * price * 100.0).round() / 100.0;
+
+    let bank_balance = get_bank_balance(cmd.from)?;
+    let new_bank_balance = bank_balance + value;
+
+    let now :i64 = Instant::now().seconds();
+
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -amount, price, now);
+    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
+
+    let sql = format!("UPDATE accounts SET amount={} WHERE id={}", new_bank_balance, cmd.from);
+    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
+
+    let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
+    info!("Remove position result {:?}", get_sql(&sql));
+
+    // Send current portfolio
+    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
+    info!("via do_trade_sell {:?}", do_stonks(db, &cmd2).await);
+
+    Ok("OK do_trade_sell")
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 fn sql_results_handler (
     snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
@@ -823,52 +857,17 @@ fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
     Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
 }
 
-#[derive(Debug)]
-struct Cmd {
-    from :i64,
-    at   :i64,
-    to   :i64,
-    msg  :String
-}
-
-fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
-
-    let json: JsonValue = bytes2json(&body)?;
-
-    let inline_query = &json["inline_query"];
-    if inline_query.is_object() {
-        let from = getin_i64(inline_query, &["from", "id"])?;
-        let msg = getin_str(inline_query, &["query"])?.to_string();
-        return Ok(Cmd { from:from, at:from, to:from, msg:msg });
-    }
-
-    let message = &json["message"];
-    if message.is_object() {
-        let from = getin_i64(message, &["from", "id"])?;
-        let at = getin_i64(message, &["chat", "id"])?;
-        let msg = getin_str(message, &["text"])?.to_string();
-
-        return Ok(
-            if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
-                Cmd { from:from, at:at, to:to, msg:msg }
-            } else {
-                Cmd { from:from, at:at, to:from, msg:msg }
-            }
-        );
-    }
-
-    Err("Nothing to do.")?
-}
+////////////////////////////////////////////////////////////////////////////////
 
 async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     let cmd = parse_cmd(&body)?;
     warn!("\x1b[33m{:?}", &cmd);
     info!("{:?}", do_like(&db, &cmd).await);
     info!("{:?}", do_like_info(&db, &cmd).await);
-    info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_syn(&db, &cmd).await);
+    info!("{:?}", do_def(&db, &cmd).await);
     info!("{:?}", do_sql(&db, &cmd).await);
-    info!("{:?}", do_tickers(&db, &cmd).await);
+    info!("{:?}", do_quotes(&db, &cmd).await);
     info!("{:?}", do_stonks(&db, &cmd).await);
     info!("{:?}", do_yolo(&db, &cmd).await);
     info!("{:?}", do_trade_buy(&db, &cmd).await);
@@ -1003,14 +1002,14 @@ async fn main() -> Result<(), Serror> {
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    if !true { do_schema()?; }
+    if true { do_schema()?; }
 
     Ok(srv.await?)
 }
 /*
-DROP TABLE users
+DROP   TABLE users
 CREATE TABLE users (name TEXT, age INTEGER)
-INSERT INTO users VALUES ('Alice', 42)
-DELETE FROM positions WHERE id=107258721 AND amount=0.1
-UPDATE z SET a=1, b=2 where c=3;
+INSERT INTO  users VALUES ('Alice', 42)
+DELETE FROM  users WHERE age=42 AND name="Oskafunoioi"
+UPDATE       users SET a=1, b=2  WHERE c=3
 */
