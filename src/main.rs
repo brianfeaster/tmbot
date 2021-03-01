@@ -300,7 +300,7 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
 
 fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    let re = Regex::new(r"^@?[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -308,7 +308,12 @@ fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
             if w[0]!=""  &&  w[1]=="" { idx = 0; } // "$" is to the right of ticker symbol
             if w[0]==""  &&  w[1]!="" { idx = 1; } // "$" is to the left of ticker symbol
             if 42!=idx && re.find(w[idx]).is_some() { // ticker characters only
-               tickers.insert(w[idx].to_string().to_uppercase());
+                let ticker = if &w[idx][0..1] == "@" {
+                    w[idx].to_string()
+                } else {
+                    w[idx].to_string().to_uppercase()
+                };
+                tickers.insert(ticker );
             }
         }
     }
@@ -319,9 +324,26 @@ fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
 
 async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
 
+    let nowsecs :i64 = Instant::now().seconds();
+
+    if &ticker[0..1] == "@" {
+        let sql = format!("SELECT * FROM orders WHERE ticker='{}' ORDER BY time DESC LIMIT 1", ticker);
+        let res = get_sql(&sql)?;
+        if !res.is_empty() { // Stonks table contains this ticker
+            let hm = &res[0];
+            let cost = hm.get("cost").unwrap().parse::<f64>().unwrap();
+            let mut hm :HashMap::<String, String> = HashMap::new();
+            hm.insert("ticker".into(), ticker.to_string());
+            hm.insert("price".into(),  cost.to_string());
+            hm.insert("time".into(),   nowsecs.to_string());
+            hm.insert("pretty".into(), format!("{}@{}", ticker, cost));
+            return Ok(hm);
+        }
+        return Err(Serror::Err("Self Stonk not found."));
+    }
+
     let sql = format!("SELECT * FROM stonks WHERE ticker='{}'", ticker);
     let res = get_sql(&sql).unwrap();
-    let nowsecs :i64 = Instant::now().seconds();
     let mut is_in_table = false;
 
     if !res.is_empty() { // Stonks table contains this ticker
@@ -381,9 +403,9 @@ async fn do_tickers_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> 
         }
     }
 
-    if tickers.contains("STONKS")
-    || tickers.contains("YOLO")
-    { info!("{:?}", crate::do_stonks(db, cmd).await); }
+    if ["STONKS", "YOLO"].iter().any(|e|tickers.contains(*e)) {
+        info!("{:?}", crate::do_stonks(db, cmd).await);
+    }
 
     Ok("Ok do_tickers_stonks")
 }
@@ -612,7 +634,6 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let mut total = 0.0;
     //let mut total_gain = 0.0;
 
-
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
         let amount = pos.get("amount").unwrap().parse::<f64>().unwrap();
@@ -646,8 +667,8 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         //total_gain += gain;
     }
     //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
-    msg.push_str(&format!("\n`{:7.2}``cash`", bank_balance));
-    msg.push_str(&format!("\n`{:7.2}``YOLO`", total + bank_balance));
+    msg.push_str(&format!("\n`{:7.2}``Cash`", bank_balance));
+    msg.push_str(&format!("    `YOLO``{:.2}`", total + bank_balance - 50.0));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
