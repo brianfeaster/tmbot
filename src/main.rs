@@ -668,7 +668,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
     //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
     msg.push_str(&format!("\n`{:7.2}``Cash`", bank_balance));
-    msg.push_str(&format!("    `YOLO``{:.2}`", total + bank_balance - 50.0));
+    msg.push_str(&format!("    `YOLO``{:.2}`", total + bank_balance));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
