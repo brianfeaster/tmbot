@@ -15,6 +15,7 @@ pub enum Serror {
    SqliteError(sqlite::Error),
    IoError(std::io::Error),
    SysTimeError(std::time::SystemTimeError),
+   ParseFloatErr(std::num::ParseFloatError),
 }
 
 impl From<std::num::ParseIntError> for Serror {
@@ -55,6 +56,9 @@ impl From<sqlite::Error> for Serror {
 }
 impl From<std::time::SystemTimeError> for Serror {
     fn from(e: std::time::SystemTimeError) -> Self { Serror::SysTimeError(e) }
+}
+impl From<std::num::ParseFloatError> for Serror {
+    fn from(e: std::num::ParseFloatError) -> Self { Serror::ParseFloatErr(e) }
 }
 /*
 impl From<Serror> for std::io::Error {

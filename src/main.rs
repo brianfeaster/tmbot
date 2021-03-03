@@ -65,6 +65,10 @@ fn update_ticker_p (time :i64, now :i64) -> bool {
         }
 }
 
+fn round (num:f64, pow:i32) -> f64 {
+    let fac = 10f64.powi(pow);
+    (num * fac).floor() / fac
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Clone, Debug)]
@@ -460,7 +464,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^@?[A-Za-z^.-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    let re = Regex::new(r"^@?[A-Za-z^.-=]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -729,24 +733,22 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    //                           GME       +  $    50.55
-    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,2}))$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("do_trade_buy SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
     let is_dollars = !trade[2].is_empty();
-    let amt_or_dollars = trade[3].parse::<f64>().unwrap();
+    let amt_or_dollars = trade[3].parse::<f64>()?;
+
+    let stonk = get_stonk(&ticker).await?;
+    let mut cost = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
+
+    // Convert dollars to shares maybe.  Round to 4 decimal places
+    let mut amt = round(amt_or_dollars / if is_dollars { cost } else { 1.0 }, 4);
 
     let bank_balance = get_bank_balance(cmd.from)?;
-    let stonk = get_stonk(&ticker).await?;
-    let mut cost = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
-
-    // Convert to shares if amount in dollars.
-    let mut amt = if is_dollars { amt_or_dollars / cost } else { amt_or_dollars };
-    amt = (amt * 10000.0).floor() / 10000.0;
-
-    let basis = (100.0 * amt * cost).round() / 100.0;
+    let basis = round(amt * cost, 2);
     let new_balance = bank_balance - basis;
 
     if new_balance < 0.0 {
@@ -833,6 +835,61 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("OK do_trade_sell")
 }
 
+//               Honest BID price--v    v--Honest ASK price.abs()
+//   0.0 ...  0.01  0.30  0.50  0.99   -1.00 -1.55 -2.00 -9.00 -∞
+
+// Create an ask quote (+price) on the exchange table, lower is better.
+async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+    //                       ___ticker___  -  ___________amount____________   $  ___________price______________
+    let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-])([0-9]+[.]?|[0-9]*[.][0-9]{1,4})[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
+    if cap.is_none() { return Ok("do_exchange_bidask SKIP"); }
+    let quote = &cap.unwrap();
+    let ticker = &quote[1];
+    let bidask = &quote[2];
+    let quote_amt = quote[3].to_uppercase().parse::<f64>()?;
+    let quote_price = quote[4].to_uppercase().parse::<f64>()?;
+    let now :i64 = Instant::now().seconds();
+    let sql =
+        if bidask == "-" { // ask quote (-price) by seller
+            let sql = format!("SELECT id,ticker,amount,abs(price) AS price,time FROM exchange WHERE ticker='{}' AND 0<price AND {}<=price ORDER BY price DESC LIMIT 1", ticker, quote_price); // Any bidders willing to pay?
+            let bidder = get_sql(&sql)?;
+            warn!("bidder = {:?}", bidder);
+
+            if 1 <= bidder.len() {
+                let amt =   quote_amt.min(bidder[0].get("amount").unwrap().parse::<f64>()?);
+                let price = quote_price.max(bidder[0].get("price").unwrap().parse::<f64>()?);
+                let value = round(amt*price, 4);
+                warn!("seller {}@{}  final {}@{}", quote_amt, quote_price, amt, price);
+            }
+
+           /// Someone tries to sell by making an ask quote for X 1 shares of V value 0.90 which is <= highest bid price
+           ///sql = SELECT id,ticker,amount,price,time FROM exchange WHERE price>0 AND .99<=price ORDER BY price DESC LIMIT 1
+           /// VALUE = (PRICE=max(ask.price, sql.amount)) * (COUNT=min(ask.amount, sql.amount))
+            // Add X securities and subtract VALUE on bidder/buyer sql.id
+            // Deduct COUNT or remove security from exchange
+            // Sub X securities and add VALUE on user cmd.from
+            // Update stonks with PRICE
+            // Add remaining ask quote to exchange
+            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, -{:.4}, {})", cmd.from, ticker, quote_amt, quote_price, now)
+        } else { // bid quote (+price) by buyer.
+            // Someone tries to buy by making a bid for X 1 shares of V value 1.01, which is >= than the lowest abs(ask) price
+            // so xfer security to bid/buyer from ask/seller at seller's abs(price)
+            // sql = SELECT id,ticker,amount,price, time FROM exchange WHERE price<0 AND abs(price)<=10.01 ORDER BY price DESC LIMIT 1;
+            // VALUE = min(bid.price, sql.amount)
+            // Deduct X securities and add VALUE on user sql.id
+            // Deduct count or remove security from from exchange
+            // Add X securities and sub VALUE on user cmd.from
+            // Update stonks with PRICE
+            // Add remaining bid quote to exchange
+            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4},  {:.4}, {})", cmd.from, ticker, quote_amt, quote_price, now)
+        };
+    warn!("{:?}", sql); // DEBUGGING
+    //let res = get_sql(&sql)?;
+    //warn!("=> {:?}", res);
+
+    Ok("OK do_exchange_bidask")
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 fn sql_results_handler (
@@ -872,6 +929,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_yolo(&db, &cmd).await);
     info!("{:?}", do_trade_buy(&db, &cmd).await);
     info!("{:?}", do_trade_sell(&db, &cmd).await);
+    //info!("{:?}", do_exchange_bidask(&db, &cmd).await);
     Ok(())
 }
 
@@ -954,16 +1012,6 @@ fn do_schema() -> Result<(), Serror> {
             price  FLOAT NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
-    // Users will create bids (stocks to sell, recorded as a negative price)
-    // and asks (stocks to buy as a positive price)
-    //
-    //
-    //                                      Active buyer's bid "the max price someone has yet to buy at"
-    // ((Everyone wants to buy at 0)-v            v
-    // [-∞ ... -8.00 -6.50 -6.00       2.50 5.00 5.99]
-    //                       ^--Lowest active seller's ask "the min price someone has yet to sell"
-    //   ^---- ((Everyone wants to sell at infinity))
-    //                         `@shrewm-1@5.00`  create an ask/sell quote
     sql.execute("
         CREATE TABLE exchange (
             id   INTEGER NOT NULL,
@@ -1002,7 +1050,7 @@ async fn main() -> Result<(), Serror> {
     info!("{}:{} ::{}::async-main()", std::file!(), core::line!(), core::module_path!());
     //info!("{:?}", args().collect::<Vec<String>>());
 
-    if true { do_schema()?; }
+    if !true { do_schema()?; }
 
     Ok(srv.await?)
 }
