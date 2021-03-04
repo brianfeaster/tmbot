@@ -171,7 +171,7 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
     .replacen("=", "\\=", 10000)
     .replacen("'", "\\'", 10000);
 
-    info!("\x1b[33m<- {}", text);
+    info!("Telegram <= \x1b[33m{}\x1b[0m", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
     builder.set_certificate_chain_file("cert.pem")?;
@@ -383,12 +383,12 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
         let res = get_sql(&sql)?;
         if !res.is_empty() { // Stonks table contains this ticker
             let hm = &res[0];
-            let cost = hm.get("cost").unwrap().parse::<f64>().unwrap();
+            let price = hm.get("price").unwrap().parse::<f64>().unwrap();
             let mut hm :HashMap::<String, String> = HashMap::new();
             hm.insert("ticker".into(), ticker.to_string());
-            hm.insert("price".into(),  cost.to_string());
+            hm.insert("price".into(),  price.to_string());
             hm.insert("time".into(),   nowsecs.to_string());
-            hm.insert("pretty".into(), format!("{}@{}", ticker, cost));
+            hm.insert("pretty".into(), format!("{}@{}", ticker, price));
             return Ok(hm);
         }
         return Err(Serror::Err("Self Stonk not found."));
@@ -401,18 +401,9 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
     if !res.is_empty() { // Stonks table contains this ticker
         let hm = &res[0];
         let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
-        let time = LocalDateTime::from_instant(Instant::at(timesecs));
         let should_update = update_ticker_p(timesecs, nowsecs);
-        info!("{}@{} {} {:?} {} {}",
-            hm.get("ticker").unwrap(),
-            hm.get("price").unwrap(),
-            timesecs, time, should_update,
-            hm.get("pretty").unwrap());
-        if !should_update {
-            return Ok(hm.clone());
-                //send_msg(db, cmd.at, &format!("{}", hm.get("pretty").unwrap())).await?;
-                //continue;
-        }
+        //info!("{} {} {} {:?}", hm.get("ticker").unwrap(), hm.get("price").unwrap(), timesecs, hm.get("pretty").unwrap());
+        if !should_update { return Ok(hm.clone()); }
         is_in_table = true;
     }
 
@@ -426,13 +417,13 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
         } else {
             format!("INSERT INTO stonks VALUES ('{}', {}, {}, '{}')", ticker, price.2, nowsecs, pretty)
         };
-        info!("Stonks update row results {:?}", get_sql(&sql));
+        info!("SQLite => {:?}", get_sql(&sql)?);
         let mut hm :HashMap::<String, String> = HashMap::new();
+        hm.insert("updated".into(), "".into());
         hm.insert("ticker".into(), ticker.to_string());
         hm.insert("price".into(),  price.2);
         hm.insert("time".into(),   nowsecs.to_string());
         hm.insert("pretty".into(), pretty);
-        hm.insert("updated".into(), "".into());
         return Ok(hm);
     }
 
@@ -448,7 +439,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
             info!("{:?}", get_sql(&format!("INSERT INTO accounts VALUES ({}, {})", id, 1000.0))?);
             1000.0
         } else {
-            res[0].get("amount".into()).ok_or("amount missing from accounts table")?.parse::<f64>().or(Err("can't parse amount field from accounts table"))?
+            res[0].get("balance".into()).ok_or("balance missing from accounts table")?.parse::<f64>().or(Err("can't parse balance field from accounts table"))?
         }
     )
 }
@@ -670,16 +661,16 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
-        let amount = pos.get("amount").unwrap().parse::<f64>().unwrap();
-        let cost = pos.get("cost").unwrap().parse::<f64>().unwrap();
+        let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
+        let price = pos.get("price").unwrap().parse::<f64>().unwrap();
 
-        let basis = amount * cost;
+        let basis = qty * price;
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
 
-        let value = amount * price;
+        let value = qty * price;
 
         let gain = value-basis;
-        let gain_percent = (100.0*(price-cost)/cost).abs();
+        let gain_percent = (100.0*(price-price)/price).abs();
         let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
         let greenred =
             if basis < value {
@@ -694,7 +685,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
                 value, ticker, greenred,
                 format!("{:.2}", gain), format!("{}{:.2}%",  updown, gain_percent),
-                amount, cost,
+                qty, price,
              ) );
 
         total += value;
@@ -716,24 +707,24 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Update all user-positioned tickers
     for row in get_sql("SELECT ticker FROM positions GROUP BY ticker")? {
-        info!("{:?}", get_stonk( row.get("ticker").unwrap() ).await);
+        info!("{:?}", get_stonk( row.get("ticker").unwrap() ).await?);
     }
 
     let sql = " \
-    SELECT name, round(sum(amount),2) AS yolo \
+    SELECT name, round(sum(value),2) AS yolo \
     FROM ( \
-            SELECT id, amount*price AS amount \
+            SELECT id, qty*stonks.price AS value \
             FROM positions \
-            NATURAL JOIN stonks \
+            LEFT JOIN stonks ON positions.ticker = stonks.ticker \
         UNION \
-            SELECT * FROM accounts \
+            SELECT id, balance as value FROM accounts \
         ) \
     NATURAL JOIN entitys \
     GROUP BY name \
     ORDER BY yolo DESC \
     ";
     let results = get_sql(&sql)?;
-    warn!("=> {:?}", results);
+    warn!("SQLite => \x1b[33m{:?}\x1b[0m", results);
 
     // Build and send response string
 
@@ -752,21 +743,21 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_trade_buy SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
     let is_dollars = !trade[2].is_empty();
-    let amt_or_dollars = trade[3].parse::<f64>()?;
+    let qty_or_dollars = trade[3].parse::<f64>()?;
 
     let stonk = get_stonk(&ticker).await?;
-    let mut cost = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
+    let mut price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let mut amt = round(amt_or_dollars / if is_dollars { cost } else { 1.0 }, 4);
+    let mut qty = round(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
 
     let bank_balance = get_bank_balance(cmd.from)?;
-    let basis = round(amt * cost, 2);
+    let basis = round(qty * price, 2);
     let new_balance = bank_balance - basis;
 
     if new_balance < 0.0 {
@@ -774,11 +765,11 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         return Ok("OK do_trade_buy not enough cash");
     }
 
-    info!("trading_buy {} amt_or_dollars:{}  shares:{} cost:{} basis:{}  bank_balance:{}=>{}", ticker, amt_or_dollars, amt, cost, basis, bank_balance, new_balance);
+    info!("trading_buy {} qty_or_dollars:{}  shares:{} price:{} basis:{}  bank_balance:{}=>{}", ticker, qty_or_dollars, qty, price, basis, bank_balance, new_balance);
 
     let now :i64 = Instant::now().seconds();
 
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, amt, cost, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, qty, price, now);
     info!("Trade add order result {:?}", get_sql(&sql));
 
      // Maybe add to existing position
@@ -789,35 +780,35 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     match positions.len() {
         0 => {
-            let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.8})", cmd.from, ticker, amt, cost);
+            let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.8})", cmd.from, ticker, qty, price);
             info!("Trade add position result {:?}", get_sql(&sql));
         },
         1 => {
-            let amt_old = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
-            let cost_old = positions[0].get("cost").unwrap().parse::<f64>().unwrap();
-            cost = (amt*cost + amt_old*cost_old) / (amt+amt_old);
-            amt += amt_old;
-            info!("trading_buy adding to existing position:  new_amt:{}  new_cost:{}", amt, cost);
-            let sql = format!("UPDATE positions SET amount={:.4}, cost={:.8} WHERE id='{}' AND ticker='{}'", amt, cost, cmd.from, ticker);
+            let qty_old = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
+            let price_old = positions[0].get("price").unwrap().parse::<f64>().unwrap();
+            price = (qty*price + qty_old*price_old) / (qty+qty_old);
+            qty += qty_old;
+            info!("trading_buy adding to existing position:  new_qty:{}  new_price:{}", qty, price);
+            let sql = format!("UPDATE positions SET qty={:.4}, price={:.8} WHERE id='{}' AND ticker='{}'", qty, price, cmd.from, ticker);
             info!("Trade update position result {:?}", get_sql(&sql));
         },
         _ => return Err(Serror::Message(format!("Ticker {} has {} positions, expect 0 or 1", ticker, positions.len())))
     };
 
 
-    let sql = format!("UPDATE accounts set amount={} where id={}", new_balance, cmd.from);
+    let sql = format!("UPDATE accounts set balance={} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
     info!("via do_trade_buy {:?}", do_stonks(db, &cmd2).await);
 
-    Ok("OK do_trade_buy")
+    Ok("COMPLETED.")
 }
 
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_trade_sell SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
@@ -828,19 +819,19 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
 
-    let amount = positions[0].get("amount").unwrap().parse::<f64>().unwrap();
+    let qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
     let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-    let value = (amount * price * 100.0).round() / 100.0;
+    let value = round(qty * price, 2);
 
     let bank_balance = get_bank_balance(cmd.from)?;
     let new_bank_balance = bank_balance + value;
 
     let now :i64 = Instant::now().seconds();
 
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -amount, price, now);
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -qty, price, now);
     info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
-    let sql = format!("UPDATE accounts SET amount={} WHERE id={}", new_bank_balance, cmd.from);
+    let sql = format!("UPDATE accounts SET balance={} WHERE id={}", new_bank_balance, cmd.from);
     info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
     let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
@@ -850,7 +841,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
     info!("via do_trade_sell {:?}", do_stonks(db, &cmd2).await);
 
-    Ok("OK do_trade_sell")
+    Ok("COMPLETED.")
 }
 
 //               Honest BID price--v    v--Honest ASK price.abs()
@@ -858,26 +849,26 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 // Create an ask quote (+price) on the exchange table, lower is better.
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-    //                       ___ticker___  -  ___________amount____________   $  ___________price______________
+    //                       ___ticker___     _+-_  _____________qty______________  $  ___________price______________
     let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-])([0-9]+[.]?|[0-9]*[.][0-9]{1,4})[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_exchange_bidask SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let quote = &cap.unwrap();
     let ticker = &quote[1];
     let bidask = &quote[2];
-    let quote_amt = quote[3].to_uppercase().parse::<f64>()?;
-    let quote_price = quote[4].to_uppercase().parse::<f64>()?;
+    let quote_qty = quote[3].parse::<f64>()?;
+    let quote_price = quote[4].parse::<f64>()?;
     let now :i64 = Instant::now().seconds();
     let sql =
         if bidask == "-" { // ask quote (-price) by seller
-            let sql = format!("SELECT id,ticker,amount,abs(price) AS price,time FROM exchange WHERE ticker='{}' AND 0<price AND {}<=price ORDER BY price DESC LIMIT 1", ticker, quote_price); // Any bidders willing to pay?
+            let sql = format!("SELECT id,ticker,qty,abs(price) AS price,time FROM exchange WHERE ticker='{}' AND 0<price AND {}<=price ORDER BY price DESC LIMIT 1", ticker, quote_price); // Any bidders willing to pay?
             let bidder = get_sql(&sql)?;
             warn!("bidder = {:?}", bidder);
 
             if 1 <= bidder.len() {
-                let amt =   quote_amt.min(bidder[0].get("amount").unwrap().parse::<f64>()?);
+                let qty =   quote_qty.min(bidder[0].get("qty").unwrap().parse::<f64>()?);
                 let price = quote_price.max(bidder[0].get("price").unwrap().parse::<f64>()?);
-                let value = round(amt*price, 4);
-                warn!("seller {}@{}  final {}@{}", quote_amt, quote_price, amt, price);
+                let value = round(qty*price, 4);
+                warn!("seller {}@{}  final {}@{}", quote_qty, quote_price, qty, price);
             }
 
            /// Someone tries to sell by making an ask quote for X 1 shares of V value 0.90 which is <= highest bid price
@@ -888,7 +879,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
             // Sub X securities and add VALUE on user cmd.from
             // Update stonks with PRICE
             // Add remaining ask quote to exchange
-            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, -{:.4}, {})", cmd.from, ticker, quote_amt, quote_price, now)
+            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, -{:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now)
         } else { // bid quote (+price) by buyer.
             // Someone tries to buy by making a bid for X 1 shares of V value 1.01, which is >= than the lowest abs(ask) price
             // so xfer security to bid/buyer from ask/seller at seller's abs(price)
@@ -899,13 +890,13 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
             // Add X securities and sub VALUE on user cmd.from
             // Update stonks with PRICE
             // Add remaining bid quote to exchange
-            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4},  {:.4}, {})", cmd.from, ticker, quote_amt, quote_price, now)
+            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4},  {:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now)
         };
     warn!("{:?}", sql); // DEBUGGING
     //let res = get_sql(&sql)?;
     //warn!("=> {:?}", res);
 
-    Ok("OK do_exchange_bidask")
+    Ok("COMPLETED.")
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -934,46 +925,6 @@ fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
-    let cmd = parse_cmd(&body)?;
-    info!("do_all \x1b[33m{:?}", &cmd);
-
-    glogd("do_like =>",      do_like(&db, &cmd).await);
-    glogd("do_like_info =>", do_like_info(&db, &cmd).await);
-    glogd("do_syn =>",       do_syn(&db, &cmd).await);
-    glogd("do_def =>",       do_def(&db, &cmd).await);
-    glogd("do_sql =>",       do_sql(&db, &cmd).await);
-    glogd("do_quotes => ",   do_quotes(&db, &cmd).await);
-    glogd("do_stonks =>",    do_stonks(&db, &cmd).await);
-    glogd("do_yolo =>",      do_yolo(&db, &cmd).await);
-    glogd("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
-    glogd("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
-    //info!("{:?}", do_exchange_bidask(&db, &cmd).await);
-    Ok(())
-}
-
-async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    info!("\x1b[1;34m ™™™ ™™ ™™ |    ___   _   _     ");
-    info!("\x1b[1;34m  ™  ™ ™ ™ |\\ /\\ |   | | | |   |");
-    info!("\x1b[1;34m  ™  ™   ™ |/ \\/ |   |_|.|_|.  |");
-
-    let db = req.app_data::<web::Data<MDB>>().unwrap().lock().unwrap();
-    info!("\x1b[1m{:?}", &db);
-    info!("\x1b[35m{:?}", &req.connection_info());
-    info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace("  ", " "));
-
-    do_all(&db, &body)
-    .await
-    .map_or_else(
-        |r| {
-            error!("\x1b[31mbody {:?}", &body);
-            error!("End. {:?}", r)
-        },
-        |r| info!("End. {:?}", r)
-    );
-    HttpResponse::from("")
-}
-
 fn do_schema() -> Result<(), Serror> {
     let sql = ::sqlite::open("tmbot.sqlite")?;
 
@@ -986,7 +937,7 @@ fn do_schema() -> Result<(), Serror> {
     sql.execute("
         CREATE TABLE accounts (
             id    INTEGER  NOT NULL UNIQUE,
-            amount  FLOAT  NOT NULL);
+            balance FLOAT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     for l in read_to_string("tmbot/users.txt").unwrap().lines() {
@@ -1016,8 +967,8 @@ fn do_schema() -> Result<(), Serror> {
         CREATE TABLE orders (
             id   INTEGER  NOT NULL,
             ticker  TEXT  NOT NULL,
-            amount FLOAT  NOT NULL,
-            cost   FLOAT  NOT NULL,
+            qty    FLOAT  NOT NULL,
+            price  FLOAT  NOT NULL,
             time INTEGER  NOT NULL);
     ").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO orders VALUES ( 241726795, 'TWNK', 500, 14.95, 1613544000 )").map_or_else(gwarn, ginfo);
@@ -1027,7 +978,7 @@ fn do_schema() -> Result<(), Serror> {
         CREATE TABLE positions (
             id   INTEGER NOT NULL,
             ticker  TEXT NOT NULL,
-            amount FLOAT NOT NULL,
+            qty    FLOAT NOT NULL,
             price  FLOAT NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
@@ -1035,12 +986,52 @@ fn do_schema() -> Result<(), Serror> {
         CREATE TABLE exchange (
             id   INTEGER NOT NULL,
             ticker  TEXT NOT NULL,
-            amount FLOAT NOT NULL,
+            qty    FLOAT NOT NULL,
             price  FLOAT NOT NULL,
             time INTEGER NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     Ok(())
+}
+
+
+async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
+    let cmd = parse_cmd(&body)?;
+    info!("do_all \x1b[33m{:?}", &cmd);
+
+    glogd("do_like =>",      do_like(&db, &cmd).await);
+    glogd("do_like_info =>", do_like_info(&db, &cmd).await);
+    glogd("do_syn =>",       do_syn(&db, &cmd).await);
+    glogd("do_def =>",       do_def(&db, &cmd).await);
+    glogd("do_sql =>",       do_sql(&db, &cmd).await);
+    glogd("do_quotes => ",   do_quotes(&db, &cmd).await);
+    glogd("do_stonks =>",    do_stonks(&db, &cmd).await);
+    glogd("do_yolo =>",      do_yolo(&db, &cmd).await);
+    glogd("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
+    glogd("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
+    glogd("do_exchange_bidask =>", do_exchange_bidask(&db, &cmd).await);
+    Ok(())
+}
+
+async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    info!("\x1b[1;34m ™™™ ™™ ™™ |    ___   _   _     ");
+    info!("\x1b[1;34m  ™  ™ ™ ™ |\\ /\\ |   | | | |   |");
+    info!("\x1b[1;34m  ™  ™   ™ |/ \\/ |   |_|.|_|.  |");
+
+    let db = req.app_data::<web::Data<MDB>>().unwrap().lock().unwrap();
+    info!("\x1b[1m{:?}", &db);
+    info!("\x1b[35m{:?}", &req.connection_info());
+    info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace("  ", " "));
+
+    do_all(&db, &body)
+    .await
+    .map_or_else(
+        |r| { error!("\x1b[31mbody {:?}", &body);
+              error!("End. {:?}", r)
+        },
+        |r| info!("End. {:?}", r)
+    );
+    HttpResponse::from("")
 }
 
 
