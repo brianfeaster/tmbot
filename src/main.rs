@@ -479,7 +479,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^@?[A-Za-z^.-=]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    let re = Regex::new(r"^@?[A-Za-z^.=-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
