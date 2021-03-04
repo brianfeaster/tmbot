@@ -374,6 +374,36 @@ async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, Strin
 
 ////////////////////////////////////////////////////////////////////////////////
 
+fn sql_results_handler (
+    snd :Sender<HashMap<String, String>>,
+    res :&[(&str, Option<&str>)] // [ (column, value) ]
+) -> bool {
+    let mut v = HashMap::new();
+    for r in res {
+        trace!("sql_results_handler vec <- {:?}", r);
+        v.insert( r.0.to_string(), r.1.unwrap_or("NULL").to_string() );
+    }
+    let res = snd.send(v);
+    trace!("sql_results_handler snd <- {:?}", res);
+    true
+}
+
+fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
+    info!("\x1b[36mSQLite <= {}\x1b[0m", cmd);
+    let sql = ::sqlite::open( "tmbot.sqlite" )?;
+    let (snd, rcv) = channel::<HashMap<String, String>>();
+    sql.iterate(cmd, move |r| sql_results_handler(snd.clone(), r) )?;
+    Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
+}
+
+
+fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) {
+    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", id, ticker, qty, price, time);
+    info!("SQLite => {:?}", get_sql(&sql));
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
 
     let nowsecs :i64 = Instant::now().seconds();
@@ -661,16 +691,18 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
+
         let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
-        let price = pos.get("price").unwrap().parse::<f64>().unwrap();
 
-        let basis = qty * price;
+        let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
+        let basis = qty * cost;
+
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-
         let value = qty * price;
 
         let gain = value-basis;
-        let gain_percent = (100.0*(price-price)/price).abs();
+
+        let gain_percent = (100.0*(price-cost)/cost).abs();
         let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
         let greenred =
             if basis < value {
@@ -685,7 +717,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
                 value, ticker, greenred,
                 format!("{:.2}", gain), format!("{}{:.2}%",  updown, gain_percent),
-                qty, price,
+                qty, cost,
              ) );
 
         total += value;
@@ -772,10 +804,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     info!("trading_buy {} qty_or_dollars:{}  shares:{} price:{} basis:{}  bank_balance:{}=>{}", ticker, qty_or_dollars, qty, price, basis, bank_balance, new_balance);
 
-    let now :i64 = Instant::now().seconds();
-
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {} )", cmd.from, ticker, qty, price, now);
-    info!("Trade add order result {:?}", get_sql(&sql));
+    sql_table_order_insert(cmd.from, &ticker, qty, price, Instant::now().seconds());
 
      // Maybe add to existing position
 
@@ -831,10 +860,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let bank_balance = get_bank_balance(cmd.from)?;
     let new_bank_balance = bank_balance + value;
 
-    let now :i64 = Instant::now().seconds();
-
-    let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -qty, price, now);
-    info!("SQLite => {:?}", get_sql(&sql));
+    sql_table_order_insert(cmd.from, &ticker, -qty, price, Instant::now().seconds());
 
     let sql = format!("UPDATE accounts SET balance={:.2} WHERE id={}", new_bank_balance, cmd.from);
     info!("Update bank balance {} => {} SQLite => {:?}", bank_balance, new_bank_balance, get_sql(&sql));
@@ -849,83 +875,114 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-//               Honest BID price--v    v--Honest ASK price.abs()
-//   0.0 ...  0.01  0.30  0.50  0.99   -1.00 -1.55 -2.00 -9.00 -∞
+//           qtys are positive         v--Best ASK price (next to sell)
+//       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
+//  Best BID price (next buyer)--^        qtys are negative
+//          
 
 // Create an ask quote (+price) on the exchange table, lower is better.
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-    //                       ___ticker___     _+-_  _____________qty______________  $  ___________price______________
-    let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-])([0-9]+[.]?|[0-9]*[.][0-9]{1,4})[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
+    //                       ____ticker_____  _____________qty__________________  $  ___________price______________
+    let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-][0-9]+[.]?|[0-9]*[.][0-9]{1,4})[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let quote = &cap.unwrap();
+
     let ticker = &quote[1];
-    let bidask = &quote[2];
-    let quote_qty = quote[3].parse::<f64>()?;
-    let quote_price = quote[4].parse::<f64>()?;
+    let mut quote_qty = quote[2].parse::<f64>()?;
+    let quote_price = quote[3].parse::<f64>()?;
+
     let now :i64 = Instant::now().seconds();
-    let sql =
-        if bidask == "-" { // ask quote (-price) by seller
-            let sql = format!("SELECT id,ticker,qty,abs(price) AS price,time FROM exchange WHERE ticker='{}' AND 0<price AND {}<=price ORDER BY price DESC LIMIT 1", ticker, quote_price); // Any bidders willing to pay?
-            let bidder = get_sql(&sql)?;
-            warn!("bidder = {:?}", bidder);
 
-            if 1 <= bidder.len() {
-                let qty =   quote_qty.min(bidder[0].get("qty").unwrap().parse::<f64>()?);
-                let price = quote_price.max(bidder[0].get("price").unwrap().parse::<f64>()?);
-                let value = round(qty*price, 4);
-                warn!("seller {}@{}  final {}@{}", quote_qty, quote_price, qty, price);
-            }
+    if quote_qty < 0.0 { // ask quote by seller  (-qty, price)
+        quote_qty *= -1.0;
 
-            // Someone tries to sell by making an ask quote for X 1 shares of V value 0.90 which is <= highest bid price
-            // sql = SELECT id,ticker,amount,price,time FROM exchange WHERE price>0 AND .99<=price ORDER BY price DESC LIMIT 1
-            // VALUE = (PRICE=max(ask.price, sql.amount)) * (COUNT=min(ask.amount, sql.amount))
-            // Add X securities and subtract VALUE on bidder/buyer sql.id
-            // Deduct COUNT or remove security from exchange
-            // Sub X securities and add VALUE on user cmd.from
-            // Update stonks with PRICE
-            // Add remaining ask quote to exchange
-            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, -{:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now)
-        } else { // bid quote (+price) by buyer.
-            // Someone tries to buy by making a bid for X 1 shares of V value 1.01, which is >= than the lowest abs(ask) price
-            // so xfer security to bid/buyer from ask/seller at seller's abs(price)
-            // sql = SELECT id,ticker,amount,price, time FROM exchange WHERE price<0 AND abs(price)<=10.01 ORDER BY price DESC LIMIT 1;
-            // VALUE = min(bid.price, sql.amount)
-            // Deduct X securities and add VALUE on user sql.id
-            // Deduct count or remove security from from exchange
-            // Add X securities and sub VALUE on user cmd.from
-            // Update stonks with PRICE
-            // Add remaining bid quote to exchange
-            format!("INSERT INTO exchange VALUES ({}, '{}', {:.4},  {:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now)
-        };
-    warn!("{:?}", sql); // DEBUGGING
-    //let res = get_sql(&sql)?;
-    //warn!("=> {:?}", res);
+        // Check seller has the qty first
+        let seller_position = get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
+        if 1 != seller_position.len() { return Ok("Seller lacks the securities.") }
+
+        // Any bidders willing to buy/pay?
+        let sql =
+            format!("SELECT * FROM exchange WHERE ticker='{}' AND 0<qty AND {}<=price ORDER BY price DESC LIMIT 1",
+                ticker, quote_price);
+        let bidder = get_sql(&sql)?;
+        warn!("bidder = {:?}", bidder);
+
+        if 1 <= bidder.len() {
+            let qty =   bidder[0].get("qty").unwrap().parse::<f64>()?;
+            let price = bidder[0].get("price").unwrap().parse::<f64>()?;
+
+            let best_qty = quote_qty.min(qty);
+            let best_price = quote_price.max(price);
+
+            warn!("new seller {}@{}  existing buyer {}@{} => {}@{}",
+                quote_qty, quote_price,   qty, price,   best_qty, best_price);
+
+            quote_qty -= best_qty;
+
+            let now = Instant::now().seconds();
+            sql_table_order_insert(cmd.from, &ticker, -best_qty, best_price, now);
+            sql_table_order_insert(
+                bidder[0].get("id").unwrap().parse::<i64>()?,
+                &ticker, best_qty, best_price, now);
+        }
+
+        // Update exchange: qty -= amt  OR  remove if qty == amt
+        // Positions
+        //   Seller: qty-=amt, price = new basis using amt*price  OR  remove if qty == amt
+        //   Buyer:  qty+=amt, price = new basis using amt*price  OR create
+        // Update stonks with best_price
+
+        if 0.0 < quote_qty {
+            let sql = format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, {:.4}, {})", cmd.from, ticker, -quote_qty, quote_price, now);
+            let res = get_sql(&sql)?;
+            warn!("SQLite => {:?}", res);
+        }
+    } else { // bid quote (+price) by buyer.
+        // Someone tries to buy by making a bid for X 1 shares of V value 1.01, which is >= than the lowest abs(ask) price
+        // so xfer security to bid/buyer from ask/seller at seller's abs(price)
+        // sql = SELECT id,ticker,amount,price, time FROM exchange WHERE price<0 AND abs(price)<=10.01 ORDER BY price DESC LIMIT 1;
+        // VALUE = min(bid.price, sql.amount)
+        // Deduct X securities and add VALUE on user sql.id
+        // Deduct count or remove security from from exchange
+        // Add X securities and sub VALUE on user cmd.from
+        // Update stonks with PRICE
+        // Add remaining bid quote to exchange
+        // Any askers willing to sell?
+
+        let sql =
+            format!("SELECT * FROM exchange WHERE ticker='{}' AND qty<0 AND price<={} ORDER BY price LIMIT 1",
+                ticker, quote_price);
+        let asker = get_sql(&sql)?;
+        warn!("asker => {:?}", asker);
+
+        if 1 <= asker.len() {
+            // TODO wtf min maxing twice?
+            let qty =  -asker[0].get("qty").unwrap().parse::<f64>()?;
+            let price = asker[0].get("price").unwrap().parse::<f64>()?;
+
+            let best_qty = quote_qty.min(qty);
+            let best_price = quote_price.min(price);
+
+            warn!("new seller {}@{}  existing buyer {}@{} => {}@{}",
+                quote_qty, quote_price,   qty, price,   best_qty, best_price);
+
+            quote_qty -= best_qty;
+
+            let now = Instant::now().seconds();
+            sql_table_order_insert(
+                asker[0].get("id").unwrap().parse::<i64>()?,
+                &ticker, -best_qty, best_price, now);
+            sql_table_order_insert(cmd.from, &ticker, best_qty, best_price, now);
+        }
+
+        if 0.0 < quote_qty {
+            let sql = format!("INSERT INTO exchange VALUES ({}, '{}', {:.4},  {:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now);
+            let res = get_sql(&sql)?;
+            warn!("SQLite => {:?}", res);
+        }
+    }
 
     Ok("COMPLETED.")
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-fn sql_results_handler (
-    snd :Sender<HashMap<String, String>>,
-    res :&[(&str, Option<&str>)] // [ (column, value) ]
-) -> bool {
-    let mut v = HashMap::new();
-    for r in res {
-        trace!("sql_results_handler vec <- {:?}", r);
-        v.insert( r.0.to_string(), r.1.unwrap_or("NULL").to_string() );
-    }
-    let res = snd.send(v);
-    trace!("sql_results_handler snd <- {:?}", res);
-    true
-}
-
-fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
-    info!("\x1b[36mSQLite <= {}\x1b[0m", cmd);
-    let sql = ::sqlite::open( "tmbot.sqlite" )?;
-    let (snd, rcv) = channel::<HashMap<String, String>>();
-    sql.iterate(cmd, move |r| sql_results_handler(snd.clone(), r) )?;
-    Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
 }
 
 ////////////////////////////////////////////////////////////////////////////////
