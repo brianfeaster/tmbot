@@ -42,24 +42,24 @@ fn update_ticker_p (time :i64, now :i64) -> bool {
         LocalDateTime::from_instant(Instant::at(time))
         .date();
 
-    let market_open =
+    let is_market_day =
         match day.weekday() {
             Saturday | Sunday => false,
             _ => true
         };
 
     // TODO: Check if time is DST and adjust hours below by -1
-    let bell_open =
+    let time_bell_open =
         LocalDateTime::new(day, LocalTime::hms(14, 30, 0).unwrap())
         .to_instant().seconds();
 
-    let bell_close =
+    let time_bell_close =
         LocalDateTime::new(day, LocalTime::hms(21, 0, 0).unwrap())
         .to_instant().seconds();
 
     return
-        if market_open  &&  time < bell_close {
-            bell_open <= now  &&  (time+(5*60) < now  ||  bell_close <= now) // Five minute delay/throttle
+        if is_market_day  &&  time < time_bell_close {
+            time_bell_open <= now  &&  (time+(5*60) < now  ||  time_bell_close <= now) // Five minute delay/throttle
         } else {
             update_ticker_p(next_trading_day(day), now)
         }
@@ -288,7 +288,7 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
 
 
 async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, String)>, Serror> {
-    info!("get_ticker_quote {}", ticker);
+    info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -346,36 +346,29 @@ async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, Strin
     let price = caps[3].to_string();
     let price_bare = price.replacen(",", "", 1000);
 
-    let re = Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap();
-    let caps_percentages = re
-        .captures_iter(domstr)
-        .map( |cap| {
+    Ok(Some(
+        Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap()
+        .captures(domstr)
+        .map_or( // Tuple   ("red/green emoji" "pretty price change name" price)
+            ( "".to_string(),  price.to_string() + &title,  price_bare.to_string() )
+            ,
+            |cap| {
             let amt = &cap[1];
             let per = &cap[2];
             ( // delta as a colored emoji
                 if amt.chars().next().unwrap() == '+' { from_utf8(b"\xF0\x9F\x9F\xA2").unwrap() } else { from_utf8(b"\xF0\x9F\x9F\xA5").unwrap() }
                 .to_string()
             , // the delta string
-                if amt.chars().next().unwrap() == '+' { from_utf8(b"\xE2\x86\x91").unwrap() } else { from_utf8(b"\xE2\x86\x93").unwrap() }
-                .to_string()
-                + &cap[1][1..]
-                + " "
-                + &per[1..]
+                price + " "
+                + if amt.chars().next().unwrap() == '+' { from_utf8(b"\xE2\x86\x91").unwrap() } else { from_utf8(b"\xE2\x86\x93").unwrap() }
+                    + &cap[1][1..]
+                    + " "
+                    + &per[1..] + " "
+                + &title
+            , // price bare
+                price_bare
             )
-        } )
-        .collect::<Vec<(String, String)>>();
-    info!(r#"http dom percentages {:?} {:?}"#, ticker, caps_percentages);
-
-    if caps_percentages.is_empty() {
-        return Ok(Some( ( "".to_string(),
-                       price + &title,
-                       price_bare ) ) );
-    } else {
-        let percentage = &caps_percentages[0];
-        return Ok(Some( ( percentage.0.to_string(),
-                       price + " " + &percentage.1 + " " + &title,
-                       price_bare ) ) );
-    }
+        } ) ) )
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -715,9 +708,28 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
+    // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("do_yolo SKIP"); }
 
-    let sql = "select * from (select name, round(sum(amount),2) as yolo from ((select positions.id, amount*price as amount from positions left join entitys on positions.id=entitys.id left join stonks on positions.ticker=stonks.ticker UNION select * from accounts) as T left join entitys on T.id=entitys.id) group by name) order by yolo desc";
+    // Update all positioned tickers
+    let results = get_sql("SELECT ticker FROM positions GROUP BY ticker")?;
+    for row in results {
+        warn!("{:?}", get_stonk( row.get("ticker").unwrap() ).await);
+    }
+
+    let sql = " \
+    SELECT name, round(sum(amount),2) AS yolo \
+    FROM ( \
+            SELECT id, amount*price AS amount \
+            FROM positions \
+            NATURAL JOIN stonks \
+        UNION \
+            SELECT * FROM accounts \
+        ) \
+    NATURAL JOIN entitys \
+    GROUP BY name \
+    ORDER BY yolo DESC \
+    ";
     let results = get_sql(&sql)?;
     warn!("=> {:?}", results);
 
@@ -926,7 +938,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     info!("{:?}", do_sql(&db, &cmd).await);
     info!("{:?}", do_quotes(&db, &cmd).await);
     info!("{:?}", do_stonks(&db, &cmd).await);
-    info!("{:?}", do_yolo(&db, &cmd).await);
+    glogd("do_yolo - ", do_yolo(&db, &cmd).await);
     info!("{:?}", do_trade_buy(&db, &cmd).await);
     info!("{:?}", do_trade_sell(&db, &cmd).await);
     //info!("{:?}", do_exchange_bidask(&db, &cmd).await);
