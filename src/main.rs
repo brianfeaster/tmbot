@@ -756,8 +756,13 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     // Convert dollars to shares maybe.  Round to 4 decimal places
     let mut qty = round(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
 
+    if qty <= 0.0 {
+        send_msg(db, cmd.from, "You can't buy non-positive shares.").await?;
+        return Ok("OK do_trade_buy non positive share count.");
+    }
+
     let bank_balance = get_bank_balance(cmd.from)?;
-    let basis = round(qty * price, 2);
+    let basis = qty * price;
     let new_balance = bank_balance - basis;
 
     if new_balance < 0.0 {
@@ -796,7 +801,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     };
 
 
-    let sql = format!("UPDATE accounts set balance={} where id={}", new_balance, cmd.from);
+    let sql = format!("UPDATE accounts set balance={:.2} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
     // Send current portfolio
@@ -821,7 +826,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
     let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-    let value = round(qty * price, 2);
+    let value = qty * price;
 
     let bank_balance = get_bank_balance(cmd.from)?;
     let new_bank_balance = bank_balance + value;
@@ -829,17 +834,17 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let now :i64 = Instant::now().seconds();
 
     let sql = format!("INSERT INTO orders VALUES ({}, '{}', {:.4}, {:.8}, {})", cmd.from, ticker, -qty, price, now);
-    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
+    info!("SQLite => {:?}", get_sql(&sql));
 
-    let sql = format!("UPDATE accounts SET balance={} WHERE id={}", new_bank_balance, cmd.from);
-    info!("Update bank balance {} => {} result {:?}", bank_balance, new_bank_balance, get_sql(&sql));
+    let sql = format!("UPDATE accounts SET balance={:.2} WHERE id={}", new_bank_balance, cmd.from);
+    info!("Update bank balance {} => {} SQLite => {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
     let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
-    info!("Remove position result {:?}", get_sql(&sql));
+    info!("SQLite => {:?}", get_sql(&sql));
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("via do_trade_sell {:?}", do_stonks(db, &cmd2).await);
+    info!("do_trade_sell => do_stonks => {:?}", do_stonks(db, &cmd2).await);
 
     Ok("COMPLETED.")
 }
@@ -871,9 +876,9 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
                 warn!("seller {}@{}  final {}@{}", quote_qty, quote_price, qty, price);
             }
 
-           /// Someone tries to sell by making an ask quote for X 1 shares of V value 0.90 which is <= highest bid price
-           ///sql = SELECT id,ticker,amount,price,time FROM exchange WHERE price>0 AND .99<=price ORDER BY price DESC LIMIT 1
-           /// VALUE = (PRICE=max(ask.price, sql.amount)) * (COUNT=min(ask.amount, sql.amount))
+            // Someone tries to sell by making an ask quote for X 1 shares of V value 0.90 which is <= highest bid price
+            // sql = SELECT id,ticker,amount,price,time FROM exchange WHERE price>0 AND .99<=price ORDER BY price DESC LIMIT 1
+            // VALUE = (PRICE=max(ask.price, sql.amount)) * (COUNT=min(ask.amount, sql.amount))
             // Add X securities and subtract VALUE on bidder/buyer sql.id
             // Deduct COUNT or remove security from exchange
             // Sub X securities and add VALUE on user cmd.from
