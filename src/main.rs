@@ -93,6 +93,7 @@ struct Cmd {
 fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 
     let json: JsonValue = bytes2json(&body)?;
+    info!("parse_cmd \x1b[1;33m{}\x1b[0m", json);
 
     let inline_query = &json["inline_query"];
     if inline_query.is_object() {
@@ -455,7 +456,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 ////////////////////////////////////////////////////////////////////////////////
 
 
-fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
+fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
     let re = Regex::new(r"^@?[A-Za-z^.-=]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
@@ -474,7 +475,7 @@ fn text_parse_for_tickers (txt :&str) -> Option<HashSet<String>> {
             }
         }
     }
-    if tickers.is_empty() { None } else { Some(tickers) }
+    tickers
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -637,7 +638,9 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let tickers = text_parse_for_tickers(&cmd.msg).ok_or("do_quotes SKIP no tickers")?;
+    let tickers = text_parse_for_tickers(&cmd.msg);
+
+    if tickers.is_empty() { return Ok("SKIP") }
 
     for ticker in &tickers {
         let stonk = get_stonk(ticker).await?;
@@ -648,12 +651,12 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         }
     }
 
-    Ok("Ok do_quotes")
+    Ok("COMPLETED.")
 }
 
 async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-     if Regex::new(r"STONKS[!?]|[!?]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("do_stonks SKIP"); }
+     if Regex::new(r"STONKS[!?]|[!?]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let bank_balance = get_bank_balance(cmd.from)?;
 
@@ -703,18 +706,17 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
-    Ok("OK do_stonks")
+    Ok("COMPLETED.")
 }
 
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Handle: !yolo ?yolo yolo! yolo?
-    if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("do_yolo SKIP"); }
+    if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    // Update all positioned tickers
-    let results = get_sql("SELECT ticker FROM positions GROUP BY ticker")?;
-    for row in results {
-        warn!("{:?}", get_stonk( row.get("ticker").unwrap() ).await);
+    // Update all user-positioned tickers
+    for row in get_sql("SELECT ticker FROM positions GROUP BY ticker")? {
+        info!("{:?}", get_stonk( row.get("ticker").unwrap() ).await);
     }
 
     let sql = " \
@@ -733,14 +735,18 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let results = get_sql(&sql)?;
     warn!("=> {:?}", results);
 
+    // Build and send response string
+
     let mut msg = "*YOLOlians*".to_string();
     for row in results {
-        msg.push_str( &format!(" `{}@{}`", row.get("yolo").unwrap(), row.get("name").unwrap()) );
+        msg.push_str( &format!(" `{}@{}`",
+            row.get("yolo").unwrap(),
+            row.get("name").unwrap()) );
     }
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
-    Ok("OK do_yolo")
+    Ok("COMPLETED.")
 }
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
@@ -930,17 +936,18 @@ fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
 
 async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     let cmd = parse_cmd(&body)?;
-    warn!("\x1b[33m{:?}", &cmd);
-    info!("{:?}", do_like(&db, &cmd).await);
-    info!("{:?}", do_like_info(&db, &cmd).await);
-    info!("{:?}", do_syn(&db, &cmd).await);
-    info!("{:?}", do_def(&db, &cmd).await);
-    info!("{:?}", do_sql(&db, &cmd).await);
-    info!("{:?}", do_quotes(&db, &cmd).await);
-    info!("{:?}", do_stonks(&db, &cmd).await);
-    glogd("do_yolo - ", do_yolo(&db, &cmd).await);
-    info!("{:?}", do_trade_buy(&db, &cmd).await);
-    info!("{:?}", do_trade_sell(&db, &cmd).await);
+    info!("do_all \x1b[33m{:?}", &cmd);
+
+    glogd("do_like =>",      do_like(&db, &cmd).await);
+    glogd("do_like_info =>", do_like_info(&db, &cmd).await);
+    glogd("do_syn =>",       do_syn(&db, &cmd).await);
+    glogd("do_def =>",       do_def(&db, &cmd).await);
+    glogd("do_sql =>",       do_sql(&db, &cmd).await);
+    glogd("do_quotes => ",   do_quotes(&db, &cmd).await);
+    glogd("do_stonks =>",    do_stonks(&db, &cmd).await);
+    glogd("do_yolo =>",      do_yolo(&db, &cmd).await);
+    glogd("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
+    glogd("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
     //info!("{:?}", do_exchange_bidask(&db, &cmd).await);
     Ok(())
 }

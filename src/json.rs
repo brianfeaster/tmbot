@@ -8,7 +8,6 @@ pub use crate::serror::*;
 /// 
 pub fn bytes2json (body: &[u8]) -> Result<JsonValue, Serror> {
     let json = json::parse( from_utf8(&body)? )?;
-    info!("Json \x1b[1;35m{}\x1b[0m", json);
     Ok(json)
 }
 
