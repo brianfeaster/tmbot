@@ -78,6 +78,14 @@ fn round (num:f64, pow:i32) -> f64 {
     let fac = 10f64.powi(pow);
     (num * fac).floor() / fac
 }
+
+fn num_simp (num:&str) -> String {
+    num
+    .trim_end_matches("0")
+    .trim_end_matches(".")
+    .into()
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Clone, Debug)]
@@ -660,12 +668,34 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if tickers.is_empty() { return Ok("SKIP") }
 
     for ticker in &tickers {
+        // Dump Level 2 quotes as well
+        let bidask =
+            if &ticker[0..1] == "@" { 
+                let mut asks = "*Asks*".to_string();
+                for ask in get_sql(&format!("SELECT -qty as qty,price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
+                    asks.push_str(&format!(" `{:.2}/{}`",
+                        ask.get("price").unwrap().parse::<f64>()?,
+                        num_simp(ask.get("qty").unwrap()),
+                    ));
+                }
+                let mut bids = "*Bids*".to_string();
+                for bid in get_sql(&format!("SELECT qty,price FROM exchange WHERE 0<qty AND ticker='{}' order by price desc;", ticker))? {
+                    bids.push_str(&format!(" `{:.2}/{}`",
+                        bid.get("price").unwrap().parse::<f64>()?,
+                        num_simp(bid.get("qty").unwrap()),
+                    ));
+                }
+                format!("\n{}\n{}", asks, bids).to_string()
+            } else {
+                "".to_string()
+            };
         let stonk = get_stonk(ticker).await?;
         if stonk.contains_key("updated") {
-            send_msg(db, cmd.at, &format!("{}·", stonk.get("pretty").unwrap())).await?;
+            send_msg_markdown(db, cmd.at, &format!("{}·{}", stonk.get("pretty").unwrap(), bidask)).await?;
         } else {
-            send_msg(db, cmd.at, &stonk.get("pretty").unwrap()).await?;
+            send_msg_markdown(db, cmd.at, &format!("{}{}", &stonk.get("pretty").unwrap(), bidask)).await?;
         }
+
     }
 
     Ok("COMPLETED.")
@@ -773,7 +803,6 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
-    error!("{:?}", trade);
 
     let ticker = trade[1].to_uppercase();
     let mut is_dollars = !trade[2].is_empty();
@@ -898,7 +927,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
 
     let now = Instant::now().seconds();
 
-    if quote_qty < 0.0 { // A seller has appeard:  ask quote (-qty, price)
+    if quote_qty < 0.0 { // A seller has appeared:  ask quote (-qty, price)
 
         // Check seller has the qty first
         let seller_position = get_sql(
@@ -961,7 +990,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
         //   Buyer:  qty+=amt, price = new basis using amt*price  OR create
         // Update stonks with best_price
 
-    } else { // A buyer has appeard:  bid quote (+price)
+    } else { // A buyer has appeared:  bid quote (+price)
         let asker = get_sql(
             &format!("SELECT * FROM exchange WHERE ticker='{}' AND qty<0 AND price<={} ORDER BY price LIMIT 1",
                 ticker, quote_price))?;
