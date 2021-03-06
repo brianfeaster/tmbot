@@ -415,45 +415,27 @@ fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) {
 async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
 
     let nowsecs :i64 = Instant::now().seconds();
+    let is_self_stonk = &ticker[0..1] == "@";
 
-    if &ticker[0..1] == "@" {
-        let res = get_sql(&format!("SELECT * FROM stonks WHERE ticker='{}'", ticker))?;
+    let res = get_sql(&format!("SELECT * FROM stonks WHERE ticker='{}'", ticker))?;
+    let is_in_table =
         if !res.is_empty() { // Stonks table contains this ticker
             let hm = &res[0];
-
-            let price = hm.get("price").unwrap().parse::<f64>().unwrap();
-            let mut hm :HashMap::<String, String> = HashMap::new();
-            hm.insert("ticker".into(), ticker.to_string());
-            hm.insert("price".into(),  price.to_string());
-            hm.insert("time".into(),   nowsecs.to_string());
-            hm.insert("pretty".into(), format!("{}@{}", ticker, price));
-            return Ok(hm);
-        } else {
-            let mut hm :HashMap::<String, String> = HashMap::new();
-            hm.insert("ticker".into(), ticker.to_string());
-            hm.insert("price".into(),  "0.0".into());
-            hm.insert("time".into(),   nowsecs.to_string());
-            hm.insert("pretty".into(), format!("{}@0.0", ticker));
-            return Ok(hm);
-        }
-    }
-
-    let sql = format!("SELECT * FROM stonks WHERE ticker='{}'", ticker);
-    let res = get_sql(&sql).unwrap();
-    let mut is_in_table = false;
-
-    if !res.is_empty() { // Stonks table contains this ticker
-        let hm = &res[0];
-        let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
-        let should_update = update_ticker_p(timesecs, nowsecs);
-        //info!("{} {} {} {:?}", hm.get("ticker").unwrap(), hm.get("price").unwrap(), timesecs, hm.get("pretty").unwrap());
-        if !should_update { return Ok(hm.clone()); }
-        is_in_table = true;
-    }
+            let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
+            if !update_ticker_p(timesecs, nowsecs)|| is_self_stonk {
+                return Ok(hm.clone())
+            }
+            true
+        } else { false };
 
     // Either not in table or need to update table
+    let quote = if is_self_stonk {
+        Some((from_utf8(b"\xF0\x9F\x9F\xA2").unwrap().into(), "0.00".into(), "0.00".into()))
+    } else {
+        get_ticker_quote(&ticker).await?
+    };
 
-    if let Some(price) = get_ticker_quote(&ticker).await? {
+    if let Some(price) = quote {
         let pretty = format!("{}{}@{}", price.0, ticker, price.1);
         //send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
         let sql = if is_in_table {
@@ -787,13 +769,24 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^([A-Za-z^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
+
     if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
+    error!("{:?}", trade);
 
     let ticker = trade[1].to_uppercase();
-    let is_dollars = !trade[2].is_empty();
-    let qty_or_dollars = trade[3].parse::<f64>()?;
+    let mut is_dollars = !trade[2].is_empty();
+
+    let bank_balance = get_bank_balance(cmd.from)?;
+
+    let qty_or_dollars =
+        if trade.get(3).is_none() {
+            is_dollars=true;
+            bank_balance
+        } else {
+            trade[3].parse::<f64>()?
+        };
 
     let stonk = get_stonk(&ticker).await?;
     let mut price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
@@ -806,7 +799,6 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         return Ok("OK do_trade_buy non positive share count.");
     }
 
-    let bank_balance = get_bank_balance(cmd.from)?;
     let basis = qty * price;
     let new_balance = bank_balance - basis;
 
