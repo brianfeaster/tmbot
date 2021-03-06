@@ -12,18 +12,31 @@ pub fn ginfo<T:  std::fmt::Debug>(e: T) -> bool { info!("{:?}",  e); true }
 pub fn gwarn<T:  std::fmt::Debug>(e: T) -> bool { warn!("{:?}",  e); true }
 pub fn gerror<T: std::fmt::Debug>(e: T) -> bool { error!("{:?}", e); true }
 
-pub fn ginfod<T:  std::fmt::Debug>(h:&str, e: T) { info!("{} {}",  h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
-pub fn gerrord<T: std::fmt::Debug>(h:&str, e: T) { error!("{} {}", h, format!("{:?}", e).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\"")); }
+#[macro_export(local_inner_macros)]
+macro_rules! ginfod {
+    ($pre:expr, $arg:expr) => (
+        info!("{} {}",
+            $pre,
+            std::format!("{:?}", $arg).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\""))
+    )
+}
 
-pub fn glogd<
-    R: std::fmt::Debug,
-    T: std::fmt::Debug
-> (
-    h:&str,
-    e: Result<R, T>
-) {
-    match e {
-        Ok(r) => ginfod(h, r),
-       Err(r) => gerrord(h, r)
-    }
+#[macro_export(local_inner_macros)]
+macro_rules! gerrord {
+    ($pre:expr, $arg:expr) => (
+        error!("{} {}",
+            $pre,
+            std::format!("{:?}", $arg).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\""))
+    )
+}
+
+
+#[macro_export(local_inner_macros)]
+macro_rules! glogd {
+    ($pre:expr, $arg:expr) => (
+        match $arg {
+            Ok(r) => info!("{} {:?}", $pre, r),
+            Err(r) => error!("{} {:?}", $pre, r)
+        }
+    )
 }
