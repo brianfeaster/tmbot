@@ -483,7 +483,7 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 pub fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^@?[A-Za-z^.=-]*[A-Za-z^.]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    let re = Regex::new(r"^@?[A-Za-z^.=_-]*[A-Za-z^._]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -691,9 +691,9 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             };
         let stonk = get_stonk(ticker).await?;
         if stonk.contains_key("updated") {
-            send_msg_markdown(db, cmd.at, &format!("{}·{}", stonk.get("pretty").unwrap(), bidask)).await?;
+            send_msg_markdown(db, cmd.at, &format!("{}·{}", stonk.get("pretty").unwrap().replace("_", "\\_"), bidask)).await?;
         } else {
-            send_msg_markdown(db, cmd.at, &format!("{}{}", &stonk.get("pretty").unwrap(), bidask)).await?;
+            send_msg_markdown(db, cmd.at, &format!("{}{}", &stonk.get("pretty").unwrap().replace("_", "\\_"), bidask)).await?;
         }
 
     }
