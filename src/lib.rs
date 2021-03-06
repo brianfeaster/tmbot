@@ -138,7 +138,7 @@ fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
+async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
     info!("Telegram <= \x1b[36m{}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
@@ -159,7 +159,44 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
                  ["disable_notification", "true"]]).unwrap()
         .send().await
     {
-        Err(e) => error!("Telegram \x1b[31m => {:?}", e),
+        Err(e) => {
+            error!("Telegram \x1b[31m => {:?}", e);
+            Err(Serror::SendRequestError(e))
+        },
+        Ok(mut result) => {
+            ginfod!("Telegram => \x1b[35m", &result);
+            let body = result.body().await;
+            ginfod!("Telegram => \x1b[1;35m", body);
+            Ok(getin_i64( &bytes2json(&body?)?, &["result", "message_id"] )? )
+        }
+    }
+}
+
+async fn send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> Result<(), Serror> {
+    info!("Telegram <= \x1b[36m{}", text);
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
+    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("cert.pem")?;
+
+    match
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( builder.build() )
+                    .timeout(Duration::new(30,0))
+                    .finish() )
+        .finish()
+        .get( db.url_bot.clone() + "/editmessagetext")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(30,0))
+        .query(&[["chat_id", &chat_id.to_string()],
+                 ["message_id", &message_id.to_string()],
+                 ["text", &text],
+                 ["disable_notification", "true"]]).unwrap()
+        .send().await
+    {
+        Err(e) => {
+            error!("Telegram \x1b[31m => {:?}", e);
+        },
         Ok(mut result) => {
             ginfod!("Telegram => \x1b[35m", &result);
             ginfod!("Telegram => \x1b[1;35m", result.body().await);
@@ -167,6 +204,7 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
     }
     Ok(())
 }
+
 
 async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
     let text = text // Poor person's uni/url decode
@@ -203,6 +241,58 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
+                 ["text", &text],
+                 ["parse_mode", "MarkdownV2"],
+                 ["disable_notification", "true"]]).unwrap()
+        .send()
+        .await;
+
+    match response {
+        Err(e) => error!("\x1b[31m-> {:?}", e),
+        Ok(mut r) => {
+            ginfod!("Telegram => \x1b[35m", &r);
+            ginfod!("Telegram => \x1b[1;35m", r.body().await);
+        }
+    }
+    Ok(())
+}
+
+async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &str) -> Result<(), Serror> {
+    let text = text // Poor person's uni/url decode
+    .replacen("%20", " ", 10000)
+    .replacen("%28", "(", 10000)
+    .replacen("%29", ")", 10000)
+    .replacen("%3D", "=", 10000)
+    .replacen("%2C", ",", 10000)
+    .replacen("%26%238217%3B", "'", 10000)
+    // Telegram required markdown escapes
+    .replacen(".", "\\.", 10000)
+    .replacen("(", "\\(", 10000)
+    .replacen(")", "\\)", 10000)
+    .replacen("{", "\\{", 10000)
+    .replacen("}", "\\}", 10000)
+    .replacen("-", "\\-", 10000)
+    .replacen("+", "\\+", 10000)
+    .replacen("=", "\\=", 10000)
+    .replacen("'", "\\'", 10000);
+
+    info!("Telegram <= \x1b[33m{}\x1b[0m", text);
+    let mut builder = SslConnector::builder(SslMethod::tls())?;
+    builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+    builder.set_certificate_chain_file("cert.pem")?;
+
+    let response =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( builder.build() )
+                    .timeout(Duration::new(30,0))
+                    .finish() )
+        .finish() // -> Client
+        .get( db.url_bot.clone() + "/editmessagetext")
+        .header("User-Agent", "Actix-web")
+        .timeout(Duration::new(30,0))
+        .query(&[["chat_id", &chat_id.to_string()],
+                 ["message_id", &message_id.to_string()],
                  ["text", &text],
                  ["parse_mode", "MarkdownV2"],
                  ["disable_notification", "true"]]).unwrap()
@@ -447,9 +537,9 @@ async fn get_stonk (ticker :&str) -> Result<HashMap<String, String>, Serror> {
         let pretty = format!("{}{}@{}", price.0, ticker, price.1);
         //send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
         let sql = if is_in_table {
-            format!("UPDATE stonks SET price={}, time={}, pretty='{}' WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
+            format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
         } else {
-            format!("INSERT INTO stonks VALUES ('{}', {}, {}, '{}')", ticker, price.2, nowsecs, pretty)
+            format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, price.2, nowsecs, pretty)
         };
         info!("SQLite => {:?}", get_sql(&sql)?);
         let mut hm :HashMap::<String, String> = HashMap::new();
@@ -672,14 +762,14 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let bidask =
             if &ticker[0..1] == "@" { 
                 let mut asks = "*Asks*".to_string();
-                for ask in get_sql(&format!("SELECT -qty as qty,price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
+                for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
                     asks.push_str(&format!(" `{:.2}/{}`",
                         ask.get("price").unwrap().parse::<f64>()?,
                         num_simp(ask.get("qty").unwrap()),
                     ));
                 }
                 let mut bids = "*Bids*".to_string();
-                for bid in get_sql(&format!("SELECT qty,price FROM exchange WHERE 0<qty AND ticker='{}' order by price desc;", ticker))? {
+                for bid in get_sql(&format!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker='{}' order by price desc;", ticker))? {
                     bids.push_str(&format!(" `{:.2}/{}`",
                         bid.get("price").unwrap().parse::<f64>()?,
                         num_simp(bid.get("qty").unwrap()),
@@ -760,12 +850,19 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
+    let mut working_message = "working...".to_string();
+    let message_id = send_msg(db, cmd.at, &working_message).await?;
+
     // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     // Update all user-positioned tickers
     for row in get_sql("SELECT ticker FROM positions GROUP BY ticker")? {
-        info!("Stonk \x1b[33m{:?}", get_stonk( row.get("ticker").unwrap() ).await?);
+        let ticker = row.get("ticker").unwrap();
+        //working_message.push_str(ticker);
+        //working_message.push_str("...");
+        //send_edit_msg(db, cmd.at, message_id, &working_message).await?;
+        info!("Stonk \x1b[33m{:?}", get_stonk( ticker ).await?);
     }
 
     let sql = "\
@@ -792,7 +889,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             row.get("name").unwrap()) );
     }
 
-    send_msg_markdown(db, cmd.at, &msg).await?;
+    send_edit_msg_markdown(db, cmd.at, message_id, &msg).await?;
 
     Ok("COMPLETED.")
 }
