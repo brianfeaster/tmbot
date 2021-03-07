@@ -850,11 +850,11 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    let mut working_message = "working...".to_string();
-    let message_id = send_msg(db, cmd.at, &working_message).await?;
-
     // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+
+    let mut working_message = "working...".to_string();
+    let message_id = send_msg(db, cmd.at, &working_message).await?;
 
     // Update all user-positioned tickers
     for row in get_sql("SELECT ticker FROM positions GROUP BY ticker")? {
