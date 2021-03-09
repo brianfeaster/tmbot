@@ -637,7 +637,7 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 "`/yolo  ` `The leaderboard`
 `/stonks` `Your portfolio`
 `gme$   ` `Quote GME ({}min delay)`
-`gme-   ` `Sell entire GME position`
+`gme-   ` `Sell entire position`
 `gme+   ` `Buy with all cash`
 `gme+2  ` `Buy 2 shares`
 `gme+$9 ` `Buy $9 worth`", QUOTE_THROTTLE)).await?;
