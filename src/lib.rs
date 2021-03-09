@@ -317,8 +317,6 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
         .send()
         .await
     { response => {
-        glogd!("zomg", &response);
-        ginfod!("Telegram => \x1b[35m", &response);
         ginfod!("Telegram => \x1b[1;35m", response?.body().await);
         Ok(())
     } }
@@ -585,7 +583,6 @@ fn get_bank_balance (id :i64) -> Result<f64, Serror> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-
 pub fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
     let re = Regex::new(r"^@?[A-Za-z0-9^.=_-]*[A-Za-z0-9^._]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
@@ -606,6 +603,27 @@ pub fn text_parse_for_tickers (txt :&str) -> HashSet<String> {
         }
     }
     tickers
+}
+
+fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String, Serror> {
+    let basis = qty*cost;
+    let value = qty*price;
+    let gain = format!("{:.2}", value - basis);
+    let gain_percent = percent_squish((100.0 * (price-cost)/cost).abs());
+    //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrows
+    let greenred =
+        if basis < value {
+            from_utf8(b"\xF0\x9F\x9F\xA2")? // green circle
+        } else if basis == value {
+            from_utf8(b"\xF0\x9F\x94\xB7")? // blue diamond
+        } else {
+            from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
+        };
+    Ok(format!("\n`{:>7.2}``{:>8} {} {}``{} @{:.2}` *{}*_@{:.2}_",
+        value,
+        gain, gain_percent, greenred,
+        ticker, price,
+        qty, cost))
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -817,46 +835,19 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let mut msg = String::new();
     let mut total = 0.0;
-    //let mut total_gain = 0.0;
 
     for pos in positions {
         let ticker = pos.get("ticker").unwrap();
-
         let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
-
         let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
         let basis = qty * cost;
-
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
         let value = qty * price;
-
         let gain = value-basis;
-
-        let gain_percent = (100.0*(price-cost)/cost).abs();
-        //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
-        let greenred =
-            if basis < value {
-                from_utf8(b"\xF0\x9F\x9F\xA2")? // green circle
-            } else if basis == value {
-                from_utf8(b"\xF0\x9F\x94\xB7")? // blue diamond
-            } else {
-                from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
-            };
-
-        msg.push_str(
-            &format!("\n`{:>7.2}``{:>8} {} {}``{} @{:.2}` *{}*_@{:.2}_",
-                value,
-                format!("{:.2}", gain), percent_squish(gain_percent), greenred,
-                ticker, price,
-                qty, cost,
-             ) );
-
         total += value;
-        //total_gain += gain;
+        msg.push_str(&format_position(ticker, qty, cost, price)?);
     }
-    //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
     msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", cash, total+cash));
-
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
@@ -898,8 +889,8 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let mut msg = "*YOLOlians*".to_string();
     for row in results {
-        msg.push_str( &format!(" `{}@{}`",
-            row.get("yolo").unwrap(),
+        msg.push_str( &format!(" `{:.2}@{}`",
+            row.get("yolo").unwrap().parse::<f64>()?,
             row.get("name").unwrap()) );
     }
 
@@ -999,6 +990,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
 
     let qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
+    let cost = positions[0].get("price").unwrap().parse::<f64>().unwrap();
     let price = get_stonk(&ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
     let value = qty * price;
 
@@ -1013,9 +1005,13 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
     info!("SQLite => {:?}", get_sql(&sql));
 
+    // Send final gain realized
+    let msg = format!("Closing:{}", &format_position(&ticker, qty, cost, price)?);
+    send_msg_markdown(db, cmd.at, &msg).await?;
+
     // Send current portfolio
-    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("do_trade_sell => do_portfolio => {:?}", do_portfolio(db, &cmd2).await);
+    //let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
+    //info!("do_trade_sell => do_portfolio => {:?}", do_portfolio(db, &cmd2).await);
 
     Ok("COMPLETED.")
 }
