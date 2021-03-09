@@ -808,7 +808,7 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
 async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    if Regex::new(r"STONKS[!?]|[!?]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let cash = get_bank_balance(cmd.from)?;
 
@@ -865,7 +865,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Handle: !yolo ?yolo yolo! yolo?
-    if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    if Regex::new(r"YOLO[!?]|[!?/]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let working_message = "working...".to_string();
     let message_id = send_msg(db, cmd.at, &working_message).await?;
