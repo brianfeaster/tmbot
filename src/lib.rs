@@ -634,13 +634,13 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
     if cmd.msg != "/help" { return Ok("do_help SKIP"); }
 
     send_msg_markdown(db, cmd.at, &format!(
-"`/yolo   ` `The leaderboard`
-`/stonks ` `Your portfolio`
-`gme$    ` `Quote GME ({}min delay)`
-`gme-    ` `Sell entire GME position`
-`gme+    ` `Buy with all cash`
-`gme+2   ` `Buy 2 shares`
-`gme+$9  ` `Buy $9 worth`", QUOTE_THROTTLE)).await?;
+"`/yolo  ` `The leaderboard`
+`/stonks` `Your portfolio`
+`gme$   ` `Quote GME ({}min delay)`
+`gme-   ` `Sell entire GME position`
+`gme+   ` `Buy with all cash`
+`gme+2  ` `Buy 2 shares`
+`gme+$9 ` `Buy $9 worth`", QUOTE_THROTTLE)).await?;
     Ok("COMPLETED.")
 }
 
