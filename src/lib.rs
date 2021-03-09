@@ -844,7 +844,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             };
 
         msg.push_str(
-            &format!("\n`{:>7.2}``{:>8} {} {}``{}@{:.2}` *{}*_@{:.2}_",
+            &format!("\n`{:>7.2}``{:>8} {} {}``{} @{:.2}` *{}*_@{:.2}_",
                 value,
                 format!("{:.2}", gain), percent_squish(gain_percent), greenred,
                 ticker, price,
