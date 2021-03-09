@@ -23,7 +23,6 @@ use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
 use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*}; // ISO
 
-
 ////////////////////////////////////////////////////////////////////////////////
 /// Datetime details:
 /// * Time is seconds since epoch, UTC
@@ -79,11 +78,29 @@ fn round (num:f64, pow:i32) -> f64 {
     (num * fac).floor() / fac
 }
 
+// *.*0=>*.*   *.=>*
 fn num_simp (num:&str) -> String {
     num
     .trim_end_matches("0")
     .trim_end_matches(".")
     .into()
+}
+
+// "100%"  "99.9%"  "10.0%"  "9.99%"  "0.99%""
+fn percent_squish (num:f64) -> String {
+    if 100.0 <= num {
+        format!("{:.0}%", num)
+    } else if 10.0 <= num {
+        format!("{:.1}%", num)
+    } else {
+        format!("{:.2}%", num)
+    }
+}
+
+// (5,a,b) "a...b"
+fn pad_between(width: usize, a:&str, b:&str) -> String {
+    let lenb = b.len();
+    format!("{: <pad$}{}", a, b, pad=width-lenb)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -137,6 +154,7 @@ fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+use ::std::result::*;
 
 async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
     info!("Telegram <= \x1b[36m{}", text);
@@ -144,35 +162,34 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
     builder.set_certificate_chain_file("cert.pem")?;
 
-    match
-        Client::builder()
-        .connector( Connector::new()
-                    .ssl( builder.build() )
-                    .timeout(Duration::new(30,0))
-                    .finish() )
-        .finish()
-        .get( db.url_bot.clone() + "/sendmessage")
-        .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(30,0))
-        .query(&[["chat_id", &chat_id.to_string()],
-                 ["text", &text],
-                 ["disable_notification", "true"]]).unwrap()
-        .send().await
-    {
-        Err(e) => {
-            error!("Telegram \x1b[31m => {:?}", e);
-            Err(Serror::SendRequestError(e))
-        },
-        Ok(mut result) => {
-            ginfod!("Telegram => \x1b[35m", &result);
-            let body = result.body().await;
-            ginfod!("Telegram => \x1b[1;35m", body);
-            Ok(getin_i64( &bytes2json(&body?)?, &["result", "message_id"] )? )
-        }
-    }
+    match Client::builder()
+    .connector( Connector::new()
+                .ssl( builder.build() )
+                .timeout(Duration::new(30,0))
+                .finish() )
+    .finish()
+    .get( db.url_bot.clone() + "/sendmessage")
+    .header("User-Agent", "Actix-web")
+    .timeout(Duration::new(30,0))
+    .query(&[["chat_id", &chat_id.to_string()],
+             ["text", &text],
+             ["disable_notification", "true"]]).unwrap()
+    .send()
+    .await?
+    { mut result => {
+        ginfod!("Telegram => \x1b[35m", &result);
+        let body = result.body().await;
+        ginfod!("Telegram => \x1b[1;35m", body);
+        Ok( getin_i64(
+                &bytes2json(&body?)?,
+                &["result", "message_id"]
+            )?
+        )
+    } }
 }
 
-async fn send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> Result<(), Serror> {
+
+async fn _send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> Result<(), Serror> {
     info!("Telegram <= \x1b[36m{}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
@@ -223,6 +240,7 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
     .replacen("-", "\\-", 10000)
     .replacen("+", "\\+", 10000)
     .replacen("=", "\\=", 10000)
+    .replacen("#", "\\#", 10000)
     .replacen("'", "\\'", 10000);
 
     info!("Telegram <= \x1b[33m{}\x1b[0m", text);
@@ -274,6 +292,7 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
     .replacen("-", "\\-", 10000)
     .replacen("+", "\\+", 10000)
     .replacen("=", "\\=", 10000)
+    .replacen("#", "\\#", 10000)
     .replacen("'", "\\'", 10000);
 
     info!("Telegram <= \x1b[33m{}\x1b[0m", text);
@@ -281,8 +300,7 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
     builder.set_certificate_chain_file("cert.pem")?;
 
-    let response =
-        Client::builder()
+    match Client::builder()
         .connector( Connector::new()
                     .ssl( builder.build() )
                     .timeout(Duration::new(30,0))
@@ -290,23 +308,20 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
         .finish() // -> Client
         .get( db.url_bot.clone() + "/editmessagetext")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(30,0))
+        .timeout(Duration::new(0,1))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["message_id", &message_id.to_string()],
                  ["text", &text],
                  ["parse_mode", "MarkdownV2"],
                  ["disable_notification", "true"]]).unwrap()
         .send()
-        .await;
-
-    match response {
-        Err(e) => error!("\x1b[31m-> {:?}", e),
-        Ok(mut r) => {
-            ginfod!("Telegram => \x1b[35m", &r);
-            ginfod!("Telegram => \x1b[1;35m", r.body().await);
-        }
-    }
-    Ok(())
+        .await
+    { response => {
+        glogd!("zomg", &response);
+        ginfod!("Telegram => \x1b[35m", &response);
+        ginfod!("Telegram => \x1b[1;35m", response?.body().await);
+        Ok(())
+    } }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -791,14 +806,13 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-     if Regex::new(r"STONKS[!?]|[!?]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    if Regex::new(r"STONKS[!?]|[!?]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    let bank_balance = get_bank_balance(cmd.from)?;
+    let cash = get_bank_balance(cmd.from)?;
 
-    let sql = format!("SELECT * FROM positions WHERE id={}", cmd.from);
-    let positions = get_sql(&sql)?;
+    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.from))?;
     warn!("=> {:?}", positions);
 
     let mut msg = String::new();
@@ -819,7 +833,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let gain = value-basis;
 
         let gain_percent = (100.0*(price-cost)/cost).abs();
-        let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
+        //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrow
         let greenred =
             if basis < value {
                 from_utf8(b"\xF0\x9F\x9F\xA2")? // green circle
@@ -830,9 +844,11 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             };
 
         msg.push_str(
-            &format!("\n`{:>7.2}``{:>8}``{}``{:>6}{:>8}` *{}*_@{:.2}_",
-                value, ticker, greenred,
-                format!("{:.2}", gain), format!("{}{:.2}%",  updown, gain_percent),
+            &format!("\n`{:>7.2}``{}{:12}``{}@{:.2}` *{}*_@{:.2}_",
+                value,
+                greenred,
+                pad_between(12, &percent_squish(gain_percent), &format!("{:.2}", gain)),
+                ticker, price,
                 qty, cost,
              ) );
 
@@ -840,8 +856,7 @@ async fn do_stonks (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         //total_gain += gain;
     }
     //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
-    msg.push_str(&format!("\n`{:7.2}``Cash`", bank_balance));
-    msg.push_str(&format!("        `YOLO``{:.2}`", total + bank_balance ));
+    msg.push_str(&format!("\n`{:7.2} / {:.2}`", cash, total+cash));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
@@ -853,7 +868,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    let mut working_message = "working...".to_string();
+    let working_message = "working...".to_string();
     let message_id = send_msg(db, cmd.at, &working_message).await?;
 
     // Update all user-positioned tickers
@@ -966,7 +981,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("via do_trade_buy {:?}", do_stonks(db, &cmd2).await);
+    info!("via do_trade_buy {:?}", do_portfolio(db, &cmd2).await);
 
     Ok("COMPLETED.")
 }
@@ -1001,7 +1016,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     // Send current portfolio
     let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("do_trade_sell => do_stonks => {:?}", do_stonks(db, &cmd2).await);
+    info!("do_trade_sell => do_portfolio => {:?}", do_portfolio(db, &cmd2).await);
 
     Ok("COMPLETED.")
 }
@@ -1243,7 +1258,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     glogd!("do_def =>",       do_def(&db, &cmd).await);
     glogd!("do_sql =>",       do_sql(&db, &cmd).await);
     glogd!("do_quotes => ",   do_quotes(&db, &cmd).await);
-    glogd!("do_stonks =>",    do_stonks(&db, &cmd).await);
+    glogd!("do_portfolio =>", do_portfolio(&db, &cmd).await);
     glogd!("do_yolo =>",      do_yolo(&db, &cmd).await);
     glogd!("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
     glogd!("do_trade_sell =>",do_trade_sell(&db, &cmd).await);

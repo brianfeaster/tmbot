@@ -33,10 +33,12 @@ macro_rules! gerrord {
 
 #[macro_export(local_inner_macros)]
 macro_rules! glogd {
-    ($pre:expr, $arg:expr) => (
-        match $arg {
+    ($pre:expr, $arg:expr) => ( {
+        let r=$arg;
+        match &r {
             Ok(r) => info!("{} {:?}", $pre, r),
             Err(r) => error!("{} {:?}", $pre, r)
         }
-    )
+        r
+    } )
 }
