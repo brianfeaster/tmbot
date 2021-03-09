@@ -89,11 +89,11 @@ fn num_simp (num:&str) -> String {
 // "100%"  "99.9%"  "10.0%"  "9.99%"  "0.99%""
 fn percent_squish (num:f64) -> String {
     if 100.0 <= num {
-        format!("{:.0}%", num)
+        format!("{:4.0}%", num)
     } else if 10.0 <= num {
-        format!("{:.1}%", num)
+        format!("{:4.1}%", num)
     } else {
-        format!("{:.2}%", num)
+        format!("{:4.2}%", num)
     }
 }
 
@@ -308,7 +308,7 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
         .finish() // -> Client
         .get( db.url_bot.clone() + "/editmessagetext")
         .header("User-Agent", "Actix-web")
-        .timeout(Duration::new(0,1))
+        .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
                  ["message_id", &message_id.to_string()],
                  ["text", &text],
@@ -844,10 +844,9 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             };
 
         msg.push_str(
-            &format!("\n`{:>7.2}``{}{:12}``{}@{:.2}` *{}*_@{:.2}_",
+            &format!("\n`{:>7.2}``{:>8} {} {}``{}@{:.2}` *{}*_@{:.2}_",
                 value,
-                greenred,
-                pad_between(12, &percent_squish(gain_percent), &format!("{:.2}", gain)),
+                format!("{:.2}", gain), percent_squish(gain_percent), greenred,
                 ticker, price,
                 qty, cost,
              ) );
@@ -856,7 +855,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         //total_gain += gain;
     }
     //msg.push_str(&format!("\n`Stonks{:.>10.2}{:>+8.2}`", total, total_gain));
-    msg.push_str(&format!("\n`{:7.2} / {:.2}`", cash, total+cash));
+    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", cash, total+cash));
 
     send_msg_markdown(db, cmd.at, &msg).await?;
 
