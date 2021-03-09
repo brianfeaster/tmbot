@@ -39,6 +39,6 @@ macro_rules! glogd {
             Ok(r) => info!("{} {:?}", $pre, r),
             Err(r) => error!("{} {:?}", $pre, r)
         }
-        r
+        //r
     } )
 }

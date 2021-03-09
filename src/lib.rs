@@ -23,6 +23,8 @@ use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
 use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*}; // ISO
 
+const QUOTE_THROTTLE :i64 = 2;
+
 ////////////////////////////////////////////////////////////////////////////////
 /// Datetime details:
 /// * Time is seconds since epoch, UTC
@@ -67,7 +69,7 @@ fn update_ticker_p (time :i64, now :i64) -> bool {
 
     return
         if is_market_day  &&  time < time_bell_close {
-            time_bell_open <= now  &&  (time+(5*60) < now  ||  time_bell_close <= now) // Five minute delay/throttle
+            time_bell_open <= now  &&  (time+(QUOTE_THROTTLE*60) < now  ||  time_bell_close <= now) // Five minute delay/throttle
         } else {
             update_ticker_p(next_trading_day(day), now)
         }
@@ -98,7 +100,7 @@ fn percent_squish (num:f64) -> String {
 }
 
 // (5,a,b) "a...b"
-fn pad_between(width: usize, a:&str, b:&str) -> String {
+fn _pad_between(width: usize, a:&str, b:&str) -> String {
     let lenb = b.len();
     format!("{: <pad$}{}", a, b, pad=width-lenb)
 }
@@ -627,6 +629,20 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
+
+    if cmd.msg != "/help" { return Ok("do_help SKIP"); }
+
+    send_msg_markdown(db, cmd.at, &format!(
+"`/yolo   ` `The leaderboard`
+`/stonks ` `Your portfolio`
+`gme$    ` `Quote GME ({}min delay)`
+`gme-    ` `Sell entire GME position`
+`gme+    ` `Buy with all cash`
+`gme+2   ` `Buy 2 shares`
+`gme+$9  ` `Buy $9 worth`", QUOTE_THROTTLE)).await?;
+    Ok("COMPLETED.")
+}
 
 async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
@@ -840,10 +856,10 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         let ticker = pos.get("ticker").unwrap();
         let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
         let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
-        let basis = qty * cost;
+        //let basis = qty * cost;
         let price = get_stonk(ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
         let value = qty * price;
-        let gain = value-basis;
+        //let gain = value-basis;
         total += value;
         msg.push_str(&format_position(ticker, qty, cost, price)?);
     }
@@ -1247,6 +1263,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
     let cmd = parse_cmd(&body)?;
     info!("\x1b[33m{:?}", &cmd);
 
+    glogd!("do_help =>",      do_help(&db, &cmd).await);
     glogd!("do_like =>",      do_like(&db, &cmd).await);
     glogd!("do_like_info =>", do_like_info(&db, &cmd).await);
     glogd!("do_syn =>",       do_syn(&db, &cmd).await);
