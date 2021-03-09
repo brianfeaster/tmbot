@@ -636,7 +636,7 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
     send_msg_markdown(db, cmd.at, &format!(
 "`/yolo  ` `The leaderboard`
 `/stonks` `Your portfolio`
-`gme$   ` `Quote GME ({}min delay)`
+`gme$   ` `Quote ({}min delay)`
 `gme-   ` `Sell entire position`
 `gme+   ` `Buy with all cash`
 `gme+2  ` `Buy 2 shares`
