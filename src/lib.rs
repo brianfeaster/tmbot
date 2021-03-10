@@ -748,7 +748,9 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String,
 ////////////////////////////////////////////////////////////////////////////////
 async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 
-    if cmd.msg != "/help" { return Ok("do_help SKIP"); }
+    if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() {
+        return Ok("SKIP")
+    }
 
     send_msg_markdown(db, cmd.at, &format!(
 "`/yolo  ` `The leaderboard`
@@ -764,7 +766,7 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
     let amt :i32 = match cmd.msg.as_ref() { "+1" => 1, "-1" => -1, _=>0 };
-    if amt == 0 { return Ok("do_like SKIP".into()); }
+    if amt == 0 { return Ok("SKIP".into()); }
 
     if cmd.from == cmd.to { return Ok( format!("do_like SKIP self plussed {}", cmd.from)); }
 
@@ -805,7 +807,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
 
 async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
-    if cmd.msg != "+?" { return Ok("do_like_info SKIP"); }
+    if cmd.msg != "+?" { return Ok("SKIP"); }
 
     let mut likes = Vec::new();
     // Over each user in file
@@ -836,7 +838,7 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_syn SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let word = &cap.unwrap()[1];
 
     info!("looking up {:?}", word);
@@ -859,7 +861,7 @@ async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 
     let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_def SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let word = &cap.unwrap()[1];
 
     let defs = get_definition(word).await?;
@@ -892,7 +894,7 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
 
     let cap = Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("do_sql SKIP"); }
+    if cap.is_none() { return Ok("SKIP"); }
     let expr = &cap.unwrap()[1];
 
     let result = get_sql(expr);
