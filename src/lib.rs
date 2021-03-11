@@ -21,7 +21,10 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route};
 use ::actix_web::client::{Client, Connector};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
-use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*}; // ISO
+use ::datetime::{
+    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*,
+    ISO}; // ISO
+
 
 const QUOTE_DELAY :i64 = 2;
 
@@ -499,7 +502,6 @@ async fn get_ticker_quote_old (ticker: &str) -> Result<Option<(String, String, S
         } ) ) )
 }
 */
-
 async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Option<(String, String)>, Serror> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
@@ -546,6 +548,7 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Option<(String, Stri
     println!("{:#}", summary);
 
     let title = getin_str(&summary, &["price", "longName"])?.trim_end_matches(|e|e=='.');
+    let exchange = getin_str(&summary, &["price", "exchange"])?;
 
     let pricepre = getin_f64(&summary, &["price", "preMarketPrice", "raw"]).unwrap_or(0.0);
     let price = getin_f64(&summary, &["price", "regularMarketPrice", "raw"]).unwrap_or(0.0);
@@ -563,10 +566,17 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Option<(String, Stri
     let per = getin_str(&summary, &["price", "regularMarketChangePercent", "fmt"]).unwrap_or("?");
     let perpost = getin_str(&summary, &["price", "postMarketChangePercent", "fmt"]).unwrap_or("?");
 
+    let timepre = getin_i64(&summary, &["price", "preMarketTime"]).unwrap_or(0);
+    let time = getin_i64(&summary, &["price", "regularMarketTime"]).unwrap_or(0);
+    let timepost = getin_i64(&summary, &["price", "postMarketTime"]).unwrap_or(0);
+
     // TODO: for now log all prices to me privately for debugging/verification
     glogd!("all prices log => ", send_msg(db, 308188500,
-        &format!("{} {} {} / {} {} {} / {} {} {}", pricepre, amtpre, perpre,
-            price, amt, per,   pricepost, amtpost, perpost)
+        &format!("{} {}\n{} {} {} {}\n{} {} {} {}\n{} {} {} {}",
+            exchange, title,
+            LocalDateTime::from_instant(Instant::at(timepre)).iso(), pricepre, amtpre, perpre,
+            LocalDateTime::from_instant(Instant::at(time)).iso(), price, amt, per,
+            LocalDateTime::from_instant(Instant::at(timepost)).iso(), pricepost, amtpost, perpost)
     ).await);
 
     Ok(Some(// Tuple   ("red/green emoji" "pretty price change name" price)
