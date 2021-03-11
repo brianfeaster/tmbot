@@ -410,6 +410,7 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
 }
 
 
+/*
 async fn get_ticker_quote_old (ticker: &str) -> Result<Option<(String, String, String)>, Serror> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
@@ -497,10 +498,10 @@ async fn get_ticker_quote_old (ticker: &str) -> Result<Option<(String, String, S
             )
         } ) ) )
 }
+*/
 
-async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, String)>, Serror> {
+async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Option<(String, String)>, Serror> {
     info!("get_ticker_quote <- {}", ticker);
-    /*
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -526,88 +527,69 @@ async fn get_ticker_quote (ticker: &str) -> Result<Option<(String, String, Strin
          error!(r#"get_ticker_quote http body2str {:?} for {:?}"#, domstr, ticker);
          return Ok(None);
     }
-    let domstr = domstr.unwrap();
-    */
 
-    // RE \(pre\|post\|regular\)MarketPrice":{\|shortName":"\|longName":"
-    //
-    // "shortName":"iShares Silver Trust","averageDailyVolume10Day":{},
-    // "longName":"iShares Silver Trust",
+    let domstr = domstr?;
 
-    // "regularMarketChange":{"raw":0.72999954,"fmt":"0.73"},"currencySymbol":"$","regularMarketPreviousClose":{"raw":23.32,"fmt":"23.32"},"postMarketTime":1615337975,
-
-    // "preMarketPrice":{"raw":24.07,"fmt":"24.07"},"preMarketTime":1615300149,"exchangeDataDelayedBy":0,"toCurrency":null,
-
-    // "postMarketChange":{"raw":0.0700016,"fmt":"0.07"},
-
-    // "postMarketPrice":{"raw":24.12,"fmt":"24.12"},"exchangeName":"NYSEArca",
-
-    // "preMarketChange":{"raw":0.75,"fmt":"0.75"},"circul atingSupply":{},"regularMarketDayLow":{"raw":24.0129,"fmt":"24.01"},"priceHint":{"raw":2,"fmt":"2","longFmt":"2"},"currency":"USD",
-
-    // "regularMarketPrice":{"raw":24.05,"fmt":"24.05"}
-
-    let domstr = std::fs::read_to_string("f")?;
-    let re = Regex::new("\n(meow)\n").unwrap();
     let json = {
-        let cap = re.captures_iter(&domstr);
-        warn!("~~~~~~~~~~~~~~~~~~~~~~~~~~");
-        for c in cap {
-            gwarn(&c);
-        }
-        warn!("^^^^^^^^^^^^^^^^^^^^^^^^^^");
-        /*
+        let cap = Regex::new("(?m)^root.App.main = (.*);$")?.captures(&domstr);
         if cap.is_none() || 2 != cap.as_ref().unwrap().len() {
-            return Err(Serror::Err("Unable to find json string in HTML."))
+            Err("Unable to find json string in HTML.")?
         }
         bytes2json(&cap.unwrap()[1].as_bytes())?
-    gwarn(&json);
-        */
     };
+    let summary = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore"]);
 
-
-    /*
-    let re = Regex::new(r#"data-reactid="[0-9]+">([0-9,]+\.[0-9]+)"#).unwrap();
-    let caps = re
-        .captures_iter(domstr)
-        .map( |cap| cap[1].to_string() )
-        .collect::<Vec<String>>();
-
-    info!(r#"http dom prices {:?} {:?}"#, ticker, caps);
-
-    if caps.len() < 4 {
-         error!(r#"http dom regex matched too few prices"#);
-         return Ok(None);
+    if summary.is_null() {
+         Err("Unable to find quote data in json key 'QuoteSummaryStore'")?
     }
 
-    let price = caps[3].to_string();
-    let price_bare = price.replacen(",", "", 1000);
+    println!("{:#}", summary);
 
-    Ok(Some(
-        Regex::new(r#"data-reactid="[0-9]+">([-+][0-9,]+\.[0-9]+) \(([-+][0-9,]+\.[0-9]+%)\)<"#).unwrap()
-        .captures(domstr)
-        .map_or( // Tuple   ("red/green emoji" "pretty price change name" price)
-            ( "".to_string(),  price.to_string() + &title,  price_bare.to_string() )
-            ,
-            |cap| {
-            let amt = &cap[1];
-            let per = &cap[2];
-            ( // delta as a colored emoji
-                if amt.chars().next().unwrap() == '+' { from_utf8(b"\xF0\x9F\x9F\xA2").unwrap() } else { from_utf8(b"\xF0\x9F\x9F\xA5").unwrap() }
-                .to_string()
-            , // the delta string
-                price + " "
-                + if amt.chars().next().unwrap() == '+' { from_utf8(b"\xE2\x86\x91").unwrap() } else { from_utf8(b"\xE2\x86\x93").unwrap() }
-                    + &cap[1][1..]
-                    + " "
-                    + &per[1..] + " "
-                + &title
-            , // price bare
-                price_bare
-            )
-        } ) ) )
-    ;
-    */
-    Ok(None)
+    let title = getin_str(&summary, &["price", "longName"])?.trim_end_matches(|e|e=='.');
+
+    let pricepre = getin_f64(&summary, &["price", "preMarketPrice", "raw"]).unwrap_or(0.0);
+    let price = getin_f64(&summary, &["price", "regularMarketPrice", "raw"]).unwrap_or(0.0);
+    let pricepost = getin_f64(&summary, &["price", "postMarketPrice", "raw"]).unwrap_or(0.0);
+
+    let priceprefull = getin_str(&summary, &["price", "preMarketPrice", "fmt"]).unwrap_or("?");
+    let pricefull = getin_str(&summary, &["price", "regularMarketPrice", "fmt"]).unwrap_or("?");
+    let pricepostfull = getin_str(&summary, &["price", "postMarketPrice", "fmt"]).unwrap_or("?");
+
+    let amtpre = getin_str(&summary, &["price", "preMarketChange", "fmt"]).unwrap_or("?");
+    let amt = getin_str(&summary, &["price", "regularMarketChange", "fmt"]).unwrap_or("?");
+    let amtpost = getin_str(&summary, &["price", "postMarketChange", "fmt"]).unwrap_or("?");
+
+    let perpre = getin_str(&summary, &["price", "preMarketChangePercent", "fmt"]).unwrap_or("?");
+    let per = getin_str(&summary, &["price", "regularMarketChangePercent", "fmt"]).unwrap_or("?");
+    let perpost = getin_str(&summary, &["price", "postMarketChangePercent", "fmt"]).unwrap_or("?");
+
+    // TODO: for now log all prices to me privately for debugging/verification
+    glogd!("all prices log => ", send_msg(db, 308188500,
+        &format!("{} {} {} / {} {} {} / {} {} {}", pricepre, amtpre, perpre,
+            price, amt, per,   pricepost, amtpost, perpost)
+    ).await);
+
+    Ok(Some(// Tuple   ("red/green emoji" "pretty price change name" price)
+        ( // delta as a colored emoji
+            if amt.chars().next().unwrap() != '-'
+            { from_utf8(b"\xF0\x9F\x9F\xA2").unwrap() } // Green circle
+            else { from_utf8(b"\xF0\x9F\x9F\xA5").unwrap() } // Red square
+            .to_string()
+            // ticker@
+            + ticker + "@"
+            // the numbers price "3,4544.22 
+            + pricefull + " "
+            // {up or down symbol}611.22
+            + if amt.chars().next().unwrap() != '-'
+            { from_utf8(b"\xE2\x86\x91").unwrap() } // Arrow up
+            else { from_utf8(b"\xE2\x86\x93").unwrap() } // Arrow down
+            + &amt.trim_start_matches(|e|e=='-') + " "
+            // 2.3% Famous Company
+            + &per + " " + &title
+        , // price full includes commas, decimal zeros
+            price.to_string()
+        )
+    ) )
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -660,30 +642,30 @@ async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Se
 
     // Either not in table or need to update table
     let quote = if is_self_stonk {
-        Some((from_utf8(b"\xF0\x9F\x9F\xA2").unwrap().into(), "0.00".into(), "0.00".into()))
+        // TODO are self stonks implemented and need this?
+        Some((from_utf8(b"\xF0\x9F\x94\xB7").unwrap().to_string() + ticker + "@0.00", "0.00".into()))
     } else {
-        get_ticker_quote_old(&ticker).await? // TODO DEBUGGING
+        get_ticker_quote(db, &ticker).await?
     };
 
-    if let Some(price) = quote {
-        let pretty = format!("{}{}@{}", price.0, ticker, price.1);
-        //send_msg(db, cmd.at, &(pretty.to_string() + "·")).await?;
+    if let Some(quote) = quote { // quote(pretty, fair-market-price-could-be-pre/in/post-market)
+        let pretty = quote.0;
         let sql = if is_in_table {
-            format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", price.2, nowsecs, pretty, ticker)
+            format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", quote.1, nowsecs, pretty, ticker)
         } else {
-            format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, price.2, nowsecs, pretty)
+            format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, quote.1, nowsecs, pretty)
         };
         info!("SQLite => {:?}", get_sql(&sql)?);
         let mut hm :HashMap::<String, String> = HashMap::new();
         hm.insert("updated".into(), "".into());
         hm.insert("ticker".into(), ticker.to_string());
-        hm.insert("price".into(),  price.2);
+        hm.insert("price".into(),  quote.1);
         hm.insert("time".into(),   nowsecs.to_string());
         hm.insert("pretty".into(), pretty);
         return Ok(hm);
     }
 
-    Err(Serror::Err("ticker not found"))
+    Err("ticker not found")?
 }
 
 fn get_bank_balance (id :i64) -> Result<f64, Serror> {

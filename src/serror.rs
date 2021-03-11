@@ -1,23 +1,30 @@
 #[derive(Debug)]
+
 pub enum Serror {
-   StdIoError(std::io::Error),
-   JsonError(json::Error),
-   Utf8Error(std::str::Utf8Error),
-   SetLoggerError(log::SetLoggerError),
-   SslErrorStack(openssl::error::ErrorStack),
    Message(String),
-   ParseIntError(std::num::ParseIntError),
    Msg(&'static str),
-   Err(&'static str),
+   ParseIntError(std::num::ParseIntError),
+   StdIoError(std::io::Error),
+   Utf8Error(std::str::Utf8Error),
+   JsonError(json::Error),
+   SslErrorStack(openssl::error::ErrorStack),
+   SetLoggerError(log::SetLoggerError),
    SerUrlEnc(serde_urlencoded::ser::Error),
    SendRequestError(actix_web::client::SendRequestError),
    PayloadError(actix_web::error::PayloadError),
    SqliteError(sqlite::Error),
-   IoError(std::io::Error),
    SysTimeError(std::time::SystemTimeError),
    ParseFloatErr(std::num::ParseFloatError),
+   RegexError(regex::Error),
+
 }
 
+impl From<String> for Serror {
+    fn from(s: String) -> Self { Serror::Message(s) }
+}
+impl From<&'static str> for Serror {
+    fn from(s: &'static str) -> Self { Serror::Msg(s) }
+}
 impl From<std::num::ParseIntError> for Serror {
     fn from(e: std::num::ParseIntError) -> Self { Serror::ParseIntError(e) }
 }
@@ -29,12 +36,6 @@ impl From<std::str::Utf8Error> for Serror {
 }
 impl From<json::Error> for Serror {
     fn from(e: json::Error) -> Self { Serror::JsonError(e) }
-}
-impl From<&'static str> for Serror {
-    fn from(s: &'static str) -> Self { Serror::Msg(s) }
-}
-impl From<String> for Serror {
-    fn from(s: String) -> Self { Serror::Message(s) }
 }
 impl From<openssl::error::ErrorStack> for Serror {
     fn from(e: openssl::error::ErrorStack) -> Self { Serror::SslErrorStack(e) }
@@ -60,12 +61,11 @@ impl From<std::time::SystemTimeError> for Serror {
 impl From<std::num::ParseFloatError> for Serror {
     fn from(e: std::num::ParseFloatError) -> Self { Serror::ParseFloatErr(e) }
 }
-/*
-impl From<Serror> for std::io::Error {
-    fn from(e: Serror) -> Self { std::io::Error::new( std::io::ErrorKind::Other, e.str() ) }
+impl From<regex::Error> for Serror {
+    fn from(e: regex::Error) -> Self { Serror::RegexError(e) }
 }
-*/
 
+/*
 impl Serror {
     pub fn str(&self) -> String {
         match self {
@@ -74,3 +74,4 @@ impl Serror {
         }
     }
 }
+*/
