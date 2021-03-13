@@ -10,7 +10,7 @@ env_logger = "*"
 regex = "*"
 actix-web = { version = "3", features = ["openssl"] }
 openssl = { version = "0.10" }
-json = "*"
+serde_json = "*"
 serde_urlencoded = "*"
 sqlite = "*"
 datetime = "*"

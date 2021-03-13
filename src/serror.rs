@@ -6,7 +6,8 @@ pub enum Serror {
    ParseIntError(std::num::ParseIntError),
    StdIoError(std::io::Error),
    Utf8Error(std::str::Utf8Error),
-   JsonError(json::Error),
+   //JsonError(json::Error),
+   JsonError(serde_json::Error),
    SslErrorStack(openssl::error::ErrorStack),
    SetLoggerError(log::SetLoggerError),
    SerUrlEnc(serde_urlencoded::ser::Error),
@@ -34,8 +35,8 @@ impl From<std::io::Error> for Serror {
 impl From<std::str::Utf8Error> for Serror {
     fn from(e: std::str::Utf8Error) -> Self { Serror::Utf8Error(e) }
 }
-impl From<json::Error> for Serror {
-    fn from(e: json::Error) -> Self { Serror::JsonError(e) }
+impl From<serde_json::Error> for Serror {
+    fn from(e: serde_json::Error) -> Self { Serror::JsonError(e) }
 }
 impl From<openssl::error::ErrorStack> for Serror {
     fn from(e: openssl::error::ErrorStack) -> Self { Serror::SslErrorStack(e) }

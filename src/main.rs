@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn it_works() {
         assert_eq!(
-            tmbot::text_parse_for_tickers("a$ b$"),
+            tmbot::extract_tickers("a$ b$"),
             ["A","B"].iter().map(|e|e.to_string()).collect::<HashSet<String>>() );
     }
 }
