@@ -56,25 +56,30 @@ fn next_trading_day (day :LocalDate) -> i64 {
 ///                    5.5h       6.5h        4h                  [8h closed]
 
 fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
-    let day =
-        LocalDateTime::from_instant(Instant::at(time))
+    // Since UTC time is used and the pre/regular/after hours are from 0900Z to
+    // 100Z the next morning, subtract an hour when computing
+    // the "current day" to normalize the trading hours to the same day.
+    let normalized_seconds = 2*60*60;
+    let day_normalized =
+        LocalDateTime::from_instant(Instant::at(time - normalized_seconds))
         .date();
 
     let is_market_day =
-        match day.weekday() {
-            Saturday | Sunday => false,
+        match day_normalized.weekday() {
+            Saturday|Sunday => false,
             _ => true
         };
 
     // TODO: Check if time is DST and adjust hours below by -1
 
-    let time_open = LocalDateTime::new(day, LocalTime::hms(9, 00, 0).unwrap()).to_instant().seconds();
-    let time_close = time_open + 60 * 60 * 16;
+    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9, 00, 0).unwrap()).to_instant().seconds();
+    let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing
 
     return
         if is_market_day  &&  time < time_close {
             time_open <= now  &&  (time+(db.quote_delay*60) < now  ||  time_close <= now) // Five minute delay/throttle
         } else {
+            let day = LocalDateTime::from_instant(Instant::at(time)).date();
             update_ticker_p(db, next_trading_day(day), now)
         }
 }
