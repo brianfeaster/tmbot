@@ -1041,7 +1041,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("UPDATE accounts set balance={:.2} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
-    let msg = format!("*Updated Position:*{}", &format_position(&ticker, qty, cost, price)?);
+    let msg = format!("*Bought Position:*{}", &format_position(&ticker, qty, cost, price)?);
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
@@ -1100,7 +1100,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     }
 
     // Send realized details
-    let msg = format!("*Closing Position:*{}", &format_position(&ticker, qty, cost, price)?);
+    let msg = format!("*Sold Position:*{}", &format_position(&ticker, qty, cost, price)?);
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
