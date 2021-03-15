@@ -27,7 +27,7 @@ use ::datetime::{
     ISO}; // ISO
 
 
-const QUOTE_DELAY :i64 = 2;
+const QUOTE_DELAY_MINUTES :i64 = 2;
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Datetime details:
@@ -56,10 +56,12 @@ fn next_trading_day (day :LocalDate) -> i64 {
 ///                    5.5h       6.5h        4h                  [8h closed]
 
 fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
+
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
     // 100Z the next morning, subtract an hour when computing
     // the "current day" to normalize the trading hours to the same day.
-    let normalized_seconds = 2*60*60;
+    let normalized_seconds = 60*60*2  +  60*db.dst_hours_adjust;
+
     let day_normalized =
         LocalDateTime::from_instant(Instant::at(time - normalized_seconds))
         .date();
@@ -77,7 +79,7 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
 
     return
         if is_market_day  &&  time < time_close {
-            time_open <= now  &&  (time+(db.quote_delay*60) < now  ||  time_close <= now) // Five minute delay/throttle
+            time_open <= now  &&  (time+(db.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
         } else {
             let day = LocalDateTime::from_instant(Instant::at(time)).date();
             update_ticker_p(db, next_trading_day(day), now)
@@ -118,9 +120,10 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
 
 #[derive(Clone, Debug)]
 pub struct DB {
-    url_bot: String,
+    url_api: String,
     chat_id_default: i64,
-    quote_delay: i64
+    quote_delay_minutes: i64,
+    dst_hours_adjust: i64,
 }
 
 type MDB = Mutex<DB>;
@@ -167,6 +170,18 @@ fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+struct Quote {
+    price_pretty: String,
+    price: f64,
+    amount: f64,
+    percent: f64,
+    title: String,
+    hours: char,
+    exchange: String
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
     info!("Telegram <= \x1b[36m{}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
@@ -179,7 +194,7 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
                 .timeout(Duration::new(30,0))
                 .finish() )
     .finish()
-    .get( db.url_bot.clone() + "/sendmessage")
+    .get( db.url_api.clone() + "/sendmessage")
     .header("User-Agent", "Actix-web")
     .timeout(Duration::new(30,0))
     .query(&[["chat_id", &chat_id.to_string()],
@@ -213,7 +228,7 @@ async fn _send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> 
                     .timeout(Duration::new(30,0))
                     .finish() )
         .finish()
-        .get( db.url_bot.clone() + "/editmessagetext")
+        .get( db.url_api.clone() + "/editmessagetext")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
@@ -266,7 +281,7 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
                     .timeout(Duration::new(30,0))
                     .finish() )
         .finish() // -> Client
-        .get( db.url_bot.clone() + "/sendmessage")
+        .get( db.url_api.clone() + "/sendmessage")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
@@ -317,7 +332,7 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
                     .timeout(Duration::new(30,0))
                     .finish() )
         .finish() // -> Client
-        .get( db.url_bot.clone() + "/editmessagetext")
+        .get( db.url_api.clone() + "/editmessagetext")
         .header("User-Agent", "Actix-web")
         .timeout(Duration::new(30,0))
         .query(&[["chat_id", &chat_id.to_string()],
@@ -417,9 +432,8 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
         .collect::<Vec<String>>() )
 } // get_syns
 
-
-async fn get_ticker_details (db :&DB, ticker: &str) -> Result<(String, f64, f64, f64, i64, String, String), Serror> {
-    info!("get_ticker_details <- {}", ticker);
+async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Quote, Serror> {
+    info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -434,8 +448,8 @@ async fn get_ticker_details (db :&DB, ticker: &str) -> Result<(String, f64, f64,
         .await?
         .body().limit(1_000_000).await;
 
-    let body = body.or_else( |r| Err(format!("get_ticker_details for {:?}  {:?}", ticker, r)) )?;
-    let domstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_details http body2str {:?} {:?}"#, ticker, r)) )?;
+    let body = body.or_else( |r| Err(format!("get_ticker_quote for {:?}  {:?}", ticker, r)) )?;
+    let domstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_quote http body2str {:?} {:?}"#, ticker, r)) )?;
 
     let json = {
         let cap = Regex::new("(?m)^root.App.main = (.*);$")?.captures(&domstr);
@@ -456,48 +470,47 @@ async fn get_ticker_details (db :&DB, ticker: &str) -> Result<(String, f64, f64,
     let title = getin_str(&details, &["longName"])?.trim_end_matches(|e|e=='.').to_string();
     let exchange = getin_str(&details, &["exchange"])?;
 
-    let timepre  = getin_i64(&details, &["preMarketTime"]).unwrap_or(0);
-    let timereg  = getin_i64(&details, &["regularMarketTime"]).unwrap_or(0);
-    let timepost = getin_i64(&details, &["postMarketTime"]).unwrap_or(0);
-
-    let details_pre =
+    let mut details = [
         (getin_str(&details, &["preMarketPrice", "fmt"]).unwrap_or("?".into()),
          getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
-         timepre, title.to_string(), exchange.to_string());
-    let details_reg =
+         getin_i64(&details, &["preMarketTime"]).unwrap_or(0),
+         'p'),
         (getin_str(&details, &["regularMarketPrice", "fmt"]).unwrap_or("?".into()),
          getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["regularMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["regularMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
-         timereg, title.to_string(), exchange.to_string());
-    let details_post =
+         getin_i64(&details, &["regularMarketTime"]).unwrap_or(0),
+         'r'),
         (getin_str(&details, &["postMarketPrice", "fmt"]).unwrap_or("?".into()),
          getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["postMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["postMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
-         timepost, title.to_string(), exchange.to_string());
+         getin_i64(&details, &["postMarketTime"]).unwrap_or(0),
+         'a')];
 
     // TODO: for now log all prices to me privately for debugging/verification
     glogd!("send_msg => \x1b[35m",
         send_msg(db, 308188500,
             &format!("{} \"{}\" ({})\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%",
                 ticker, title, exchange,
-                LocalDateTime::from_instant(Instant::at(details_pre.4)).iso(), details_pre.1, details_pre.2, details_pre.3,
-                LocalDateTime::from_instant(Instant::at(details_reg.4)).iso(), details_reg.1, details_reg.2, details_reg.3,
-                LocalDateTime::from_instant(Instant::at(details_post.4)).iso(), details_post.1, details_post.2, details_post.3)
+                LocalDateTime::from_instant(Instant::at(details[0].4)).iso(), details[0].1, details[0].2, details[0].3,
+                LocalDateTime::from_instant(Instant::at(details[1].4)).iso(), details[1].1, details[1].2, details[1].3,
+                LocalDateTime::from_instant(Instant::at(details[2].4)).iso(), details[2].1, details[2].2, details[2].3)
         ).await);
 
-    // Consider most up to date ticker details
-    let mut times = [timepre, timereg, timepost];
-    times.sort_by( |a,b| b.cmp(a) );
+    details.sort_by( |a,b| b.4.cmp(&a.4) ); // Find latest quote details
 
-    Ok(if      timepre == times[0] { details_pre }
-       else if timereg == times[0] { details_reg }
-       else                        { details_post } )
-
-} // get_ticker_details 
+    Ok(Quote{
+        price_pretty:details[0].0.to_string(),
+        price       :details[0].1,
+        amount      :details[0].2,
+        percent     :details[0].3,
+        title       :title,
+        hours       :details[0].5,
+        exchange    :exchange})
+} // get_ticker_quote 
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -551,54 +564,53 @@ async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Se
     // Either not in table or need to update table
 
     let quote = if is_self_stonk {
-        // TODO are self stonks implemented and need this?
-        Some((from_utf8(b"\xF0\x9F\x94\xB7").unwrap().to_string() + ticker + "@0.00", "0.00".into()))
+        Quote {
+            price_pretty:"0.0".to_string(),
+            price:0.0,
+            amount:0.0,
+            percent:0.0,
+            title:ticker.to_string(),
+            hours:'r',
+            exchange:"™BOT".to_string() }
     } else {
-         // prettyPrice:String price:f64 amt:f64 %:f64 time:i64 title:String xchg:String
-        let details = get_ticker_details(db, &ticker).await?;
-
-        Some(// Tuple   ("red/green emoji" "pretty price change name" price)
-            ( // delta as a colored emoji
-                if 0.0 < details.2
-                { from_utf8(b"\xF0\x9F\x9F\xA2").unwrap() } // Green circle
-                else { from_utf8(b"\xF0\x9F\x9F\xA5").unwrap() } // Red square
-                .to_string()
-                // ticker@
-                + ticker + "@"
-                // the numbers price "3,4544.22 
-                + &format!("{} ", details.0)
-                // {up or down symbol}611.22
-                + if 0.0 < details.2
-                { from_utf8(b"\xE2\x86\x91").unwrap() } // Arrow up
-                else { from_utf8(b"\xE2\x86\x93").unwrap() } // Arrow down
-                + &format!("{:.2} ", details.2.abs())
-                // 2.3% Famous Company
-                + &format!("{:.2}% {}", details.3, details.5)
-            , // price full includes commas, decimal zeros
-                details.0
-            )
-        )
+        get_ticker_quote(db, &ticker).await?
     };
 
-    if let Some(quote) = quote { // quote(pretty, fair-market-price-could-be-pre/in/post-market)
-        let pretty = quote.0;
-        let sql = if is_in_table {
-            format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", quote.1, nowsecs, pretty, ticker)
+    let gain_glyphs = if 0.0 < quote.amount {
+            (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
+        } else if 0.0 == quote.amount {
+            (from_utf8(b"\xF0\x9F\x94\xB7")?, "") // Blue diamond, nothing
         } else {
-            format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, quote.1, nowsecs, pretty)
+            (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
         };
-        info!("SQLite => {:?}", get_sql(&sql)?);
-        let mut hm :HashMap::<String, String> = HashMap::new();
-        hm.insert("updated".into(), "".into());
-        hm.insert("ticker".into(), ticker.to_string());
-        hm.insert("price".into(),  quote.1);
-        hm.insert("time".into(),   nowsecs.to_string());
-        hm.insert("pretty".into(), pretty);
-        return Ok(hm);
-    }
+    let pretty =
+        format!("{}{}@{}{}{}{:.2} {:.2}% {} {}",
+            gain_glyphs.0,
+            ticker,
+            quote.price_pretty,
+            match quote.hours { 'r'=>" ", 'p'=>"_pre_ ", 'a'=>"_aft_ ", _=>"_?_ "},
+            gain_glyphs.1,
+            quote.amount.abs(),
+            quote.percent,
+            quote.title,
+            quote.exchange
+        );
 
-    Err("ticker not found")?
-}
+    let sql = if is_in_table {
+        format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", quote.price, nowsecs, pretty, ticker)
+    } else {
+        format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, quote.price, nowsecs, pretty)
+    };
+    info!("SQLite => {:?}", get_sql(&sql)?);
+
+    let mut hm :HashMap::<String, String> = HashMap::new();
+    hm.insert("updated".into(), "".into());
+    hm.insert("ticker".into(), ticker.to_string());
+    hm.insert("price".into(),  quote.price_pretty);
+    hm.insert("time".into(),   nowsecs.to_string());
+    hm.insert("pretty".into(), pretty);
+    return Ok(hm);
+} // get_stonk
 
 fn get_bank_balance (id :i64) -> Result<f64, Serror> {
     let sql = format!("SELECT * FROM accounts WHERE id={}", id);
@@ -640,7 +652,7 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
 }
 
 async fn get_quote_pretty (db :&DB, ticker :&str) -> Result<String, Serror> {
-    // Dump Level 2 quotes as well
+    // Maybe include local level 2 quotes as well
     let bidask =
         if &ticker[0..1] == "@" { 
             let mut asks = "*Asks*".to_string();
@@ -661,14 +673,15 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Result<String, Serror> {
         } else {
             "".to_string()
         };
-    let stonk = get_stonk(db, ticker).await?;
 
-    Ok( if stonk.contains_key("updated") {
-        format!("{}·{}", stonk.get("pretty").unwrap().replace("_", "\\_"), bidask)
-    } else {
-        format!("{}{}", &stonk.get("pretty").unwrap().replace("_", "\\_"), bidask)
-    })
-}
+    let stonk = get_stonk(db, ticker).await?;
+    let updated_indicator = if stonk.contains_key("updated") { "·" } else { "" };
+
+    Ok( format!("{}{}{}",
+            &stonk.get("pretty").unwrap(),
+            updated_indicator,
+            bidask) )
+} // get_quote_pretty 
 
 fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String, Serror> {
     let basis = qty*cost;
@@ -705,7 +718,7 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 `gme-   ` `Sell entire position`
 `gme+   ` `Buy with all cash`
 `gme+2  ` `Buy 2 shares`
-`gme+$9 ` `Buy $9 worth`", db.quote_delay)).await?;
+`gme+$9 ` `Buy $9 worth`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1352,16 +1365,18 @@ pub async fn mainstart() -> Result<(), Serror> {
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
 
-    let botkey          = args().nth(1).unwrap();
-    let chat_id_default = args().nth(2).unwrap().parse::<i64>()?;
+    let botkey           = args().nth(1).unwrap();
+    let chat_id_default  = args().nth(2).unwrap().parse::<i64>()?;
+    let dst_hours_adjust = args().nth(3).unwrap().parse::<i64>()?;
 
     if !true { do_schema()?; }
 
     Ok(HttpServer::new( move || App::new()
         .data( Mutex::new( DB {
-            url_bot: String::from("https://api.telegram.org/bot") + &botkey,
+            url_api: String::from("https://api.telegram.org/bot") + &botkey,
             chat_id_default: chat_id_default,
-            quote_delay: QUOTE_DELAY
+            dst_hours_adjust: dst_hours_adjust,
+            quote_delay_minutes: QUOTE_DELAY_MINUTES
         } ) )
         .service( web::resource("*")
                     .route( Route::new().to(dispatch) ) ) )
