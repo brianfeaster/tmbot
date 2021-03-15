@@ -1019,10 +1019,11 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let positions = get_sql(&sql)?;
     warn!("=> {:?}", positions);
 
-    match positions.len() {
+    let cost = match positions.len() {
         0 => {
             let sql = format!("INSERT INTO positions VALUES ({}, '{}', {:.4}, {:.8})", cmd.from, ticker, qty, price);
             info!("Trade add position result {:?}", get_sql(&sql));
+            price
         },
         1 => {
             let qty_old = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
@@ -1032,17 +1033,16 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             info!("trading_buy adding to existing position:  new_qty:{}  new_price:{}", qty, price);
             let sql = format!("UPDATE positions SET qty={:.4}, price={:.8} WHERE id='{}' AND ticker='{}'", qty, price, cmd.from, ticker);
             info!("Trade update position result {:?}", get_sql(&sql));
+            price
         },
-        _ => return Err(Serror::Message(format!("Ticker {} has {} positions, expect 0 or 1", ticker, positions.len())))
+        _ => { Err(format!("Ticker {} has {} positions, expect 0 or 1", ticker, positions.len()))?; 0.0 }
     };
-
 
     let sql = format!("UPDATE accounts set balance={:.2} where id={}", new_balance, cmd.from);
     info!("Update bank balance result {:?}", get_sql(&sql));
 
-    // Send current portfolio
-    let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    info!("via do_trade_buy {:?}", do_portfolio(db, &cmd2).await);
+    let msg = format!("*Updated Position:*{}", &format_position(&ticker, qty, cost, price)?);
+    send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
 }
@@ -1099,13 +1099,9 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
             get_sql(&format!("UPDATE positions SET qty={:.4} WHERE id='{}' AND ticker='{}'", new_qty, cmd.from, ticker)));
     }
 
-    // Send final gain realized
-    let msg = format!("Closing:{}", &format_position(&ticker, qty, cost, price)?);
+    // Send realized details
+    let msg = format!("*Closing Position:*{}", &format_position(&ticker, qty, cost, price)?);
     send_msg_markdown(db, cmd.at, &msg).await?;
-
-    // Send current portfolio
-    //let cmd2 = Cmd { from:cmd.from, at:cmd.at, to:cmd.to, msg:format!("STONKS?")};
-    //info!("do_trade_sell => do_portfolio => {:?}", do_portfolio(db, &cmd2).await);
 
     Ok("COMPLETED.")
 }
