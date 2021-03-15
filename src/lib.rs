@@ -58,12 +58,10 @@ fn next_trading_day (day :LocalDate) -> i64 {
 fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
 
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
-    // 100Z the next morning, subtract an hour when computing
-    // the "current day" to normalize the trading hours to the same day.
-    let normalized_seconds = 60*60*2  +  60*db.dst_hours_adjust;
-
+    // 0100Z the next morning, subtract a number of seconds so that the
+    // "current day" is the same for the entire trading hours range.
     let day_normalized =
-        LocalDateTime::from_instant(Instant::at(time - normalized_seconds))
+        LocalDateTime::from_instant(Instant::at(time - 90*60 )) // 90 minutes
         .date();
 
     let is_market_day =
@@ -72,10 +70,8 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
             _ => true
         };
 
-    // TODO: Check if time is DST and adjust hours below by -1
-
-    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9, 00, 0).unwrap()).to_instant().seconds();
-    let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing
+    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9-db.dst_hours_adjust, 00, 0).unwrap()).to_instant().seconds();
+    let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing for slow trades.
 
     return
         if is_market_day  &&  time < time_close {
@@ -123,7 +119,7 @@ pub struct DB {
     url_api: String,
     chat_id_default: i64,
     quote_delay_minutes: i64,
-    dst_hours_adjust: i64,
+    dst_hours_adjust: i8,
 }
 
 type MDB = Mutex<DB>;
@@ -546,6 +542,7 @@ fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) {
 
 async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Serror> {
 
+    warn!("ticker = {:?}", ticker);
     let nowsecs :i64 = Instant::now().seconds();
     let is_self_stonk = &ticker[0..1] == "@";
 
@@ -583,6 +580,7 @@ async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Se
         } else {
             (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
         };
+
     let pretty =
         format!("{}{}@{}{}{}{:.2} {:.2}% {} {}",
             gain_glyphs.0,
@@ -606,7 +604,7 @@ async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Se
     let mut hm :HashMap::<String, String> = HashMap::new();
     hm.insert("updated".into(), "".into());
     hm.insert("ticker".into(), ticker.to_string());
-    hm.insert("price".into(),  quote.price_pretty);
+    hm.insert("price".into(),  quote.price.to_string());
     hm.insert("time".into(),   nowsecs.to_string());
     hm.insert("pretty".into(), pretty);
     return Ok(hm);
@@ -907,13 +905,12 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let mut total = 0.0;
 
     for pos in positions {
+        warn!("pos = {:?}", pos);
         let ticker = pos.get("ticker").unwrap();
         let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
         let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
-        //let basis = qty * cost;
         let price = get_stonk(db, ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
         let value = qty * price;
-        //let gain = value-basis;
         total += value;
         msg.push_str(&format_position(ticker, qty, cost, price)?);
     }
@@ -1367,7 +1364,7 @@ pub async fn mainstart() -> Result<(), Serror> {
 
     let botkey           = args().nth(1).unwrap();
     let chat_id_default  = args().nth(2).unwrap().parse::<i64>()?;
-    let dst_hours_adjust = args().nth(3).unwrap().parse::<i64>()?;
+    let dst_hours_adjust = args().nth(3).unwrap().parse::<i8>()?;
 
     if !true { do_schema()?; }
 
