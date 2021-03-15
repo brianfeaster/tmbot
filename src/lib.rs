@@ -717,8 +717,8 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 `gme+2  ` `Buy 2 shares`
 `gme+$2 ` `Buy $2 worth`
 `gme-   ` `Sell entire position`
-`gme+2  ` `Sell 2 shares`
-`gme+$2 ` `Sell $2 worth`
+`gme-2  ` `Sell 2 shares`
+`gme-$2 ` `Sell $2 worth`
 `word:  ` `Definition`
 `word;  ` `Synonyms`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
