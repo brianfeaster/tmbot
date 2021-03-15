@@ -78,7 +78,7 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
             time_open <= now  &&  (time+(db.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
         } else {
             let day = LocalDateTime::from_instant(Instant::at(time)).date();
-            update_ticker_p(db, next_trading_day(day), now)
+            update_ticker_p(db, next_trading_day(day)+90*60, now)
         }
 }
 
