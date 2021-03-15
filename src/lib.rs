@@ -713,10 +713,14 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
 "`/yolo  ` `The leaderboard`
 `/stonks` `Your portfolio`
 `gme$   ` `Quote ({}min delay)`
-`gme-   ` `Sell entire position`
 `gme+   ` `Buy with all cash`
 `gme+2  ` `Buy 2 shares`
-`gme+$9 ` `Buy $9 worth`", db.quote_delay_minutes)).await?;
+`gme+$2 ` `Buy $2 worth`
+`gme-   ` `Sell entire position`
+`gme+2  ` `Sell 2 shares`
+`gme+$2 ` `Sell $2 worth`
+`word:  ` `Definition`
+`word;  ` `Synonyms`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1044,23 +1048,41 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 }
 
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
-    let cap = Regex::new(r"^([A-Za-z^.-]+)([-])$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^([A-Za-z0-9^.-]+)\-(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
 
     let ticker = trade[1].to_uppercase();
+    let mut is_dollars = !trade[2].is_empty();
 
-    let sql = format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
-    let positions = get_sql(&sql)?;
+    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
     warn!("=> {:?}", positions);
-
-    if 1 != positions.len() { return Err(Serror::Message(format!("Ticker {} has {} positions", ticker, positions.len()))); }
-
-    let qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
+    if 1 != positions.len() { Err(format!("Ticker {} has {} positions but should have 1", ticker, positions.len()))? }
+    let position_qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
     let cost = positions[0].get("price").unwrap().parse::<f64>().unwrap();
-    let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-    let value = qty * price;
 
+    let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    let position_value = position_qty * price;
+
+    let qty_or_dollars =
+        if trade.get(3).is_none() { // no amount set, so set to entire qty
+            is_dollars=false;
+            position_qty
+        } else {
+            trade[3].parse::<f64>()?
+        };
+
+    // Convert dollars to shares maybe.  Round to 4 decimal places
+    let qty = round(qty_or_dollars * if is_dollars { position_qty/position_value } else { 1.0  }, 4);
+
+    let new_qty = position_qty - qty;
+
+    if new_qty < 0.0 {
+        send_msg(db, cmd.from, "You can't sell more than you own.").await?;
+        return Ok("OK do_trade_sell not enough shares to sell.");
+    }
+
+    let value = qty * price;
     let bank_balance = get_bank_balance(cmd.from)?;
     let new_bank_balance = bank_balance + value;
 
@@ -1069,8 +1091,13 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let sql = format!("UPDATE accounts SET balance={:.2} WHERE id={}", new_bank_balance, cmd.from);
     info!("Update bank balance {} => {} SQLite => {:?}", bank_balance, new_bank_balance, get_sql(&sql));
 
-    let sql = format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker);
-    info!("SQLite => {:?}", get_sql(&sql));
+    if new_qty == 0.0 {
+        info!("SQLite => {:?}",
+            get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker)));
+    } else {
+        info!("Trade update position result {:?}",
+            get_sql(&format!("UPDATE positions SET qty={:.4} WHERE id='{}' AND ticker='{}'", new_qty, cmd.from, ticker)));
+    }
 
     // Send final gain realized
     let msg = format!("Closing:{}", &format_position(&ticker, qty, cost, price)?);
