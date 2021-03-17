@@ -66,6 +66,24 @@ impl From<regex::Error> for Serror {
     fn from(e: regex::Error) -> Self { Serror::RegexError(e) }
 }
 
+impl std::error::Error for Serror { }
+
+impl std::fmt::Display for Serror { 
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[Serror display not implemented]")
+    }
+}
+
+/*
+impl<T,E> std::ops::Try for Serror {
+    type Ok = T;
+    type Error = E;
+    fn into_result(self) -> Self { self }
+    fn from_ok(v: T) -> Self { Ok(v) }
+    fn from_error(v: E) -> Self { Err(v) }
+}
+*/
+
 /*
 impl Serror {
     pub fn str(&self) -> String {

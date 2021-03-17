@@ -1,11 +1,4 @@
-mod serror;
-mod log;
-mod json;
 mod util;
-
-pub use crate::serror::*;
-pub use crate::log::*;
-pub use crate::json::*;
 pub use crate::util::*;
 
 use ::std::{
@@ -26,15 +19,11 @@ use ::datetime::{
     Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*,
     ISO}; // ISO
 
+////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_MINUTES :i64 = 2;
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Datetime details:
-/// * Time is seconds since epoch, UTC
-/// * Trading hours is 6.5 hours long from 1430-2100 , 1330-2000 if US in DST)
-/// ? trading time is pegged to max("closing bell", "after opening bell")
-/// ? cache ticker values:  Update only if cached time is before trading time
 
 // Return time (seconds midnight UTC) for the next trading day
 fn next_trading_day (day :LocalDate) -> i64 {
@@ -50,11 +39,12 @@ fn next_trading_day (day :LocalDate) -> i64 {
         .seconds()
 }
 
-/// Decide if a ticker's price should be refreshed given its last lookup time.
-/// Market Hours PST:  pre 0900Z  reg 1430Z   post 2100Z..0100Z
-///              PDT:      0800       1330         2000 ..2400
-///                    5.5h       6.5h        4h                  [8h closed]
 
+/// Decide if a ticker's price should be refreshed given its last lookup time.
+///    Market   PreMarket   Regular  AfterHours       Closed
+///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
+///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
+///  Duration   5.5h        6.5h     4h               8h
 fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
 
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
@@ -80,11 +70,6 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
             let day = LocalDateTime::from_instant(Instant::at(time)).date();
             update_ticker_p(db, next_trading_day(day)+90*60, now)
         }
-}
-
-fn round (num:f64, pow:i32) -> f64 {
-    let fac = 10f64.powi(pow);
-    (num * fac).floor() / fac
 }
 
 // Trim trailing . and 0
@@ -134,8 +119,9 @@ struct Cmd {
     msg  :String
 }
 
+
 /// Creates a Cmd object from the useful details of a Telegram message.
-fn parse_cmd(body: &web::Bytes) -> Result<Cmd, Serror> {
+fn parse_cmd(body: &web::Bytes) -> Bresult<Cmd> {
 
     let json: Value = bytes2json(&body)?;
 
@@ -178,7 +164,7 @@ struct Quote {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
+async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Bresult<i64> {
     info!("Telegram <= \x1b[36m{}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
@@ -211,7 +197,7 @@ async fn send_msg (db :&DB, chat_id :i64, text: &str) -> Result<i64, Serror> {
 }
 
 
-async fn _send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> Result<(), Serror> {
+async fn _send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> Bresult<()> {
     info!("Telegram <= \x1b[36m{}", text);
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
@@ -245,7 +231,7 @@ async fn _send_edit_msg (db :&DB, chat_id :i64, message_id: i64, text: &str) -> 
 }
 
 
-async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Serror> {
+async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Bresult<()> {
     let text = text // Poor person's uni/url decode
     .replacen("%20", " ", 10000)
     .replacen("%28", "(", 10000)
@@ -297,7 +283,7 @@ async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Result<(), Ser
     Ok(())
 }
 
-async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &str) -> Result<(), Serror> {
+async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &str) -> Bresult<()> {
     let text = text // Poor person's uni/url decode
     .replacen("%20", " ", 10000)
     .replacen("%28", "(", 10000)
@@ -346,7 +332,7 @@ async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, text: &
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
+async fn get_definition (word: &str) -> Bresult<Vec<String>> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -394,7 +380,7 @@ async fn get_definition (word: &str) -> Result<Vec<String>, Serror> {
 }
 
 
-async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
+async fn get_syns (word: &str) -> Bresult<Vec<String>> {
     let body =
         Client::builder()
         .connector( Connector::new()
@@ -428,7 +414,7 @@ async fn get_syns (word: &str) -> Result<Vec<String>, Serror> {
         .collect::<Vec<String>>() )
 } // get_syns
 
-async fn get_ticker_quote (db :&DB, ticker: &str) -> Result<Quote, Serror> {
+async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
@@ -524,7 +510,7 @@ fn sql_results_handler (
     true
 }
 
-fn get_sql ( cmd :&str ) -> Result<Vec<HashMap<String, String>>, Serror> {
+fn get_sql ( cmd :&str ) -> Bresult<Vec<HashMap<String, String>>> {
     info!("SQLite <= \x1b[36m{}", cmd);
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
     let (snd, rcv) = channel::<HashMap<String, String>>();
@@ -540,7 +526,7 @@ fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Serror> {
+async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
 
     warn!("ticker = {:?}", ticker);
     let nowsecs :i64 = Instant::now().seconds();
@@ -610,7 +596,7 @@ async fn get_stonk (db :&DB, ticker :&str) -> Result<HashMap<String, String>, Se
     return Ok(hm);
 } // get_stonk
 
-fn get_bank_balance (id :i64) -> Result<f64, Serror> {
+fn get_bank_balance (id :i64) -> Bresult<f64> {
     let sql = format!("SELECT * FROM accounts WHERE id={}", id);
     let res = get_sql(&sql)?;
     info!("=> {:?}", res);
@@ -649,7 +635,7 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
     tickers
 }
 
-async fn get_quote_pretty (db :&DB, ticker :&str) -> Result<String, Serror> {
+async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
     // Maybe include local level 2 quotes as well
     let bidask =
         if &ticker[0..1] == "@" { 
@@ -681,7 +667,7 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Result<String, Serror> {
             bidask) )
 } // get_quote_pretty 
 
-fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String, Serror> {
+fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
     let basis = qty*cost;
     let value = qty*price;
     let gain = format!("{:.2}", value - basis);
@@ -703,7 +689,7 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Result<String,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
+async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 
     if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() {
         return Ok("SKIP")
@@ -724,7 +710,7 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
+async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
 
     let amt :i32 = match cmd.msg.as_ref() { "+1" => 1, "-1" => -1, _=>0 };
     if amt == 0 { return Ok("SKIP".into()); }
@@ -766,7 +752,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Result<String, Serror> {
     Ok("Ok do_like".into())
 }
 
-async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_like_info (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.msg != "+?" { return Ok("SKIP"); }
 
@@ -796,7 +782,7 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_like_info")
 }
 
-async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_syn (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -819,7 +805,7 @@ async fn do_syn (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_syn")
 }
 
-async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -848,7 +834,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("Ok do_def")
 }
 
-async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_sql (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.from != 308188500 {
         return Ok("do_sql invalid user");
@@ -881,7 +867,7 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 }
 
 /// TODO if a ticker fails, keep looking up remaining
-async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_quotes (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
@@ -896,7 +882,7 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
@@ -924,7 +910,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?/]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
@@ -970,7 +956,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = Regex::new(r"^([A-Za-z0-9^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
 
@@ -994,7 +980,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     let mut price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let mut qty = round(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
+    let mut qty = qty_or_dollars / if is_dollars { price } else { 1.0 };
 
     if qty <= 0.0 {
         send_msg(db, cmd.from, "You can't buy non-positive shares.").await?;
@@ -1047,7 +1033,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     Ok("COMPLETED.")
 }
 
-async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cap = Regex::new(r"^([A-Za-z0-9^.-]+)\-(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let trade = &cap.unwrap();
@@ -1073,7 +1059,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
         };
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let qty = round(qty_or_dollars * if is_dollars { position_qty/position_value } else { 1.0  }, 4);
+    let qty = qty_or_dollars * if is_dollars { position_qty/position_value } else { 1.0  };
 
     let new_qty = position_qty - qty;
 
@@ -1104,7 +1090,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
-}
+} // do_trade_sell 
 
 //           qtys are positive         v--Best ASK price (next to sell)
 //       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
@@ -1112,7 +1098,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
 //          
 
 // Create an ask quote (+price) on the exchange table, lower is better.
-async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror> {
+async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     //                       ____ticker_____  _____________qty__________________  $  ___________price______________
     let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -1263,7 +1249,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Result<&'static str, Serror
 
 ////////////////////////////////////////////////////////////////////////////////
 
-fn do_schema() -> Result<(), Serror> {
+fn do_schema() -> Bresult<()> {
     let sql = ::sqlite::open("tmbot.sqlite")?;
 
     sql.execute("
@@ -1333,7 +1319,7 @@ fn do_schema() -> Result<(), Serror> {
 }
 
 
-async fn do_all(db: &DB, body: &web::Bytes) -> Result<(), Serror> {
+async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
     let cmd = parse_cmd(&body)?;
     info!("\x1b[33m{:?}", &cmd);
 
@@ -1380,29 +1366,35 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub async fn mainstart() -> Result<(), Serror> {
+pub async fn mainstart() -> Bresult<()> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
 
-    let botkey           = args().nth(1).unwrap();
-    let chat_id_default  = args().nth(2).unwrap().parse::<i64>()?;
-    let dst_hours_adjust = args().nth(3).unwrap().parse::<i8>()?;
+    let botkey           = args().nth(1).ok_or("bad index")?;
+    let chat_id_default  = args().nth(2).ok_or("bad index")?.parse::<i64>()?;
+    let dst_hours_adjust = args().nth(3).ok_or("bad index")?.parse::<i8>()?;
 
     if !true { do_schema()?; }
 
-    Ok(HttpServer::new( move || App::new()
-        .data( Mutex::new( DB {
-            url_api: String::from("https://api.telegram.org/bot") + &botkey,
-            chat_id_default: chat_id_default,
-            dst_hours_adjust: dst_hours_adjust,
-            quote_delay_minutes: QUOTE_DELAY_MINUTES
-        } ) )
-        .service( web::resource("*")
-                    .route( Route::new().to(dispatch) ) ) )
-    .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
-    .workers(1)
-    .run().await?)
+        HttpServer::new(
+            move ||
+                App::new()
+                .data(
+                    Mutex::new(
+                        DB {
+                            url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
+                            chat_id_default:     chat_id_default,
+                            dst_hours_adjust:    dst_hours_adjust,
+                            quote_delay_minutes: QUOTE_DELAY_MINUTES} ) )
+                .service(
+                    web::resource("*")
+                    .route(
+                        Route::new().to(dispatch) ) ) )
+        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
+        .workers(16)
+        .run()
+        .await.map_err( |e| e.into() )
 }
 
 /*
