@@ -72,6 +72,11 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
         }
 }
 
+fn round (num:f64, pow:i32) -> f64 {
+    let fac = 10f64.powi(pow);
+    (num * fac).round() / fac
+}
+
 // Trim trailing . and 0
 fn num_simp (num:&str) -> String {
     num
@@ -492,7 +497,7 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
         title       :title,
         hours       :details[0].5,
         exchange    :exchange})
-} // get_ticker_quote 
+} // get_ticker_quote
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -638,7 +643,7 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
 async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
     // Maybe include local level 2 quotes as well
     let bidask =
-        if &ticker[0..1] == "@" { 
+        if &ticker[0..1] == "@" {
             let mut asks = "*Asks*".to_string();
             for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
                 asks.push_str(&format!(" `{:.2}/{}`",
@@ -665,7 +670,7 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
             &stonk.get("pretty").unwrap(),
             updated_indicator,
             bidask) )
-} // get_quote_pretty 
+} // get_quote_pretty
 
 fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
     let basis = qty*cost;
@@ -980,7 +985,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let mut price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let mut qty = qty_or_dollars / if is_dollars { price } else { 1.0 };
+    let mut qty = round(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
 
     if qty <= 0.0 {
         send_msg(db, cmd.from, "You can't buy non-positive shares.").await?;
@@ -1031,7 +1036,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
-}
+} // do_trade_buy
 
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cap = Regex::new(r"^([A-Za-z0-9^.-]+)\-(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
@@ -1059,7 +1064,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         };
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let qty = qty_or_dollars * if is_dollars { position_qty/position_value } else { 1.0  };
+    let qty = round(qty_or_dollars * if is_dollars { position_qty/position_value } else { 1.0  }, 4);
 
     let new_qty = position_qty - qty;
 
@@ -1090,12 +1095,11 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
-} // do_trade_sell 
+} // do_trade_sell
 
 //           qtys are positive         v--Best ASK price (next to sell)
 //       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
 //  Best BID price (next buyer)--^        qtys are negative
-//          
 
 // Create an ask quote (+price) on the exchange table, lower is better.
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
@@ -1221,7 +1225,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     // Add quote to exchange:  This could either create a new quote or update an existing one with the id, ticker, price matches
 
     if 0.0 == quote_qty { return Ok("COMPLETED.") }
-    
+
     let quote =
         if quote_qty < 0.0 {
             get_sql(&format!(
@@ -1232,7 +1236,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
                 "SELECT * FROM exchange WHERE id={} AND ticker='{}' AND 0<qty AND price={}",
                 cmd.from, ticker, quote_price))
         }?;
-    
+
     if quote.is_empty() {
         info!("SQLite => {:?}", get_sql(&format!(
             "INSERT INTO exchange VALUES ({}, '{}', {:.4}, {:.4}, {})",
