@@ -77,6 +77,11 @@ fn round (num:f64, pow:i32) -> f64 {
     (num * fac).round() / fac
 }
 
+fn trunc (num:f64, pow:i32) -> f64 {
+    let fac = 10f64.powi(pow);
+    (num * fac).trunc() / fac
+}
+
 // Trim trailing . and 0
 fn num_simp (num:&str) -> String {
     num
@@ -452,7 +457,7 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
          Err("Unable to find quote data in json key 'QuoteSummaryStore'")?
     }
 
-    println!("{:#}", details);
+    info!("{}", details);
 
     let title = getin_str(&details, &["longName"])?.trim_end_matches(|e|e=='.').to_string();
     let exchange = getin_str(&details, &["exchange"])?;
@@ -533,7 +538,6 @@ fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) {
 
 async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
 
-    warn!("ticker = {:?}", ticker);
     let nowsecs :i64 = Instant::now().seconds();
     let is_self_stonk = &ticker[0..1] == "@";
 
@@ -541,9 +545,8 @@ async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
     let is_in_table =
         if !res.is_empty() { // Stonks table contains this ticker
             let hm = &res[0];
-            let timesecs = hm.get("time").unwrap().parse::<i64>().unwrap();
-            if !update_ticker_p(db, timesecs, nowsecs)
-                || is_self_stonk {
+            let timesecs = hm.get("time").ok_or("table missing 'time'")?.parse::<i64>()?;
+            if !update_ticker_p(db, timesecs, nowsecs) || is_self_stonk {
                 return Ok(hm.clone())
             }
             true
@@ -701,17 +704,18 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
     }
 
     send_msg_markdown(db, cmd.at, &format!(
-"`/yolo  ` `The leaderboard`
-`/stonks` `Your portfolio`
+"`/yolo  ` `Stonks leaderboard`
+`/stonks` `Your Stonkfolio`
 `gme$   ` `Quote ({}min delay)`
-`gme+   ` `Buy with all cash`
-`gme+2  ` `Buy 2 shares`
-`gme+$2 ` `Buy $2 worth`
-`gme-   ` `Sell entire position`
+`gme+   ` `Buy all`
+`gme-   ` `Sell all`
+`gme+2  ` `Buy 2 shares (min qty 0.0001)`
 `gme-2  ` `Sell 2 shares`
+`gme+$2 ` `Buy $2 worth (min amt $0.01`
 `gme-$2 ` `Sell $2 worth`
 `word:  ` `Definition`
-`word;  ` `Synonyms`", db.quote_delay_minutes)).await?;
+`word;  ` `Synonyms`
+`+?     ` `Likes leaderboard", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
 
@@ -878,6 +882,7 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     if tickers.is_empty() { return Ok("SKIP") }
 
     for ticker in &tickers {
+        // Catch error and continue looking up tickers
         match get_quote_pretty(db, ticker).await {
             Ok(res) => { send_msg_markdown(db, cmd.at, &res).await?; }
             e => { glogd!("get_quote_pretty => ", e); }
@@ -985,18 +990,18 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let mut price = stonk.get("price").ok_or("price missing from stonk")?.parse::<f64>()?;
 
     // Convert dollars to shares maybe.  Round to 4 decimal places
-    let mut qty = round(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
+    let mut qty = trunc(qty_or_dollars / if is_dollars { price } else { 1.0 }, 4);
 
     if qty <= 0.0 {
         send_msg(db, cmd.from, "You can't buy non-positive shares.").await?;
         return Ok("OK do_trade_buy non positive share count.");
     }
 
-    let basis = qty * price;
+    let basis = round(qty * price, 2);
     let new_balance = bank_balance - basis;
 
     if new_balance < 0.0 {
-        send_msg(db, cmd.from, "You need more $$$ to YOLO like that.").await?;
+        send_msg(db, cmd.from, &format!("You need more cash ${} to YOLO ${} like that.", bank_balance, basis)).await?;
         return Ok("OK do_trade_buy not enough cash");
     }
 
@@ -1041,16 +1046,17 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cap = Regex::new(r"^([A-Za-z0-9^.-]+)\-(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
-    let trade = &cap.unwrap();
 
+    let trade = &cap.unwrap();
     let ticker = trade[1].to_uppercase();
     let mut is_dollars = !trade[2].is_empty();
 
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
-    warn!("=> {:?}", positions);
-    if 1 != positions.len() { Err(format!("Ticker {} has {} positions but should have 1", ticker, positions.len()))? }
-    let position_qty = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
-    let cost = positions[0].get("price").unwrap().parse::<f64>().unwrap();
+    info!("SQLite=> {:?}", positions);
+    if 1 != positions.len() { Err("expect 1 position")? }
+
+    let position_qty = positions[0].get("qty").ok_or("positions missing qty")?.parse::<f64>()?;
+    let cost         = positions[0].get("price").ok_or("positions missing price")?.parse::<f64>()?;
 
     let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
     let position_value = position_qty * price;
@@ -1073,7 +1079,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         return Ok("OK do_trade_sell not enough shares to sell.");
     }
 
-    let value = qty * price;
+    let value = round(qty * price, 2);
     let bank_balance = get_bank_balance(cmd.from)?;
     let new_bank_balance = bank_balance + value;
 
@@ -1097,14 +1103,15 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 } // do_trade_sell
 
-//           qtys are positive         v--Best ASK price (next to sell)
-//       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
-//  Best BID price (next buyer)--^        qtys are negative
 
 // Create an ask quote (+price) on the exchange table, lower is better.
+//       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
+//  Best BID price (next buyer)--^     ^--Best ASK price (next seller)
+//  qtys are positive                     qtys are negative
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
-    //                       ____ticker_____  _____________qty__________________  $  ___________price______________
-    let cap = Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$").unwrap().captures(&cmd.msg);
+    let cap = //       ____ticker_____  _____________qty____________________  $  ___________price______________
+        Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$")?
+        .captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let quote = &cap.unwrap();
 
@@ -1118,12 +1125,14 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
         // Check seller has the qty first
         let seller_position = get_sql(
-            &format!("SELECT * FROM ( \
-                        SELECT SUM(qty) as qty FROM ( \
-                            SELECT qty FROM positions WHERE id={} AND ticker='{}' \
-                        UNION ALL \
-                            SELECT qty FROM exchange WHERE id={} AND ticker='{}' AND qty<0 ) ) \
-                      WHERE {}<=qty",
+            &format!("SELECT * \
+                      FROM ( \
+                        SELECT SUM(qty) as qty \
+                        FROM ( \
+                                SELECT qty FROM positions WHERE id={} AND ticker='{}' \
+                            UNION ALL \
+                                SELECT qty FROM exchange WHERE id={} AND ticker='{}' AND qty<0 ) ) \
+                      WHERE {} <= qty",
             cmd.from, ticker, cmd.from, ticker, -quote_qty))?;
         if 1 != seller_position.len() { return Ok("Seller lacks the securities.") }
 
