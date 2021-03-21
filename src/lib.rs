@@ -502,7 +502,7 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
     Ok(Quote{
         _price_pretty:details[0].0.to_string(),
         price       :details[0].1,
-        amount      :round(details[0].2, 5), // Round in case: -0.00999999
+        amount      :round(details[0].2, 4), // Round for cases: -0.00999999 -1.3400116
         percent     :details[0].3,
         title       :title,
         hours       :details[0].5,
@@ -738,7 +738,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
             None => return Ok("SKIP".into()),
             Some(cap) =>
                 if cmd.from == cmd.to { return Ok("SKIP self plussed".into()); }
-                else if &cap[0] == "+" { 1 } else { -1 }
+                else if &cap[1] == "+" { 1 } else { -1 }
     };
 
     // Load database of users
@@ -762,8 +762,8 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
         .parse::<i32>()
         .unwrap() + amt;
 
-    info!("update likes in filesystem {:?} {:?} {:?}",
-        cmd.to, likes,
+    info!("update likes in filesystem {:?} by {} to {:?}  write => {:?}",
+        cmd.to, amt, likes,
         write( format!("tmbot/{}", cmd.to), likes.to_string()));
 
     let sfrom = cmd.from.to_string();
