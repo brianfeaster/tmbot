@@ -1154,8 +1154,8 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
 */ 
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
-    let cap = //       ____ticker_____  _____________qty____________________  $  ___________price______________
-        Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$")?
+    let cap = //       ____ticker_____  _____________qty____________________  @  ___________price______________
+        Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$")?
         .captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let quote = &cap.unwrap();
