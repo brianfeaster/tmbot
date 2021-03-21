@@ -731,6 +731,18 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_curse (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
+
+    if Regex::new(r"/curse").unwrap().captures(&cmd.msg).is_none() {
+        return Ok("SKIP")
+    }
+
+    send_msg_markdown(db, cmd.at, 
+        ["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7]
+    ).await?;
+    Ok("COMPLETED.")
+}
+
 async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
 
     let amt =
@@ -1349,6 +1361,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
     info!("\x1b[33m{:?}", &cmd);
 
     glogd!("do_help =>",      do_help(&db, &cmd).await);
+    glogd!("do_curse =>",     do_curse(&db, &cmd).await);
     glogd!("do_like =>",      do_like(&db, &cmd).await);
     glogd!("do_like_info =>", do_like_info(&db, &cmd).await);
     glogd!("do_syn =>",       do_syn(&db, &cmd).await);
