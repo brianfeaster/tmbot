@@ -661,16 +661,16 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
         if &ticker[0..1] == "@" {
             let mut asks = "*Asks*".to_string();
             for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
-                asks.push_str(&format!(" `{:.2}/{}`",
-                    ask.get("price").unwrap().parse::<f64>()?,
+                asks.push_str(&format!(" `{}@{}`",
                     num_simp(ask.get("qty").unwrap()),
+                    ask.get("price").unwrap().parse::<f64>()?,
                 ));
             }
             let mut bids = "*Bids*".to_string();
             for bid in get_sql(&format!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker='{}' order by price desc;", ticker))? {
-                bids.push_str(&format!(" `{:.2}/{}`",
-                    bid.get("price").unwrap().parse::<f64>()?,
+                bids.push_str(&format!(" `{}@{}`",
                     num_simp(bid.get("qty").unwrap()),
+                    bid.get("price").unwrap().parse::<f64>()?,
                 ));
             }
             format!("\n{}\n{}", asks, bids).to_string()
