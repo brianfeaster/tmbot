@@ -682,7 +682,7 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
     let updated_indicator = if stonk.contains_key("updated") { "·" } else { "" };
 
     Ok( format!("{}{}{}",
-            &stonk.get("pretty").unwrap(),
+            &stonk.get("pretty").unwrap().replace("_", "\\_"),
             updated_indicator,
             bidask) )
 } // get_quote_pretty
@@ -1143,10 +1143,16 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 } // do_trade_sell
 
 
-// Create an ask quote (+price) on the exchange table, lower is better.
-//       [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
-//  Best BID price (next buyer)--^     ^--Best ASK price (next seller)
-//  qtys are positive                     qtys are negative
+/* Create an ask quote (+price) on the exchange table, lower is better.
+         [[ 0.01  0.30  0.50  0.99     1.00  1.55  2.00  9.00 ]]
+    Best BID price (next buyer)--^     ^--Best ASK price (next seller)
+    Positive quantity                     Negative quantity
+
+   let trade: id bid/ask qty price
+   let current_ticker_qty  // how many ID owns
+   let current_ask_qty:    // sum of asks quantities for this ticker
+
+*/ 
 async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cap = //       ____ticker_____  _____________qty____________________  $  ___________price______________
         Regex::new(r"^(@?[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$")?
