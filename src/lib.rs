@@ -1,4 +1,4 @@
-mod util;
+pub mod util;
 pub use crate::util::*;
 
 use ::std::{
@@ -548,7 +548,7 @@ fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) ->
 async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
 
     let nowsecs :i64 = Instant::now().seconds();
-    let is_self_stonk = &ticker[0..1] == "@";
+    let is_self_stonk = &ticker[0..1] == "@" || Regex::new(r"^[0-9]+$")?.captures(ticker).is_some();
 
     let res = get_sql(&format!("SELECT * FROM stonks WHERE ticker='{}'", ticker))?;
     let is_in_table =
@@ -960,6 +960,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         info!("Stonk \x1b[33m{:?}", get_stonk(db, ticker).await?);
     }
 
+    /* Everyone's YOLO including non positioned YOLOers
     let sql = "\
     SELECT name, round(sum(value),2) AS yolo \
     FROM ( \
@@ -971,7 +972,26 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         ) \
     NATURAL JOIN entitys \
     GROUP BY name \
-    ORDER BY yolo DESC";
+    ORDER BY yolo DESC"; */
+
+    // Everyone's YOLO including non positioned YOLOers
+    let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
+               FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
+                     FROM positions \
+                     LEFT JOIN stonks ON stonks.ticker = positions.ticker \
+                     WHERE positions.ticker NOT LIKE '0%' \
+                       AND positions.ticker NOT LIKE '1%' \
+                       AND positions.ticker NOT LIKE '2%' \
+                       AND positions.ticker NOT LIKE '3%' \
+                       AND positions.ticker NOT LIKE '4%' \
+                       AND positions.ticker NOT LIKE '5%' \
+                       AND positions.ticker NOT LIKE '6%' \
+                       AND positions.ticker NOT LIKE '7%' \
+                       AND positions.ticker NOT LIKE '8%' \
+                       AND positions.ticker NOT LIKE '9%' \
+                     GROUP BY id) \
+               NATURAL JOIN accounts \
+               NATURAL JOIN entitys";
     let results = get_sql(&sql)?;
 
     // Build and send response string
@@ -999,6 +1019,10 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
     Ok((qty, new_balance))
 }
 
+/*******************************************************************************
+ticker buy [qty $amount $cashamount] price bankBalance currentQty basis
+ticker buy [qty] price newBankBalance currentQty basis
+*******************************************************************************/
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = //       _______________  + _$_  ______________________________
@@ -1017,7 +1041,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         .ok_or("price missing from stonk")?
         .parse::<f64>()?;
 
-    // Share-count directly, by the dollar, or entire bank balance.
+    // Share-count derived explicitly, indirectly via dollar amount, or indirectly from the entire cash balance.
     let qty = round(
         if args.get(3).is_none() {
             bank_balance / price
@@ -1054,8 +1078,9 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         1 => {
             let qty_old = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
             let price_old = positions[0].get("price").unwrap().parse::<f64>().unwrap();
-            let new_qty = round(qty + qty_old, 4);
             let new_price = (qty*price + qty_old*price_old) / (qty+qty_old);
+
+            let new_qty = round(qty + qty_old, 4);
 
             info!("add to existing position:  {} @ {}  ->  {} @ {}", qty_old, price_old, new_qty, new_price);
 
@@ -1407,6 +1432,13 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 ////////////////////////////////////////////////////////////////////////////////
 
 pub async fn mainstart() -> Bresult<()> {
+    /*
+    let mut j : serde_json::Map<String, Value> = serde_json::Map::new().into();
+    j.entry("qty").or_insert(69.into());
+    j.entry("qty").or_insert(72.into());
+    gerror(j);
+    */
+
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;

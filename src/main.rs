@@ -24,11 +24,13 @@ fn logger_init () {
     //log::error!("error"); log::warn!("warn"); log::info!("info"); log::debug!("debug"); log::trace!("trace"); 
 }
 
+
+
 #[actix_web::main]
 async fn main() {
     logger_init();
     let r = tmbot::mainstart().await;
-    log::info!("{:?}", r);
+    ::tmbot::glogd!("hmm", r);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

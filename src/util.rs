@@ -42,8 +42,8 @@ macro_rules! glogd {
     ($pre:expr, $arg:expr) => ( {
         let r=$arg;
         match &r {
-            Ok(r) => info!("{} {:?}", $pre, r),
-            Err(r) => error!("{} {:?}", $pre, r)
+            Ok(r) => ::log::info!("{} {:?}", $pre, r),
+            Err(r) => ::log::error!("{} {:?}", $pre, r)
         }
         //r
     } )
