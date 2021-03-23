@@ -989,6 +989,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
                        AND positions.ticker NOT LIKE '7%' \
                        AND positions.ticker NOT LIKE '8%' \
                        AND positions.ticker NOT LIKE '9%' \
+                       AND positions.ticker NOT LIKE '@%' \
                      GROUP BY id) \
                NATURAL JOIN accounts \
                NATURAL JOIN entitys";
