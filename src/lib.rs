@@ -952,7 +952,21 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let message_id = send_msg(db, cmd.at, &working_message).await?;
 
     // Update all user-positioned tickers
-    for row in get_sql("SELECT ticker FROM positions GROUP BY ticker")? {
+    for row in get_sql("\
+        SELECT ticker \
+        FROM positions \
+        WHERE positions.ticker NOT LIKE '0%' \
+          AND positions.ticker NOT LIKE '1%' \
+          AND positions.ticker NOT LIKE '2%' \
+          AND positions.ticker NOT LIKE '3%' \
+          AND positions.ticker NOT LIKE '4%' \
+          AND positions.ticker NOT LIKE '5%' \
+          AND positions.ticker NOT LIKE '6%' \
+          AND positions.ticker NOT LIKE '7%' \
+          AND positions.ticker NOT LIKE '8%' \
+          AND positions.ticker NOT LIKE '9%' \
+          AND positions.ticker NOT LIKE '@%' \
+        GROUP BY ticker")? {
         let ticker = row.get("ticker").unwrap();
         //working_message.push_str(ticker);
         //working_message.push_str("...");
@@ -992,7 +1006,8 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
                        AND positions.ticker NOT LIKE '@%' \
                      GROUP BY id) \
                NATURAL JOIN accounts \
-               NATURAL JOIN entitys";
+               NATURAL JOIN entitys \
+               ORDER BY yolo DESC";
     let results = get_sql(&sql)?;
 
     // Build and send response string
