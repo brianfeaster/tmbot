@@ -9,15 +9,16 @@ use ::std::{
     env::{args},
     sync::{Mutex, mpsc::{channel, Sender} },
 };
-use ::log::*;
 use ::actix_web::{
     web, App, HttpRequest, HttpServer, HttpResponse, Route,
     client::{Client, Connector}};
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::regex::{Regex};
 use ::datetime::{
-    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, Weekday::*,
+    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece,
+    Weekday::{Sunday, Friday, Saturday},
     ISO}; // ISO
+use ::log::*;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -112,6 +113,28 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
     format!("{: <pad$}{}", a, b, pad=width-lenb)
 }
 
+/// Return hashmap of the regex capture groups, if any.
+fn regex_to_hashmap (restr: &str, msg: &str) -> Option<HashMap<String, String>> {
+    let regex = Regex::new(restr).unwrap();
+    regex.captures(msg).map(|captures| { // Consider capture groups or return None
+        regex
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, capname)| { // Over capture group names (or indices)
+                capname.map_or(
+                    captures
+                        .get(i) // Get match via index
+                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())), // Match is None or a string
+                    |capname| {
+                        captures
+                            .name(capname) // Get match via capture name
+                            .map(|capmatch| (capname.into(), capmatch.as_str().into())) // Match is None or a string
+                    },
+                )
+            })
+            .collect()
+    })
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Clone, Debug)]
@@ -168,7 +191,6 @@ fn parse_cmd(body: &web::Bytes) -> Bresult<Cmd> {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Quote {
-    _price_pretty: String,
     price: f64,
     amount: f64,
     percent: f64,
@@ -500,7 +522,6 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
     details.sort_by( |a,b| b.4.cmp(&a.4) ); // Find latest quote details
 
     Ok(Quote{
-        _price_pretty:details[0].0.to_string(),
         price       :details[0].1,
         amount      :round(details[0].2, 4), // Round for cases: -0.00999999 -1.3400116
         percent     :details[0].3,
@@ -511,7 +532,7 @@ async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Quote> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-fn sql_results_handler (
+fn sql_results_handler_ (
     snd :Sender<HashMap<String, String>>,
     res :&[(&str, Option<&str>)] // [ (column, value) ]
 ) -> bool {
@@ -529,7 +550,7 @@ fn get_sql_ ( cmd :&str ) -> Bresult<Vec<HashMap<String, String>>> {
     info!("SQLite <= \x1b[1;36m{}", cmd);
     let sql = ::sqlite::open( "tmbot.sqlite" )?;
     let (snd, rcv) = channel::<HashMap<String, String>>();
-    sql.iterate(cmd, move |r| sql_results_handler(snd.clone(), r) )?;
+    sql.iterate(cmd, move |r| sql_results_handler_(snd.clone(), r) )?;
     Ok(rcv.iter().collect::<Vec<HashMap<String,String>>>())
 }
 
@@ -565,7 +586,6 @@ async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
 
     let quote = if is_self_stonk {
         Quote {
-            _price_pretty:"0.0".to_string(),
             price:0.0,
             amount:0.0,
             percent:0.0,
@@ -630,6 +650,20 @@ fn get_bank_balance (id :i64) -> Bresult<f64> {
     )
 }
 
+#[derive(Debug)]
+struct Position { id:i64, ticker:String, qty:f64, price:f64 }
+
+fn get_position (id:i64, ticker:&String) -> Bresult<Vec<Position>> {
+    Ok(
+        get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, ticker))?
+        .iter()
+        .map( |row|
+            Position{id,
+                ticker:ticker.to_string(),
+                qty:row.get("qty").unwrap().parse::<f64>().unwrap(),
+                price:row.get("price").unwrap().parse::<f64>().unwrap() } )
+        .collect::<Vec<_>>() )
+}
 ////////////////////////////////////////////////////////////////////////////////
 
 // Return set of tickers that need attention
@@ -1035,81 +1069,113 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
     Ok((qty, new_balance))
 }
 
-/*******************************************************************************
-ticker buy [qty $amount $cashamount] price bankBalance currentQty basis
-ticker buy [qty] price newBankBalance currentQty basis
-*******************************************************************************/
-async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+////////////////////////////////////////////////////////////////////////////////
+/// Stonk Buy
 
-    let cap = //       _______________  + _$_  ______________________________
-        Regex::new(r"^([A-Za-z0-9^.-]+)\+(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$")
-        .unwrap()
-        .captures(&cmd.msg);
-    if cap.is_none() { return Ok("SKIP"); }
-    let args = cap.unwrap();
+#[derive(Debug)]
+struct TradeBuy0 { id:i64, bank_balance:f64, ticker:String, is_dollars:bool, qtyamt:f64 }
 
-    let bank_balance = get_bank_balance(cmd.from)?;
-    let ticker = args[1].to_uppercase();
+impl TradeBuy0 { fn parse_request (id:i64, args:HashMap<String,String>) -> Bresult<Self> {
+    let bank_balance = get_bank_balance(id)?;
+    Ok(TradeBuy0 {
+        id,
+        bank_balance,
+        ticker: args.get("ticker").ok_or("No ticker field found")?.to_uppercase(),
+        // Share-count derived explicitly, indirectly via dollar amount, or indirectly from the entire cash balance.
+        is_dollars: args.get("2").is_some() || args.get("3").is_none(),
+        qtyamt: args.get("3").map_or(bank_balance, |m| m.parse::<f64>().unwrap())
+    })
+} }
 
+#[derive(Debug)]
+struct TradeBuy1 { qty:f64, price:f64, s0:TradeBuy0 }
+
+impl TradeBuy1 { async fn normalize_request (job:TradeBuy0, db:&DB) -> Bresult<Self> {
     let price =
-        get_stonk(db, &ticker).await?
+        get_stonk(db, &job.ticker).await?
         .get("price")
         .ok_or("price missing from stonk")?
         .parse::<f64>()?;
+    Ok(TradeBuy1 {
+        qty: round(if job.is_dollars { job.qtyamt/price } else { job.qtyamt }, 4),
+        price,
+        s0: job
+    })
+} }
 
-    // Share-count derived explicitly, indirectly via dollar amount, or indirectly from the entire cash balance.
-    let qty = round(
-        if args.get(3).is_none() {
-            bank_balance / price
-        } else {
-            args[3].parse::<f64>()? / if args.get(2).is_none() { 1.0 } else { price }
-        }, 4);
+#[derive(Debug)]
+struct TradeBuy2 { qty:f64, new_balance:f64, new_qty:f64, new_price:f64, positions:Vec<Position>, s1:TradeBuy1 }
 
+impl TradeBuy2 { async fn compute_position (job:TradeBuy1, db:&DB) -> Bresult<Self> {
     let (qty, new_balance) =
         match
-            verify_qty(qty, price, bank_balance)
-            .or_else( |_e| verify_qty(qty-0.0001, price, bank_balance) )
-            .or_else( |_e| verify_qty(qty-0.0002, price, bank_balance) )
-            .or_else( |_e| verify_qty(qty-0.0003, price, bank_balance) )
-            .or_else( |_e| verify_qty(qty-0.0004, price, bank_balance) )
-            .or_else( |_e| verify_qty(qty-0.0005, price, bank_balance) ) {
+            verify_qty(job.qty, job.price, job.s0.bank_balance)
+            .or_else( |_e| verify_qty(job.qty-0.0001, job.price, job.s0.bank_balance) )
+            .or_else( |_e| verify_qty(job.qty-0.0002, job.price, job.s0.bank_balance) )
+            .or_else( |_e| verify_qty(job.qty-0.0003, job.price, job.s0.bank_balance) )
+            .or_else( |_e| verify_qty(job.qty-0.0004, job.price, job.s0.bank_balance) )
+            .or_else( |_e| verify_qty(job.qty-0.0005, job.price, job.s0.bank_balance) ) {
             Err(e) => {  // Message user problem and log
-                send_msg(db, cmd.from, &e).await?;
-                return Ok(e.into()) },
+                send_msg(db, job.s0.id, &e).await?;
+                return Err(e.into())
+            },
             Ok(r) => r
         };
-
-    sql_table_order_insert(cmd.from, &ticker, qty, price, Instant::now().seconds())?;
-
-    let mut msg = format!("*Bought:*{}", &format_position(&ticker, qty, price, price)?);
-
-     // Maybe add to existing position
-
-    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
-
-    match positions.len() {
-        0 => {
-            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", cmd.from, ticker, qty, price))?;
-        },
+    let positions = get_position(job.s0.id, &job.s0.ticker)?;
+    let (new_qty, new_price) = match positions.len() {
+        0 => (qty, job.price),
         1 => {
-            let qty_old = positions[0].get("qty").unwrap().parse::<f64>().unwrap();
-            let price_old = positions[0].get("price").unwrap().parse::<f64>().unwrap();
-            let new_price = (qty*price + qty_old*price_old) / (qty+qty_old);
-
+            let qty_old = positions[0].qty;
+            let price_old = positions[0].price;
+            let new_price = (qty * job.price + qty_old * price_old) / (qty + qty_old);
             let new_qty = round(qty + qty_old, 4);
+            (new_qty, new_price) },
+        _ => return Err(format!("Ticker {} has {} positions, expect 0 or 1", &job.s0.ticker, positions.len()).into())
+    };
+    Ok(TradeBuy2{qty, new_balance, new_qty, new_price, positions, s1:job})
+} }
 
-            info!("add to existing position:  {} @ {}  ->  {} @ {}", qty_old, price_old, new_qty, new_price);
+#[derive(Debug)]
+struct TradeBuy3 { msg:String, s2:TradeBuy2 }
 
-            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", new_qty, new_price, cmd.from, ticker))?;
+impl TradeBuy3 { async fn update_tables (job:TradeBuy2) -> Bresult<Self> {
+    let id = job.s1.s0.id;
+    let ticker = &job.s1.s0.ticker;
+    let price = job.s1.price;
 
-            msg += &format!("\n*Final Position:*{}", &format_position(&ticker, new_qty, new_price, price)?);
-        },
-        _ => { return Err(format!("Ticker {} has {} positions, expect 0 or 1", ticker, positions.len()).into()) }
+    sql_table_order_insert(id, ticker, job.qty, price, Instant::now().seconds())?;
+    let mut msg = format!("*Bought:*");
+
+    if job.positions.is_empty() {
+        get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, job.new_qty, job.new_price))?;
+    } else {
+        msg += &format!("  `${:.2}``{}` *{}*_@{}_", job.qty*price, ticker, job.qty, price);
+        info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", job.positions[0].qty, job.positions[0].price, job.new_qty, job.new_price);
+        get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", job.new_qty, job.new_price, id, ticker))?;
+    }
+    msg += &format!("{}", &format_position(ticker, job.new_qty, job.new_price, price)?);
+
+    get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", job.new_balance, id))?;
+
+    Ok(TradeBuy3{msg, s2:job})
+} }
+
+async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+
+    let args = match regex_to_hashmap(r"^(?P<ticker>[A-Za-z0-9^.-]+)\+(\$)?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmd.msg) {
+        Some(args) => args,
+        None => return Ok("SKIP")
     };
 
-    get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", new_balance, cmd.from))?;
+    let job =
+        TradeBuy0::parse_request(cmd.from, args)
+        .map(|job0| TradeBuy1::normalize_request(job0, db))?.await
+        .map(|job1| TradeBuy2::compute_position(job1, db))?.await
+        .map(TradeBuy3::update_tables)?.await?;
 
-    send_msg_markdown(db, cmd.at, &msg).await?;
+    send_msg_markdown(db, cmd.at, &job.msg).await?;
+
+    info!("\x1b[1;31mFinal State {:#?}", &job);
 
     Ok("COMPLETED.")
 } // do_trade_buy
@@ -1448,13 +1514,6 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 ////////////////////////////////////////////////////////////////////////////////
 
 pub async fn mainstart() -> Bresult<()> {
-    /*
-    let mut j : serde_json::Map<String, Value> = serde_json::Map::new().into();
-    j.entry("qty").or_insert(69.into());
-    j.entry("qty").or_insert(72.into());
-    gerror(j);
-    */
-
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
@@ -1465,24 +1524,22 @@ pub async fn mainstart() -> Bresult<()> {
 
     if !true { do_schema()?; }
 
-        HttpServer::new(
-            move ||
-                App::new()
-                .data(
-                    Mutex::new(
-                        DB {
-                            url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
-                            chat_id_default:     chat_id_default,
-                            dst_hours_adjust:    dst_hours_adjust,
-                            quote_delay_minutes: QUOTE_DELAY_MINUTES} ) )
-                .service(
-                    web::resource("*")
-                    .route(
-                        Route::new().to(dispatch) ) ) )
-        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
-        .workers(16)
-        .run()
-        .await.map_err( |e| e.into() )
+    Ok(HttpServer::new(
+        move ||
+            App::new()
+            .data(
+                Mutex::new(
+                    DB {
+                        url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
+                        chat_id_default:     chat_id_default,
+                        dst_hours_adjust:    dst_hours_adjust,
+                        quote_delay_minutes: QUOTE_DELAY_MINUTES} ) )
+            .service(
+                web::resource("*")
+                .route(
+                    Route::new().to(dispatch) ) ) )
+    .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
+    .run().await?)
 }
 
 /*
