@@ -998,18 +998,14 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 }
 
 async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
-
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    let cash = get_bank_balance(cmd.id)?;
+    let mut total = 0.0;
+    let mut msg = String::new();
 
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
-
-    let mut msg = String::new();
-    let mut total = 0.0;
-
     for pos in positions {
-        warn!("pos = {:?}", pos);
+        info!("{} position {:?}", cmd.id, pos);
         let ticker = pos.get("ticker").unwrap();
         let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
         let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
@@ -1018,9 +1014,11 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         total += value;
         msg.push_str(&format_position(ticker, qty, cost, price)?);
     }
-    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", round(cash, 2), round(total+cash, 2)));
-    send_msg_markdown(db, cmd.at, &msg).await?;
 
+    let cash = get_bank_balance(cmd.id)?;
+    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", round(cash, 2), round(total+cash, 2)));
+
+    send_msg_markdown(db, cmd.at, &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -1138,9 +1136,9 @@ impl TradeBuy {
 }
 
 #[derive(Debug)]
-struct TradeBuyVerify { qty:f64, new_balance:f64, new_qty:f64, new_price:f64, positions:Vec<Position>, tradebuy:TradeBuy }
+struct TradeBuyCalc { qty:f64, new_balance:f64, new_qty:f64, new_cost:f64, positions:Vec<Position>, tradebuy:TradeBuy }
 
-impl TradeBuyVerify {
+impl TradeBuyCalc {
     async fn compute_position (obj:TradeBuy, db:&DB) -> Bresult<Self> {
         let (qty, new_balance) =
             match
@@ -1157,25 +1155,25 @@ impl TradeBuyVerify {
                 Ok(r) => r
             };
         let positions = Position::query(obj.trade.id, &obj.trade.ticker)?;
-        let (new_qty, new_price) = match positions.len() {
+        let (new_qty, new_cost) = match positions.len() {
             0 => (qty, obj.price),
             1 => {
                 let qty_old = positions[0].qty;
                 let price_old = positions[0].price;
-                let new_price = (qty * obj.price + qty_old * price_old) / (qty + qty_old);
+                let new_cost = (qty * obj.price + qty_old * price_old) / (qty + qty_old);
                 let new_qty = round(qty + qty_old, 4);
-                (new_qty, new_price) },
+                (new_qty, new_cost) },
             _ => return Err(format!("Ticker {} has {} positions, expect 0 or 1", &obj.trade.ticker, positions.len()).into())
         };
-        Ok(Self{qty, new_balance, new_qty, new_price, positions, tradebuy:obj})
+        Ok(Self{qty, new_balance, new_qty, new_cost, positions, tradebuy:obj})
     }
 }
 
 #[derive(Debug)]
-struct ExecuteBuy { msg:String, tradebuyverify:TradeBuyVerify }
+struct ExecuteBuy { msg:String, tradebuycalc:TradeBuyCalc }
 
 impl ExecuteBuy {
-    async fn execute (obj:TradeBuyVerify) -> Bresult<Self> {
+    async fn execute (obj:TradeBuyCalc) -> Bresult<Self> {
         let id = obj.tradebuy.trade.id;
         let ticker = &obj.tradebuy.trade.ticker;
         let price = obj.tradebuy.price;
@@ -1184,31 +1182,30 @@ impl ExecuteBuy {
         let mut msg = format!("*Bought:*");
 
         if obj.positions.is_empty() {
-            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, obj.new_qty, obj.new_price))?;
+            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, obj.new_qty, obj.new_cost))?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
-            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_price);
-            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_price, id, ticker))?;
+            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_cost);
+            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_cost, id, ticker))?;
         }
-        msg += &format!("{}", &format_position(ticker, obj.new_qty, obj.new_price, price)?);
+        msg += &format_position(ticker, obj.new_qty, obj.new_cost, price)?;
 
         get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
 
-        Ok(Self{msg, tradebuyverify:obj})
+        Ok(Self{msg, tradebuycalc:obj})
     }
 }
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let trade = Trade::new(cmd.id, &cmd.msg)?;
-
     if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
 
     let res =
         TradeBuy::new(trade.unwrap(), db).await
-        .map(|buy| TradeBuyVerify::compute_position(buy, db))?.await
-        .map(ExecuteBuy::execute)?.await?;
+        .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy, db))?.await
+        .map(ExecuteBuy::execute)?.await
+        .map(|res| { info!("\x1b[1;31mResult {:#?}", &res); res })?;
 
-    info!("\x1b[1;31mResult {:#?}", &res);
     send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
 }
@@ -1277,7 +1274,10 @@ impl TradeSell {
 }
 
 #[derive(Debug)]
-struct ExecuteSell { msg:String, tradesell:TradeSell }
+struct ExecuteSell {
+    msg: String,
+    tradesell: TradeSell
+}
 
 impl ExecuteSell {
     async fn execute (obj:TradeSell) -> Bresult<Self> {
@@ -1291,10 +1291,11 @@ impl ExecuteSell {
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
             get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", id, ticker))?;
-            msg += &format!("{}", &format_position(ticker, qty, position.price, price)?);
+            msg += &format_position(ticker, qty, position.price, price)?;
         } else {
-            msg += &format!("  `{:.2}``{}` *{}*_@{}_", qty*price, ticker, qty, price);
-            msg += &format!("{}", &format_position(ticker, new_qty, position.price, price)?);
+            msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
+                qty*price, ticker, qty, price,
+                &format_position(ticker, new_qty, position.price, price)?);
             get_sql(&format!("UPDATE positions SET qty={} WHERE id='{}' AND ticker='{}'", new_qty, id, ticker))?;
         }
         get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
@@ -1303,15 +1304,17 @@ impl ExecuteSell {
 }
 
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
-    let req = Trade::new(cmd.id, &cmd.msg)?;
-    if req.as_ref().map_or(true, |req| req.action != '-') { return Ok("SKIP") }
+    let trade = Trade::new(cmd.id, &cmd.msg)?;
+    if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
+
     let res =
-        TradeSell::new(req.unwrap(), db).await
+        TradeSell::new(trade.unwrap(), db).await
         .map(ExecuteSell::execute)?.await?;
+
     info!("\x1b[1;31mResult {:#?}", res);
     send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
-} // do_trade_sell
+}
 
 
 /* Create an ask quote (+price) on the exchange table, lower is better.
