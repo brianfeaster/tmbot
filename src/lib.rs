@@ -2,6 +2,7 @@ pub mod util;
 pub use crate::util::*;
 
 use ::std::{
+    mem::transmute,
     time::{Duration},
     collections::{HashMap, HashSet},
     str::{from_utf8},
@@ -73,14 +74,16 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
         }
 }
 
-/// Round a number and return the result and difference
-fn round (num:f64, pow:i32) -> f64 {
-    let fac = 10f64.powi(pow);
-    (num * fac).round() / fac
+/// Round a float at the specified decimal offset
+///  println!("{:?}", num::Float::integer_decode(n) );
+fn round (num:f64, dec:i32) -> f64 {
+    let fac = 10f64.powi(dec);
+    let num_incremented = unsafe { transmute::<u64, f64>(transmute::<f64, u64>(num) + 1) };
+    (num_incremented * fac).round() / fac
 }
 
-fn _trunc (num:f64, pow:i32) -> f64 {
-    let fac = 10f64.powi(pow);
+fn _trunc (num:f64, dec:i32) -> f64 {
+    let fac = 10f64.powi(dec);
     (num * fac).trunc() / fac
 }
 
