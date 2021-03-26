@@ -117,8 +117,8 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
 }
 
 /// Return hashmap of the regex capture groups, if any.
-fn regex_to_hashmap (restr: &str, msg: &str) -> Option<HashMap<String, String>> {
-    let regex = Regex::new(restr).unwrap();
+fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
+    let regex = Regex::new(re).unwrap();
     regex.captures(msg).map(|captures| { // Consider capture groups or return None
         regex
             .capture_names()
@@ -151,45 +151,6 @@ pub struct DB {
 type MDB = Mutex<DB>;
 
 ////////////////////////////////////////////////////////////////////////////////
-
-#[derive(Debug)]
-struct Cmd {
-    from :i64,
-    at   :i64,
-    to   :i64,
-    msg  :String
-}
-
-
-/// Creates a Cmd object from the useful details of a Telegram message.
-fn parse_cmd(body: &web::Bytes) -> Bresult<Cmd> {
-
-    let json: Value = bytes2json(&body)?;
-
-    let inline_query = &json["inline_query"];
-    if inline_query.is_object() {
-        let from = getin_i64(inline_query, &["from", "id"])?;
-        let msg = getin_str(inline_query, &["query"])?.to_string();
-        return Ok(Cmd { from:from, at:from, to:from, msg:msg });
-    }
-
-    let message = &json["message"];
-    if message.is_object() {
-        let from = getin_i64(message, &["from", "id"])?;
-        let at = getin_i64(message, &["chat", "id"])?;
-        let msg = getin_str(message, &["text"])?.to_string();
-
-        return Ok(
-            if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
-                Cmd { from:from, at:at, to:to, msg:msg }
-            } else {
-                Cmd { from:from, at:at, to:from, msg:msg }
-            }
-        );
-    }
-
-    Err("Nothing to do.")?
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -652,21 +613,103 @@ fn get_bank_balance (id :i64) -> Bresult<f64> {
         }
     )
 }
+////////////////////////////////////////////////////////////////////////////////
+/// Blobs
 
+////////////////////////////////////////////////////////////////////////////////
 #[derive(Debug)]
-struct Position { id:i64, ticker:String, qty:f64, price:f64 }
-
-fn get_position (id:i64, ticker:&String) -> Bresult<Vec<Position>> {
-    Ok(
-        get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, ticker))?
-        .iter()
-        .map( |row|
-            Position{id,
-                ticker:ticker.to_string(),
-                qty:row.get("qty").unwrap().parse::<f64>().unwrap(),
-                price:row.get("price").unwrap().parse::<f64>().unwrap() } )
-        .collect::<Vec<_>>() )
+struct Cmd {
+    id: i64,
+    at: i64,
+    to: i64,
+    msg: String
 }
+
+impl Cmd {
+    /// Creates a Cmd object from the useful details of a Telegram message.
+    fn parse_cmd(body: &web::Bytes) -> Bresult<Self> {
+
+        let json: Value = bytes2json(&body)?;
+
+        let inline_query = &json["inline_query"];
+        if inline_query.is_object() {
+            let id = getin_i64(inline_query, &["from", "id"])?;
+            let msg = getin_str(inline_query, &["query"])?.to_string();
+            return Ok(Cmd { id, at:id, to:id, msg }); // Inline query message
+        }
+
+        let message = &json["message"];
+        if message.is_object() {
+            let id = getin_i64(message, &["from", "id"])?;
+            let at = getin_i64(message, &["chat", "id"])?;
+            let msg = getin_str(message, &["text"])?.to_string();
+
+            return Ok(
+                if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
+                    Self { id, at, to, msg } // Reply message
+                } else {
+                    Self { id, at, to:id, msg } // Normal message
+                }
+            );
+        }
+
+        Err("Nothing to do.")?
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+#[derive(Debug)]
+struct Position {
+    id:i64,
+    ticker:String,
+    qty:f64,
+    price:f64
+}
+
+impl Position {
+    fn query (id:i64, ticker:&str) -> Bresult<Vec<Position>> {
+        Ok(
+            get_sql(&format!("SELECT qty, price FROM positions WHERE id={} AND ticker='{}'", id, ticker))?
+            .iter()
+            .map( |row|
+                Self {
+                    id,
+                    ticker: ticker.into(),
+                    qty: row.get("qty").unwrap().parse::<f64>().unwrap(),
+                    price: row.get("price").unwrap().parse::<f64>().unwrap() } )
+            .collect::<Vec<_>>() )
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+#[derive(Debug)]
+struct Trade {
+    id: i64,
+    ticker: String,
+    action: char,
+    is_dollars: bool,
+    amt: Option<f64>
+}
+
+impl Trade {
+    fn new (id:i64, msg:&str) -> Bresult<Option<Self>> {
+        let caps = //                  _____ticker____  _+-_  _$_   ____________amt_______________
+            match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", msg) {
+                Some(caps) => caps,
+                None => return Ok(None)
+            };
+        Ok(Some(Self {
+            id,
+            ticker: caps.get("1").unwrap().to_uppercase(),
+            action: caps.get("2").unwrap().chars().nth(0).unwrap(),
+            is_dollars: caps.get("3").is_some(),
+            amt: caps.get("4").map(|m| m.parse::<f64>().unwrap())
+        }))
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// Bot's Do Handler Helpers
 ////////////////////////////////////////////////////////////////////////////////
 
 // Return set of tickers that need attention
@@ -746,6 +789,9 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+/// Bot's Do Handlers
+////////////////////////////////////////////////////////////////////////////////
+
 async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 
     if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() {
@@ -783,7 +829,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
         match Regex::new(r"^([+-])1")?.captures(&cmd.msg) {
             None => return Ok("SKIP".into()),
             Some(cap) =>
-                if cmd.from == cmd.to { return Ok("SKIP self plussed".into()); }
+                if cmd.id == cmd.to { return Ok("SKIP self plussed".into()); }
                 else if &cap[1] == "+" { 1 } else { -1 }
     };
 
@@ -812,9 +858,9 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
         cmd.to, amt, likes,
         write( format!("tmbot/{}", cmd.to), likes.to_string()));
 
-    let sfrom = cmd.from.to_string();
+    let sfrom = cmd.id.to_string();
     let sto = cmd.to.to_string();
-    let fromname = people.get(&cmd.from).unwrap_or(&sfrom);
+    let fromname = people.get(&cmd.id).unwrap_or(&sfrom);
     let toname   = people.get(&cmd.to).unwrap_or(&sto);
     let text = format!("{}{}{}", fromname, num2heart(likes), toname);
     send_msg(db, cmd.at, &text).await?;
@@ -863,7 +909,7 @@ async fn do_syn (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let mut defs = get_syns(word).await?;
 
     if 0 == defs.len() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* synonyms is empty", word)).await?;
+        send_msg_markdown(db, cmd.id, &format!("*{}* synonyms is empty", word)).await?;
         return Ok("do_syn empty synonyms");
     }
 
@@ -884,7 +930,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let defs = get_definition(word).await?;
 
     if defs.is_empty() {
-        send_msg_markdown(db, cmd.from, &format!("*{}* def is empty", word)).await?;
+        send_msg_markdown(db, cmd.id, &format!("*{}* def is empty", word)).await?;
         return Ok("do_def def is empty");
     }
 
@@ -906,9 +952,7 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_sql (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
-    if cmd.from != 308188500 {
-        return Ok("do_sql invalid user");
-    }
+    if cmd.id != 308188500 { return Ok("do_sql invalid user"); }
 
     let cap = Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -916,13 +960,13 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let result = get_sql(expr);
     if let Err(e) = result {
-        send_msg_markdown(db, cmd.from, &format!("{:?}", e)).await?;
+        send_msg_markdown(db, cmd.id, &format!("{:?}", e)).await?;
         return Err(e);
     }
     let results = result.unwrap();
 
     if results.is_empty() {
-        send_msg(db, cmd.from, &format!("\"{}\" results is empty", expr)).await?;
+        send_msg(db, cmd.id, &format!("\"{}\" results is empty", expr)).await?;
         return Ok("do_sql def is empty");
     }
 
@@ -957,9 +1001,9 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    let cash = get_bank_balance(cmd.from)?;
+    let cash = get_bank_balance(cmd.id)?;
 
-    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.from))?;
+    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
 
     let mut msg = String::new();
     let mut total = 0.0;
@@ -1076,179 +1120,196 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
 /// Stonk Buy
 
 #[derive(Debug)]
-struct TradeBuy0 { id:i64, bank_balance:f64, ticker:String, is_dollars:bool, qtyamt:f64 }
+struct TradeBuy { qty:f64, price:f64, bank_balance: f64, trade: Trade }
 
-impl TradeBuy0 { fn parse_request (id:i64, args:HashMap<String,String>) -> Bresult<Self> {
-    let bank_balance = get_bank_balance(id)?;
-    Ok(TradeBuy0 {
-        id,
-        bank_balance,
-        ticker: args.get("ticker").ok_or("No ticker field found")?.to_uppercase(),
-        // Share-count derived explicitly, indirectly via dollar amount, or indirectly from the entire cash balance.
-        is_dollars: args.get("2").is_some() || args.get("3").is_none(),
-        qtyamt: args.get("3").map_or(bank_balance, |m| m.parse::<f64>().unwrap())
-    })
-} }
-
-#[derive(Debug)]
-struct TradeBuy1 { qty:f64, price:f64, s0:TradeBuy0 }
-
-impl TradeBuy1 { async fn normalize_request (job:TradeBuy0, db:&DB) -> Bresult<Self> {
-    let price =
-        get_stonk(db, &job.ticker).await?
-        .get("price")
-        .ok_or("price missing from stonk")?
-        .parse::<f64>()?;
-    Ok(TradeBuy1 {
-        qty: round(if job.is_dollars { job.qtyamt/price } else { job.qtyamt }, 4),
-        price,
-        s0: job
-    })
-} }
-
-#[derive(Debug)]
-struct TradeBuy2 { qty:f64, new_balance:f64, new_qty:f64, new_price:f64, positions:Vec<Position>, s1:TradeBuy1 }
-
-impl TradeBuy2 { async fn compute_position (job:TradeBuy1, db:&DB) -> Bresult<Self> {
-    let (qty, new_balance) =
-        match
-            verify_qty(job.qty, job.price, job.s0.bank_balance)
-            .or_else( |_e| verify_qty(job.qty-0.0001, job.price, job.s0.bank_balance) )
-            .or_else( |_e| verify_qty(job.qty-0.0002, job.price, job.s0.bank_balance) )
-            .or_else( |_e| verify_qty(job.qty-0.0003, job.price, job.s0.bank_balance) )
-            .or_else( |_e| verify_qty(job.qty-0.0004, job.price, job.s0.bank_balance) )
-            .or_else( |_e| verify_qty(job.qty-0.0005, job.price, job.s0.bank_balance) ) {
-            Err(e) => {  // Message user problem and log
-                send_msg(db, job.s0.id, &e).await?;
-                return Err(e.into())
-            },
-            Ok(r) => r
+impl TradeBuy {
+    async fn new (trade:Trade, db:&DB) -> Bresult<Self> {
+        let price =
+            get_stonk(db, &trade.ticker).await?
+            .get("price").ok_or("price missing from stonk")?
+            .parse::<f64>()?;
+        let bank_balance = get_bank_balance(trade.id)?;
+        let qty = match trade.amt {
+            Some(amt) => if trade.is_dollars { amt/price } else { amt },
+            None => round(bank_balance / price, 4)
         };
-    let positions = get_position(job.s0.id, &job.s0.ticker)?;
-    let (new_qty, new_price) = match positions.len() {
-        0 => (qty, job.price),
-        1 => {
-            let qty_old = positions[0].qty;
-            let price_old = positions[0].price;
-            let new_price = (qty * job.price + qty_old * price_old) / (qty + qty_old);
-            let new_qty = round(qty + qty_old, 4);
-            (new_qty, new_price) },
-        _ => return Err(format!("Ticker {} has {} positions, expect 0 or 1", &job.s0.ticker, positions.len()).into())
-    };
-    Ok(TradeBuy2{qty, new_balance, new_qty, new_price, positions, s1:job})
-} }
+        Ok( Self{qty, price, bank_balance, trade} )
+    }
+}
 
 #[derive(Debug)]
-struct TradeBuy3 { msg:String, s2:TradeBuy2 }
+struct TradeBuyVerify { qty:f64, new_balance:f64, new_qty:f64, new_price:f64, positions:Vec<Position>, tradebuy:TradeBuy }
 
-impl TradeBuy3 { async fn update_tables (job:TradeBuy2) -> Bresult<Self> {
-    let id = job.s1.s0.id;
-    let ticker = &job.s1.s0.ticker;
-    let price = job.s1.price;
-
-    sql_table_order_insert(id, ticker, job.qty, price, Instant::now().seconds())?;
-    let mut msg = format!("*Bought:*");
-
-    if job.positions.is_empty() {
-        get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, job.new_qty, job.new_price))?;
-    } else {
-        msg += &format!("  `${:.2}``{}` *{}*_@{}_", job.qty*price, ticker, job.qty, price);
-        info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", job.positions[0].qty, job.positions[0].price, job.new_qty, job.new_price);
-        get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", job.new_qty, job.new_price, id, ticker))?;
+impl TradeBuyVerify {
+    async fn compute_position (obj:TradeBuy, db:&DB) -> Bresult<Self> {
+        let (qty, new_balance) =
+            match
+                verify_qty(obj.qty, obj.price, obj.bank_balance)
+                .or_else( |_e| verify_qty(obj.qty-0.0001, obj.price, obj.bank_balance) )
+                .or_else( |_e| verify_qty(obj.qty-0.0002, obj.price, obj.bank_balance) )
+                .or_else( |_e| verify_qty(obj.qty-0.0003, obj.price, obj.bank_balance) )
+                .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, obj.bank_balance) )
+                .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, obj.bank_balance) ) {
+                Err(e) => {  // Message user problem and log
+                    send_msg(db, obj.trade.id, &e).await?;
+                    return Err(e.into())
+                },
+                Ok(r) => r
+            };
+        let positions = Position::query(obj.trade.id, &obj.trade.ticker)?;
+        let (new_qty, new_price) = match positions.len() {
+            0 => (qty, obj.price),
+            1 => {
+                let qty_old = positions[0].qty;
+                let price_old = positions[0].price;
+                let new_price = (qty * obj.price + qty_old * price_old) / (qty + qty_old);
+                let new_qty = round(qty + qty_old, 4);
+                (new_qty, new_price) },
+            _ => return Err(format!("Ticker {} has {} positions, expect 0 or 1", &obj.trade.ticker, positions.len()).into())
+        };
+        Ok(Self{qty, new_balance, new_qty, new_price, positions, tradebuy:obj})
     }
-    msg += &format!("{}", &format_position(ticker, job.new_qty, job.new_price, price)?);
+}
 
-    get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", job.new_balance, id))?;
+#[derive(Debug)]
+struct ExecuteBuy { msg:String, tradebuyverify:TradeBuyVerify }
 
-    Ok(TradeBuy3{msg, s2:job})
-} }
+impl ExecuteBuy {
+    async fn execute (obj:TradeBuyVerify) -> Bresult<Self> {
+        let id = obj.tradebuy.trade.id;
+        let ticker = &obj.tradebuy.trade.ticker;
+        let price = obj.tradebuy.price;
+
+        sql_table_order_insert(id, ticker, obj.qty, price, Instant::now().seconds())?;
+        let mut msg = format!("*Bought:*");
+
+        if obj.positions.is_empty() {
+            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, obj.new_qty, obj.new_price))?;
+        } else {
+            msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
+            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_price);
+            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_price, id, ticker))?;
+        }
+        msg += &format!("{}", &format_position(ticker, obj.new_qty, obj.new_price, price)?);
+
+        get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
+
+        Ok(Self{msg, tradebuyverify:obj})
+    }
+}
 
 async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+    let trade = Trade::new(cmd.id, &cmd.msg)?;
 
-    let args = match regex_to_hashmap(r"^(?P<ticker>[A-Za-z0-9^.-]+)\+(\$)?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmd.msg) {
-        Some(args) => args,
-        None => return Ok("SKIP")
-    };
+    if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
 
-    let job =
-        TradeBuy0::parse_request(cmd.from, args)
-        .map(|job0| TradeBuy1::normalize_request(job0, db))?.await
-        .map(|job1| TradeBuy2::compute_position(job1, db))?.await
-        .map(TradeBuy3::update_tables)?.await?;
+    let res =
+        TradeBuy::new(trade.unwrap(), db).await
+        .map(|buy| TradeBuyVerify::compute_position(buy, db))?.await
+        .map(ExecuteBuy::execute)?.await?;
 
-    send_msg_markdown(db, cmd.at, &job.msg).await?;
-
-    info!("\x1b[1;31mFinal State {:#?}", &job);
-
+    info!("\x1b[1;31mResult {:#?}", &res);
+    send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
-} // do_trade_buy
+}
+
+////////////////////////////////////////////////////////////////////////////////
+/// Stonk Sell
+
+#[derive(Debug)]
+struct TradeSell {
+    positions: Vec<Position>,
+    qty: f64,
+    price: f64,
+    bank_balance: f64,
+    new_balance: f64,
+    new_qty: f64,
+    trade: Trade
+}
+
+impl TradeSell {
+    async fn new (trade:Trade, db:&DB) -> Bresult<Self> {
+        let id = trade.id;
+        let ticker = &trade.ticker;
+
+        let positions = Position::query(id, ticker)?;
+        if 1 != positions.len() {
+            send_msg(db, id, "You lack a valid position.").await?;
+             Err("expect 1 position in table")?
+        }
+        let pos_qty = positions[0].qty;
+
+        let price = get_stonk(db, ticker).await?.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
+
+        let mut qty =
+            round(match trade.amt {
+                Some(amt) => if trade.is_dollars { amt / price } else { amt }, // Convert dollars to shares maybe
+                None => pos_qty // no amount set, so set to entire qty
+            }, 4);
+        if qty <= 0.0 {
+            send_msg(db, id, "Quantity too low.").await?;
+            Err("sell qty too low")?
+        }
+
+        let bank_balance = get_bank_balance(id)?;
+        let mut gain = qty*price;
+        let mut new_balance = bank_balance+gain;
+
+        info!("\x1b[1msell? {}/{} @ {} = {}  CASH {} -> {}", qty, pos_qty, price, gain,  bank_balance, new_balance);
+
+        // If equal to the rounded position value, snap qty to exact position
+        if qty != pos_qty && round(gain, 2) == round(pos_qty*price, 2) {
+            qty = pos_qty;
+            gain = qty*price;
+            new_balance = bank_balance + gain;
+            info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", qty, pos_qty, price, gain,  bank_balance, new_balance);
+        }
+
+        if pos_qty < qty {
+            send_msg(db, id, "You can't sell more than you own.").await?;
+            return Err("not enough shares to sell".into());
+        }
+
+        let new_qty = round(pos_qty-qty, 4);
+
+        Ok( Self{positions, qty, price, bank_balance, new_balance, new_qty, trade} )
+    }
+}
+
+#[derive(Debug)]
+struct ExecuteSell { msg:String, tradesell:TradeSell }
+
+impl ExecuteSell {
+    async fn execute (obj:TradeSell) -> Bresult<Self> {
+        let id = obj.trade.id;
+        let ticker = &obj.trade.ticker;
+        let position = &obj.positions[0];
+        let qty = obj.qty;
+        let price = obj.price;
+        let new_qty = obj.new_qty;
+        sql_table_order_insert(id, ticker, -qty, price, Instant::now().seconds())?;
+        let mut msg = format!("*Sold:*");
+        if new_qty == 0.0 {
+            get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", id, ticker))?;
+            msg += &format!("\n{}", &format_position(ticker, qty, position.price, price)?);
+        } else {
+            msg += &format!("  `{:.2}``{}` *{}*_@{}_", qty*price, ticker, qty, price);
+            msg += &format!("{}", &format_position(ticker, new_qty, position.price, price)?);
+            get_sql(&format!("UPDATE positions SET qty={} WHERE id='{}' AND ticker='{}'", new_qty, id, ticker))?;
+        }
+        get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
+        Ok(Self{msg, tradesell:obj})
+    }
+}
 
 async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
-    let cap = //       _______________  - _$_  ______________________________
-        Regex::new(r"^([A-Za-z0-9^.-]+)\-(\$?)([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("SKIP"); }
-
-    let trade = &cap.unwrap();
-    let ticker = trade[1].to_uppercase();
-
-    let positions = get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
-    if 1 != positions.len() { Err("expect 1 position in table")? }
-
-    let qty = positions[0].get("qty").ok_or("positions missing qty")?.parse::<f64>()?;
-    let cost = positions[0].get("price").ok_or("positions missing price")?.parse::<f64>()?;
-    let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-    let value = qty * price;
-
-    let mut sell_qty =
-        if trade.get(3).is_none() { // no amount set, so set to entire qty
-            qty
-        } else {
-            // Convert dollars to shares maybe.
-            let is_dollars = !trade[2].is_empty();
-            round(trade[3].parse::<f64>()? / if is_dollars { price } else { 1.0 }, 4)
-        };
-
-    if sell_qty <= 0.0 {
-        send_msg(db, cmd.from, "Quantity too low.").await?;
-        return Ok("OK do_trade_sell qty too low");
-    }
-
-    let mut gain = sell_qty*price;
-    let orig_balance = get_bank_balance(cmd.from)?;
-    let mut balance = orig_balance + gain;
-
-    info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", sell_qty, qty, price, gain,  orig_balance, balance);
-
-    // If equal to the perceived position value, set to entire position
-    if sell_qty != qty && round(gain, 2) == round(value, 2) {
-        sell_qty = qty;
-        gain = value;
-        balance = orig_balance + gain;
-        info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", sell_qty, qty, price, gain,  orig_balance, balance);
-    }
-
-    if qty < sell_qty {
-        send_msg(db, cmd.from, "You can't sell more than you own.").await?;
-        return Ok("OK do_trade_sell not enough shares to sell.");
-    }
-
-    sql_table_order_insert(cmd.from, &ticker, -sell_qty, price, Instant::now().seconds())?;
-
-    let mut msg = format!("*Sold:*{}", &format_position(&ticker, sell_qty, cost, price)?);
-
-    let new_qty = round(qty-sell_qty, 4);
-    if new_qty == 0.0 {
-        get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", cmd.from, ticker))?;
-    } else {
-        msg += &format!("\n*Final Position:*{}", &format_position(&ticker, new_qty, cost, price)?);
-        get_sql(&format!("UPDATE positions SET qty={} WHERE id='{}' AND ticker='{}'", new_qty, cmd.from, ticker))?;
-    }
-
-    get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", balance, cmd.from))?;
-
-    // Send realized details
-    send_msg_markdown(db, cmd.at, &msg).await?;
-
+    let req = Trade::new(cmd.id, &cmd.msg)?;
+    if req.as_ref().map_or(true, |req| req.action != '-') { return Ok("SKIP") }
+    let res =
+        TradeSell::new(req.unwrap(), db).await
+        .map(ExecuteSell::execute)?.await?;
+    info!("\x1b[1;31mResult {:#?}", res);
+    send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
 } // do_trade_sell
 
@@ -1288,7 +1349,7 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
                             UNION ALL \
                                 SELECT qty FROM exchange WHERE id={} AND ticker='{}' AND qty<0 ) ) \
                       WHERE {} <= qty",
-            cmd.from, ticker, cmd.from, ticker, -quote_qty))?;
+            cmd.id, ticker, cmd.id, ticker, -quote_qty))?;
         if 1 != seller_position.len() { return Ok("Seller lacks the securities.") }
 
         // Any bidders willing to buy/pay?
@@ -1320,8 +1381,8 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
             // Create the new orders
 
-            if cmd.from != bidder_id {
-                sql_table_order_insert(cmd.from, &ticker, -best_qty, best_price, now)?;
+            if cmd.id != bidder_id {
+                sql_table_order_insert(cmd.id, &ticker, -best_qty, best_price, now)?;
                 sql_table_order_insert(
                     bidder_id,
                     &ticker, best_qty, best_price, now)?;
@@ -1363,11 +1424,11 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
             // Create the new orders
 
-            if cmd.from != asker_id {
+            if cmd.id != asker_id {
                 sql_table_order_insert(
                     asker_id,
                     &ticker, -best_qty, best_price, now)?;
-                sql_table_order_insert(cmd.from, &ticker, best_qty, best_price, now)?;
+                sql_table_order_insert(cmd.id, &ticker, best_qty, best_price, now)?;
             }
 
             quote_qty = quote_qty - best_qty; // Adjust quote_qty and continue to creating a possible market quote
@@ -1380,18 +1441,18 @@ async fn do_exchange_bidask (_db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let quote =
         if quote_qty < 0.0 {
-            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND qty<0 AND price={}", cmd.from, ticker, quote_price))?
+            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND qty<0 AND price={}", cmd.id, ticker, quote_price))?
         } else {
-            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND 0<qty AND price={}", cmd.from, ticker, quote_price))?
+            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND 0<qty AND price={}", cmd.id, ticker, quote_price))?
         };
 
     if quote.is_empty() {
-        get_sql(&format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, {:.4}, {})", cmd.from, ticker, quote_qty, quote_price, now))?;
+        get_sql(&format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, {:.4}, {})", cmd.id, ticker, quote_qty, quote_price, now))?;
     } else {
         get_sql(&format!(
             "UPDATE exchange set qty={}, time={}  WHERE id={} AND ticker='{}' AND price={}",
             quote_qty + quote[0].get("qty").unwrap().parse::<f64>()?, now,
-            cmd.from, ticker, quote_price))?;
+            cmd.id, ticker, quote_price))?;
     }
 
     Ok("COMPLETED.")
@@ -1470,7 +1531,7 @@ fn do_schema() -> Bresult<()> {
 
 
 async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
-    let cmd = parse_cmd(&body)?;
+    let cmd = Cmd::parse_cmd(&body)?;
     info!("\x1b[33m{:?}", &cmd);
 
     glogd!("do_help =>",      do_help(&db, &cmd).await);

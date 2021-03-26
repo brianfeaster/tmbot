@@ -24,13 +24,59 @@ fn logger_init () {
     //log::error!("error"); log::warn!("warn"); log::info!("info"); log::debug!("debug"); log::trace!("trace"); 
 }
 
-
-
 #[actix_web::main]
 async fn main() {
-    logger_init();
-    let r = tmbot::mainstart().await;
-    ::tmbot::glogd!("hmm", r);
+    if true {
+        logger_init();
+        let r = tmbot::mainstart().await;
+        ::tmbot::glogd!("hmm", r);
+    } else {
+        checkfloats();
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Float rounding testng
+
+use std::mem::transmute;
+
+fn round(f: f64) -> f64 {
+    //(unsafe { transmute::<u64, f64>(transmute::<f64, u64>(f) + 1) } * 100.0).round() / 100.0
+    unsafe { transmute::<u64, f64>(transmute::<f64, u64>(f) + 0) }
+}
+
+fn checkfloats() {
+    let mut errors = 0;
+    let mut i = 000000_000i64;
+    while i <=  999999_999i64 && errors < 10 {
+        let n = i / 1000i64;
+        let d = i % 1000i64;
+
+        // Fixed point string
+        let s = format!("{}.{:03}", n, d);
+        // Fixed point rounded string
+        let sr = {
+            let mut n = n;
+            let mut d = if d % 10 < 5 { d / 10 } else { d / 10 + 1 };
+            if 100 <= d {
+                n += 1;
+                d -= 100;
+            }
+            format!("{}.{:02}", n, d)
+        };
+
+        // Float
+        let f: f64 = s.parse::<f64>().map_err( |e| { println!("{:?} {:?}", e, s); e }).unwrap();
+        // Float rounded string
+        let fr = format!("{:.2}", round(f));
+
+        if sr != fr {
+            errors += 1;
+            println!("{} '{}'/'{}'  {}/'{}'  {:.60}", i, s, sr, f, fr, f);
+        }
+
+        i += 1;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
