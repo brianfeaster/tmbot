@@ -974,7 +974,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         total += value;
         msg.push_str(&format_position(ticker, qty, cost, price)?);
     }
-    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", cash, total+cash));
+    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", round(cash, 2), round(total+cash, 2)));
     send_msg_markdown(db, cmd.at, &msg).await?;
 
     Ok("COMPLETED.")
