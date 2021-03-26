@@ -1291,7 +1291,7 @@ impl ExecuteSell {
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
             get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", id, ticker))?;
-            msg += &format!("\n{}", &format_position(ticker, qty, position.price, price)?);
+            msg += &format!("{}", &format_position(ticker, qty, position.price, price)?);
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_", qty*price, ticker, qty, price);
             msg += &format!("{}", &format_position(ticker, new_qty, position.price, price)?);
