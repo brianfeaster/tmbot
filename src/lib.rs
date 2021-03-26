@@ -739,10 +739,10 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
     Ok(format!("\n`{:>7.2}``{:>8} {:>4}% {}``{} @{:.2}` *{}*_@{:.2}_",
-        value,
+        round(value, 2),
         gain, gain_percent, greenred,
-        ticker, price,
-        qty, cost))
+        ticker, round(price, 2),
+        qty, round(cost, 2)))
 }
 
 ////////////////////////////////////////////////////////////////////////////////
