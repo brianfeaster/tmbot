@@ -1706,10 +1706,14 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         }
     }
     let (mut msg, _value) =
-        position_to_pretty(
-            &get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, id))?[0],
-            db
-        ).await?;
+    {
+        let pos = &get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, id))?;
+        if pos.is_empty() {
+            ("".into(), 0.0)
+        } else {
+            position_to_pretty(&pos[0], db).await?
+        }
+    };
     msg += "\n";
     if bids.len() == 0 && asks.len() == 0 {
         msg += "*NO BIDS/ASKS*"
