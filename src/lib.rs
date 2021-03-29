@@ -823,8 +823,8 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 `word:  ` `Definition`
 `word;  ` `Synonyms`
 `+?     ` `Likes leaderboard`
-`@bif+1@3` `Bid/buy  2 shares of \"@bif\" at $3`
-`@amy-5@2` `Ask/sell 5 shares of \"@amy\" at $2`
+`@usr+1@3` `Bid/buy  2 shares of \"@usr\" at $3`
+`@usr-5@2` `Ask/sell 5 shares of \"@usr\" at $2`
 `/orders ` `Your open bid/ask orders`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
@@ -1680,7 +1680,7 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let mut asks = String::from("");
     for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
         let ticker = order.get("ticker").unwrap();
-        let stonk = get_sql(&format!("SELECT name FROM entitys WHERE id={}", &ticker))?[0].get("name").unwrap().to_string();
+        let stonk = get_sql(&format!("SELECT name FROM entitys WHERE id={}", &ticker))?[0].get("name").unwrap().to_string().replacen("_", "\\_", 10000);
         let qty = order.get("qty").unwrap().parse::<f64>().unwrap();
         let price = order.get("price").unwrap();
         if qty < 0.0 {
