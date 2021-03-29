@@ -822,9 +822,10 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 `gme-$2 ` `Sell $2 worth`
 `word:  ` `Definition`
 `word;  ` `Synonyms`
-`@them+1@1 ` `Bid to buy 1 share of user @them @ $1`
-`@me-5@2   ` `Ask to sell 5 shares of user @me @ $2`
-`+?     ` `Likes leaderboard`", db.quote_delay_minutes)).await?;
+`+?     ` `Likes leaderboard`
+`@bif+1@3` `Bid/buy  2 shares of \"@bif\" at $3`
+`@amy-5@2` `Ask/sell 5 shares of \"@amy\" at $2`
+`/orders ` `Your open bid/ask orders`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1668,141 +1669,43 @@ async fn do_exchange_bidask (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         QuoteCancelMine::doit(quote)
         .map(|obj| QuoteExecute::doit(obj, db) )?.await?;
     info!("\x1b[1;31mResult {:#?}", ret);
-    //send_msg_markdown(db, cmd.at, &obj.msg).await?; // Report to user?
-    return Ok("testing");
-
-    /*
-    if obj.quot.qty < 0.0 { // A seller has appeared:  ask quote (-qty, price)
-        // (1a) Acquire bids on my ticker.
-        // (1) Consider my bids and Decrement or delete existing matching bids (benign)
-
-        // (2a) Acquire my asks on my ticker.  Subtract count from my qty.  Verify still positive.
-        // (2) Add to andy of my matching ask quotes, guaranteed to not match any open bids since
-        //     the exchange is always in a resolved.
-
-        // (3) qty left can be matched with any bids above or at ask price) and money/security
-        //     exchanged.
-
-        // (4) remaining qty becomes a new ask quote
-
-        // Check seller has the qty first
-        let seller_position = get_sql(
-            &format!("SELECT * \
-                      FROM ( \
-                        SELECT SUM(qty) as qty \
-                        FROM ( \
-                                SELECT qty FROM positions WHERE id={} AND ticker='{}' \
-                            UNION ALL \
-                                SELECT qty FROM exchange WHERE id={} AND ticker='{}' AND qty<0 ) ) \
-                      WHERE {} <= qty",
-            cmd.id, ticker, cmd.id, ticker, -quote_qty))?;
-        if 1 != seller_position.len() { return Ok("Seller lacks the securities.") }
-
-        // Any bidders willing to buy/pay?
-        let bidder = get_sql(
-            &format!("SELECT * FROM exchange  WHERE ticker='{}' AND 0<qty AND {}<=price  ORDER BY price DESC LIMIT 1",
-                ticker, quote_price))?;
-
-        if 1 <= bidder.len() {
-            quote_qty *= -1.0;
-            let bidder_id = bidder[0].get("id").unwrap().parse::<i64>()?;
-            let qty =   bidder[0].get("qty").unwrap().parse::<f64>()?;
-            let price = bidder[0].get("price").unwrap().parse::<f64>()?;
-
-            let best_qty = quote_qty.min(qty);
-            let best_price = quote_price.max(price);
-
-            warn!("new ask/seller {}@{}  +  existing bi/buyer {}@{}  =>  best order {}@{}",
-                quote_qty, quote_price,   qty, price,   best_qty, best_price);
-
-            // Update The Exchange
-
-            if qty == best_qty {
-                // Delete the market quote
-                get_sql(&format!("DELETE FROM exchange WHERE id={} AND ticker='{}' AND qty={} AND price={}", bidder_id, ticker, qty, price))?;
-            } else {
-                // Update the market quote
-                get_sql(&format!("UPDATE exchange SET qty={} WHERE id={} AND ticker='{}' AND price={}", qty-best_qty, bidder_id, ticker, price))?;
-            }
-
-            // Create the new orders
-
-            if cmd.id != bidder_id {
-                sql_table_order_insert(cmd.id, &ticker, -best_qty, best_price, now)?;
-                sql_table_order_insert(
-                    bidder_id,
-                    &ticker, best_qty, best_price, now)?;
-            }
-
-            quote_qty = best_qty - quote_qty; // Adjust quote_qty and continue to creating a possible market quote
-        }
-
-        // Update exchange: qty -= amt  OR  remove if qty == amt
-        // Positions
-        //   Seller: qty-=amt, price = new basis using amt*price  OR  remove if qty == amt
-        //   Buyer:  qty+=amt, price = new basis using amt*price  OR create
-        // Update stonks with best_price
-
-    } else { // A buyer has appeared:  bid quote (+price)
-        let asker = get_sql(&format!("SELECT * FROM exchange WHERE ticker='{}' AND qty<0 AND price<={} ORDER BY price LIMIT 1", ticker, quote_price))?;
-
-        if 1 <= asker.len() {
-            // TODO wtf min maxing twice?
-            let asker_id = asker[0].get("id").unwrap().parse::<i64>()?;
-            let qty =     -asker[0].get("qty").unwrap().parse::<f64>()?;
-            let price =    asker[0].get("price").unwrap().parse::<f64>()?;
-
-            let best_qty = quote_qty.min(qty);
-            let best_price = quote_price.min(price);
-
-            warn!("new seller {}@{}  existing buyer {}@{} => {}@{}",
-                quote_qty, quote_price,   qty, price,   best_qty, best_price);
-
-            // Update The Exchange
-
-            if qty == best_qty {
-                // Delete the market quote
-                get_sql(&format!("DELETE FROM exchange WHERE id={} AND ticker='{}' AND qty={} AND price={}", asker_id, ticker, -qty, price))?;
-            } else {
-                // Update the market quote
-                get_sql(&format!("UPDATE exchange SET qty={} WHERE id={} AND ticker='{}' AND price={}", best_qty-qty, asker_id, ticker, price))?;
-            }
-
-            // Create the new orders
-
-            if cmd.id != asker_id {
-                sql_table_order_insert(
-                    asker_id,
-                    &ticker, -best_qty, best_price, now)?;
-                sql_table_order_insert(cmd.id, &ticker, best_qty, best_price, now)?;
-            }
-
-            quote_qty = quote_qty - best_qty; // Adjust quote_qty and continue to creating a possible market quote
-        }
-    }
-
-    // Add quote to exchange:  This could either create a new quote or update an existing one with the id, ticker, price matches
-
-    if 0.0 == quote_qty { return Ok("COMPLETED.") }
-
-    let quote =
-        if quote_qty < 0.0 {
-            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND qty<0 AND price={}", cmd.id, ticker, quote_price))?
-        } else {
-            get_sql(&format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND 0<qty AND price={}", cmd.id, ticker, quote_price))?
-        };
-
-    if quote.is_empty() {
-        get_sql(&format!("INSERT INTO exchange VALUES ({}, '{}', {:.4}, {:.4}, {})", cmd.id, ticker, quote_qty, quote_price, now))?;
-    } else {
-        get_sql(&format!(
-            "UPDATE exchange set qty={}, time={}  WHERE id={} AND ticker='{}' AND price={}",
-            quote_qty + quote[0].get("qty").unwrap().parse::<f64>()?, now,
-            cmd.id, ticker, quote_price))?;
-    }
-
+    //send_msg_markdown(db, cmd.at, &ret.msg).await?; // Report to user
     Ok("COMPLETED.")
-        */
+}
+
+async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+    if Regex::new(r"/ORDERS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    let id = cmd.id;
+    let mut bids = String::from("");
+    let mut asks = String::from("");
+    for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
+        let ticker = order.get("ticker").unwrap();
+        let stonk = get_sql(&format!("SELECT name FROM entitys WHERE id={}", &ticker))?[0].get("name").unwrap().to_string();
+        let qty = order.get("qty").unwrap().parse::<f64>().unwrap();
+        let price = order.get("price").unwrap();
+        if qty < 0.0 {
+            asks += &format!("\n@{}{:+}@{}", stonk, qty, price);
+        } else {
+            bids += &format!("\n@{}{:+}@{}", stonk, qty, price);
+        }
+    }
+    let mut msg = String::from("");
+    if bids.len() == 0 && asks.len() == 0 {
+        msg += "*no orders*"
+    } else {
+        if asks.len() != 0 {
+            msg += "*ASKS*";
+            msg += &asks;
+        }
+        if  bids.len() != 0 {
+            if asks.len() != 0 { msg += "\n"; }
+            msg += "*BIDS*";
+            msg += &bids;
+        }
+    }
+    info!("{:?}", &msg);
+    send_msg_markdown(db, id, &msg).await?;
+    Ok("COMPLETED.")
 }
 
 /********************
@@ -1901,6 +1804,7 @@ async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
     glogd!("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
     glogd!("do_exchange_bidask =>", do_exchange_bidask(&db, &cmd).await);
+    glogd!("do_orders =>", do_orders(&db, &cmd).await);
     Ok(())
 }
 
