@@ -822,6 +822,8 @@ async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 `gme-$2 ` `Sell $2 worth`
 `word:  ` `Definition`
 `word;  ` `Synonyms`
+`@them+1@1 ` `Bid to buy 1 share of user @them @ $1`
+`@me-5@2   ` `Ask to sell 5 shares of user @me @ $2`
 `+?     ` `Likes leaderboard`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
