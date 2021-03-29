@@ -1563,7 +1563,7 @@ impl QuoteExecute {
                 // create or increment in exchange table my ask.  This could also be the case if no bids were executed.
                 if qty < 0.0 {
                     if let Some(myask) = myasks.iter_mut().find( |a| price == a.get("price").unwrap().parse::<f64>().unwrap() ) {
-                        let newqty = roundqty(myask.get("qty").unwrap().parse::<f64>().unwrap() - qty);
+                        let newqty = roundqty(myask.get("qty").unwrap().parse::<f64>().unwrap() + qty);
                         let mytime = myask.get("time").unwrap().parse::<i64>().unwrap();
                         get_sql(&format!("UPDATE exchange set qty={} WHERE id={} AND ticker='{}' AND price={} AND time={}", newqty, id, ticker, price, mytime))?;
                         myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
