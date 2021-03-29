@@ -1704,7 +1704,7 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         }
     }
     info!("{:?}", &msg);
-    send_msg_markdown(db, id, &msg).await?;
+    send_msg_markdown(db, cmd.at, &msg).await?;
     Ok("COMPLETED.")
 }
 
