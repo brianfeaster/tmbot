@@ -1705,16 +1705,17 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
             bids += &format!("\n@{}{:+}@{}", stonk, qty, price);
         }
     }
-    let (mut msg, _value) =
-    {
-        let pos = &get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, id))?;
-        if pos.is_empty() {
-            ("".into(), 0.0)
-        } else {
-            position_to_pretty(&pos[0], db).await?
+
+    let mut msg = String::new();
+
+    // Include all self-stonks positions (mine and others)
+    for pos in get_sql(&format!("SELECT * FROM positions WHERE id={}", id))? {
+        if is_self_stonk(pos.get("ticker").unwrap()) {
+            let (m, _value) = position_to_pretty(&pos, db).await?;
+            msg += &m;
         }
-    };
-    msg += "\n";
+    }
+    if 0 < msg.len() { msg += "\n" }
     if bids.len() == 0 && asks.len() == 0 {
         msg += "*NO BIDS/ASKS*"
     } else {
