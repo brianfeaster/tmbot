@@ -2,11 +2,8 @@ use ::std::{
     str::from_utf8,
     error::Error,
 };
+pub use ::serde_json::{Value};
 use log::*;
-pub use ::serde_json::{
-    self as sj,
-    Value,
-};
 
 /// Types //////////////////////////////////////////////////////////////////////
 
@@ -75,7 +72,7 @@ pub fn num2heart (n :i32) -> &'static str {
 /// JSON ///////////////////////////////////////////////////////////////////////
 
 pub fn bytes2json (body: &[u8]) -> Result<Value, Box<dyn Error>> {
-    Ok( sj::from_str( from_utf8(&body)? )? )
+    Ok( serde_json::from_str( from_utf8(&body)? )? )
 }
 
 pub fn getin<'t> (mut j :&'t Value, keys :&[&str]) -> &'t Value {
