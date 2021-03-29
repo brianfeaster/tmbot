@@ -1023,6 +1023,21 @@ async fn do_quotes (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn position_to_pretty (pos:&HashMap<String, String>, db:&DB) -> Bresult<(String, f64)> {
+    let ticker = pos.get("ticker").unwrap();
+    let ticker_refed = { // Unref self-stonk back to username
+        if is_self_stonk(ticker) {
+            ("@".to_string() + get_sql(&format!("SELECT name FROM entitys WHERE id={}", &ticker))?[0].get("name").unwrap()).to_string()
+        } else {
+            ticker.to_string()
+        }
+    };
+    let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
+    let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
+    let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    Ok( ( format_position(&ticker_refed, qty, cost, price)?, qty*price ) ) // Return tuple
+}
+
 async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
@@ -1032,20 +1047,9 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
     for pos in positions {
         info!("{} position {:?}", cmd.id, pos);
-        let ticker = pos.get("ticker").unwrap();
-        let ticker_refed = { // Unref self-stonk back to username
-            if is_self_stonk(ticker) {
-                ("@".to_string() + get_sql(&format!("SELECT name FROM entitys WHERE id={}", &ticker))?[0].get("name").unwrap()).to_string()
-            } else {
-                ticker.to_string()
-            }
-        };
-        let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
-        let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
-        let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
-        let value = qty * price;
+        let (pretty, value) = position_to_pretty(&pos, db).await?;
+        msg.push_str(&pretty);
         total += value;
-        msg.push_str(&format_position(&ticker_refed, qty, cost, price)?);
     }
 
     let cash = get_bank_balance(cmd.id)?;
@@ -1624,7 +1628,7 @@ impl QuoteExecute {
 
                     // Update their position
                     let aposition = Position::query(aid, ticker)?;
-                    let (aposqty, aposprice) = if 1==aposition.len() { (aposition[0].qty, aposition[0].price) } else { (0.0, 0.0) };
+                    let (aposqty, _aposprice) = if 1==aposition.len() { (aposition[0].qty, aposition[0].price) } else { (0.0, 0.0) };
                     let newaposqty = roundqty(aposqty - xqty);
                     if 0.0 == newaposqty {
                         get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker='{}' AND qty={}", aid, ticker, aposqty) )?;
@@ -1701,18 +1705,27 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
             bids += &format!("\n@{}{:+}@{}", stonk, qty, price);
         }
     }
-    let mut msg = String::from("");
+    let (mut msg, _value) =
+        position_to_pretty(
+            &get_sql(&format!("SELECT * FROM positions WHERE id={} AND ticker='{}'", id, id))?[0],
+            db
+        ).await?;
+    msg += "\n";
     if bids.len() == 0 && asks.len() == 0 {
-        msg += "*no orders*"
+        msg += "*NO BIDS/ASKS*"
     } else {
         if asks.len() != 0 {
             msg += "*ASKS*";
             msg += &asks;
+        } else {
+            msg += "*NO ASKS*";
         }
+        msg += "\n";
         if  bids.len() != 0 {
-            if asks.len() != 0 { msg += "\n"; }
             msg += "*BIDS*";
             msg += &bids;
+        } else {
+            msg += "*NO BIDS*";
         }
     }
     info!("{:?}", &msg);
