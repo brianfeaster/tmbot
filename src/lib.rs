@@ -108,6 +108,18 @@ fn percent_squish (num:f64) -> String {
     }
 }
 
+// Stringify float to two decimal places unless under 10
+// where it's 4 decimal places with trailing 0s truncate.
+fn money_pretty (n:f64) -> String {
+    if n < 10.0 {
+        let mut np = format!("{:.4}", n);
+        np = regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() );
+        regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() )
+    } else {
+        format!("{:.2}", n)
+    }
+}
+
 // (5,"a","bb") => "a..bb"
 fn _pad_between(width: usize, a:&str, b:&str) -> String {
     let lenb = b.len();
@@ -520,10 +532,10 @@ fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
     Ok(format!("{}{}@{}{} {}{} {}% {} {}",
         gain_glyphs.0,
         ticker,
-        quote.price,
+        money_pretty(quote.price),
         match quote.hours { 'r'=>"", 'p'=>"p", 'a'=>"a", _=>"?"},
         gain_glyphs.1,
-        quote.amount.abs(),
+        money_pretty(quote.amount.abs()),
         percent_squish(quote.percent.abs()),
         quote.title,
         quote.exchange
@@ -1509,9 +1521,9 @@ impl QuoteExecute {
                     // Update my position
                     let newposqty = roundqty(posqty - xqty);
                     if 0.0 == newposqty {
-                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker='{}' AND qty={} AND price={}", id, ticker, posqty, posprice) )?;
+                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker='{}' AND qty={}", id, ticker, posqty) )?;
                     } else {
-                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker='{}' AND price={}", newposqty, id, ticker, posprice) )?;
+                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker='{}' AND qty={}", newposqty, id, ticker, posqty) )?;
                     }
 
                     // Update buyer's position
@@ -1522,7 +1534,7 @@ impl QuoteExecute {
                     } else {
                         let newaposqty = roundqty(aposqty+aqty);
                         let newaposcost = (aposprice + value) / (aposqty + xqty);
-                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker='{}' AND price={}", newaposqty, newaposcost, aid, ticker, aposprice) )?;
+                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker='{}' AND qty={}", newaposqty, newaposcost, aid, ticker, aposqty) )?;
                     }
 
                     // Update stonk quote value
@@ -1607,7 +1619,7 @@ impl QuoteExecute {
                     } else {
                         let newposqty = roundqty(posqty+xqty);
                         let newposcost = (posprice + value) / (posqty + xqty);
-                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker='{}' AND price={}", newposqty, newposcost, id, ticker, posprice) )?;
+                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker='{}' AND qty={}", newposqty, newposcost, id, ticker, posqty) )?;
                     }
 
                     // Update their position
@@ -1615,9 +1627,9 @@ impl QuoteExecute {
                     let (aposqty, aposprice) = if 1==aposition.len() { (aposition[0].qty, aposition[0].price) } else { (0.0, 0.0) };
                     let newaposqty = roundqty(aposqty - xqty);
                     if 0.0 == newaposqty {
-                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker='{}' AND qty={} AND price={}", aid, ticker, aposqty, aposprice) )?;
+                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker='{}' AND qty={}", aid, ticker, aposqty) )?;
                     } else {
-                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker='{}' AND price={}", newaposqty, aid, ticker, aposprice) )?;
+                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker='{}' AND qty={}", newaposqty, aid, ticker, aposqty) )?;
                     }
 
                     // Update stonk quote value
