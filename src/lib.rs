@@ -489,7 +489,7 @@ pub async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
         return Ok("SKIP")
     }
 
-    send_msg_markdown(db, cmd.at, &format!(
+    send_msg_markdown(db, cmd.id, &format!(
 "`/yolo  ` `Stonks leaderboard`
 `/stonks` `Your Stonkfolio`
 `gme$   ` `Quote ({}min delay)`
@@ -502,8 +502,8 @@ pub async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
 `word:  ` `Definition`
 `word;  ` `Synonyms`
 `+?     ` `Likes leaderboard`
-`@usr+1@3` `Bid/buy  2 shares of \"@usr\" at $3`
-`@usr-5@2` `Ask/sell 5 shares of \"@usr\" at $2`
+`@usr+1@3` `Bid/buy  2 shares of '@usr' at $3`
+`@usr-5@2` `Ask/sell 5 shares of '@usr' at $2`
 `/orders ` `Your open bid/ask orders`", db.quote_delay_minutes)).await?;
     Ok("COMPLETED.")
 }
@@ -557,7 +557,7 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
     let fromname = people.get(&cmd.id).unwrap_or(&sfrom);
     let toname   = people.get(&cmd.to).unwrap_or(&sto);
     let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    send_msg(db, cmd.at, &text).await?;
+    send_msg(db, cmd.id, &text).await?;
 
     Ok("COMPLETED.".into())
 }
@@ -630,12 +630,13 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
 
     let mut msg = String::new() + "*" + word;
 
+    
     if 1 == defs.len() {
-        msg.push_str( &format!(":* {}", defs[0].to_string()));
+        msg.push_str( &format!(":* {}", defs[0].to_string().replacen("`", "\\`", 10000)));
     } else {
-        msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string()));
+        msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string().replacen("`", "\\`", 10000)));
         for i in 1..std::cmp::min(4, defs.len()) {
-            msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string()));
+            msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replacen("`", "\\`", 10000)));
         }
     }
 
@@ -895,7 +896,7 @@ async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         .map(ExecuteBuy::execute)?.await
         .map(|res| { info!("\x1b[1;31mResult {:#?}", &res); res })?;
 
-    send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
+    send_msg_markdown(db, cmd.id, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
 }
 
@@ -1001,7 +1002,7 @@ async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         .map(ExecuteSell::execute)?.await?;
 
     info!("\x1b[1;31mResult {:#?}", res);
-    send_msg_markdown(db, cmd.at, &res.msg).await?; // Report to user
+    send_msg_markdown(db, cmd.id, &res.msg).await?; // Report to user
     Ok("COMPLETED.")
 }
 
@@ -1340,7 +1341,7 @@ async fn do_exchange_bidask (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         .map(|obj| QuoteExecute::doit(obj, db) )?.await?;
     info!("\x1b[1;31mResult {:#?}", ret);
     if 0!=ret.msg.len() {
-        send_msg_markdown(db, cmd.at,
+        send_msg_markdown(db, cmd.id,
             &ret.msg
             .replacen("_", "\\_", 1000)
             .replacen(">", "\\>", 1000)
@@ -1394,7 +1395,7 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         }
     }
     info!("{:?}", &msg);
-    send_msg_markdown(db, cmd.at, &msg).await?;
+    send_msg_markdown(db, cmd.id, &msg).await?;
     Ok("COMPLETED.")
 }
 

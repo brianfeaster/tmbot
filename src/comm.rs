@@ -98,7 +98,6 @@ pub async fn send_msg_markdown (db :&DB, chat_id :i64, text: &str) -> Bresult<()
     .replacen("+", "\\+", 10000)
     .replacen("=", "\\=", 10000)
     .replacen("#", "\\#", 10000)
-    .replacen("`", "\\`", 10000)
     .replacen("'", "\\'", 10000);
 
     info!("Telegram <= \x1b[33m{}\x1b[0m", text);
@@ -152,7 +151,6 @@ pub async fn send_edit_msg_markdown (db :&DB, chat_id :i64, message_id :i64, tex
     .replacen("+", "\\+", 10000)
     .replacen("=", "\\=", 10000)
     .replacen("#", "\\#", 10000)
-    .replacen("`", "\\`", 10000)
     .replacen("'", "\\'", 10000);
 
     info!("Telegram <= \x1b[33m{}\x1b[0m", text);
