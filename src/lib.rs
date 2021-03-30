@@ -11,30 +11,40 @@ use crate::srvs::*;
 use crate::db::*;
 
 use ::std::{
+    env,
     mem::transmute,
     time::{Duration},
     collections::{HashMap, HashSet},
     str::{from_utf8},
     fs::{read_to_string, write},
-    env::{args},
-    sync::{Mutex},
-};
-use ::actix_web::{
-    web, App, HttpRequest, HttpServer, HttpResponse, Route,
-    client::{Client, Connector}};
-use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
+    sync::{Mutex} };
+use ::log::*;
 use ::regex::{Regex};
 use ::datetime::{
-    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece,
-    Weekday::{Sunday, Friday, Saturday},
-    ISO}; // ISO
-use ::log::*;
+    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, ISO,
+    Weekday::{Sunday, Friday, Saturday} }; // ISO
+use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
+use ::actix_web::{
+    web, App, HttpRequest, HttpServer, HttpResponse, Route,
+    client::{Client, Connector} };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_MINUTES :i64 = 2;
 
 ////////////////////////////////////////////////////////////////////////////////
+
+
+trait Fun {
+    fn fun (&self) -> &Self;
+}
+
+impl<T : std::fmt::Debug> Fun for T {
+    fn fun (&self) -> &Self {
+        println!("Here is your hashy {:?}", self);
+        self
+    }
+}
 
 // Return time (seconds midnight UTC) for the next trading day
 fn next_trading_day (day :LocalDate) -> i64 {
@@ -708,7 +718,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cash = get_bank_balance(cmd.id)?;
     msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
 
-    send_msg_markdown(db, cmd.at, &msg).await?;
+    send_msg_markdown(db, cmd.id, &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -788,7 +798,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
             row.get("name").unwrap()) );
     }
 
-    send_edit_msg_markdown(db, cmd.at, message_id, &msg).await?;
+    send_edit_msg_markdown(db, cmd.id, message_id, &msg).await?;
 
     Ok("COMPLETED.")
 }
@@ -1399,6 +1409,26 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
+    let cmd = Cmd::parse_cmd(&body)?;
+    info!("\x1b[33m{:?}", &cmd);
+
+    glogd!("do_help =>",      do_help(&db, &cmd).await);
+    glogd!("do_like =>",      do_like(&db, &cmd).await);
+    glogd!("do_like_info =>", do_like_info(&db, &cmd).await);
+    glogd!("do_syn =>",       do_syn(&db, &cmd).await);
+    glogd!("do_def =>",       do_def(&db, &cmd).await);
+    glogd!("do_sql =>",       do_sql(&db, &cmd).await);
+    glogd!("do_quotes => ",   do_quotes(&db, &cmd).await);
+    glogd!("do_portfolio =>", do_portfolio(&db, &cmd).await);
+    glogd!("do_yolo =>",      do_yolo(&db, &cmd).await);
+    glogd!("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
+    glogd!("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
+    glogd!("do_exchange_bidask =>", do_exchange_bidask(&db, &cmd).await);
+    glogd!("do_orders =>", do_orders(&db, &cmd).await);
+    Ok(())
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 fn do_schema() -> Bresult<()> {
@@ -1471,26 +1501,6 @@ fn do_schema() -> Bresult<()> {
 }
 
 
-async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
-    let cmd = Cmd::parse_cmd(&body)?;
-    info!("\x1b[33m{:?}", &cmd);
-
-    glogd!("do_help =>",      do_help(&db, &cmd).await);
-    glogd!("do_like =>",      do_like(&db, &cmd).await);
-    glogd!("do_like_info =>", do_like_info(&db, &cmd).await);
-    glogd!("do_syn =>",       do_syn(&db, &cmd).await);
-    glogd!("do_def =>",       do_def(&db, &cmd).await);
-    glogd!("do_sql =>",       do_sql(&db, &cmd).await);
-    glogd!("do_quotes => ",   do_quotes(&db, &cmd).await);
-    glogd!("do_portfolio =>", do_portfolio(&db, &cmd).await);
-    glogd!("do_yolo =>",      do_yolo(&db, &cmd).await);
-    glogd!("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
-    glogd!("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
-    glogd!("do_exchange_bidask =>", do_exchange_bidask(&db, &cmd).await);
-    glogd!("do_orders =>", do_orders(&db, &cmd).await);
-    Ok(())
-}
-
 fn log_header () {
     info!("\x1b[0;31;40m _____ __  __ ____        _   ");
     info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
@@ -1499,7 +1509,9 @@ fn log_header () {
     info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
 }
 
-async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
+////////////////////////////////////////////////////////////////////////////////
+
+async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
 
     let db = req.app_data::<web::Data<MDB>>().unwrap().lock().unwrap();
@@ -1517,18 +1529,17 @@ async fn dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
-pub async fn mainstart() -> Bresult<()> {
+pub async fn main() -> Bresult<()> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
 
-    let botkey           = args().nth(1).ok_or("bad index")?;
-    let chat_id_default  = args().nth(2).ok_or("bad index")?.parse::<i64>()?;
-    let dst_hours_adjust = args().nth(3).ok_or("bad index")?.parse::<i8>()?;
+    let botkey           = env::args().nth(1).ok_or("bad index")?;
+    let chat_id_default  = env::args().nth(2).ok_or("bad index")?.parse::<i64>()?;
+    let dst_hours_adjust = env::args().nth(3).ok_or("bad index")?.parse::<i8>()?;
 
     if !true { do_schema()?; }
+    fun();
 
     Ok(HttpServer::new(
         move ||
@@ -1543,9 +1554,15 @@ pub async fn mainstart() -> Bresult<()> {
             .service(
                 web::resource("*")
                 .route(
-                    Route::new().to(dispatch) ) ) )
+                    Route::new().to(main_dispatch) ) ) )
     .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
     .run().await?)
+}
+
+fn fun () {
+    let mut hm = HashMap::<String, String>::new();
+    hm.insert("hi".into(), "there".into());
+    hm.fun();
 }
 
 /*
