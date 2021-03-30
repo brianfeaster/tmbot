@@ -28,8 +28,8 @@ fn logger_init () {
 async fn main() {
     if true {
         logger_init();
-        let r = tmbot::mainstart().await;
-        ::tmbot::glogd!("hmm", r);
+        let r = ::tmbot::mainstart().await;
+        tmbot::glogd!("hmm", r);
     } else {
         checkfloats();
     }
