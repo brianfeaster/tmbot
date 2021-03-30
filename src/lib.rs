@@ -679,7 +679,7 @@ async fn do_sql (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         let mut buff = String::new();
         res.iter().for_each( |(k,v)| buff.push_str(&format!("{}:{} ", k, v)) );
         let res = format!("{}\n", buff);
-        send_msg(db, cmd.at, &res).await?;
+        send_msg(db, cmd.id, &res).await?;
     }
 
     Ok("Ok do_sql")
@@ -728,7 +728,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"YOLO[!?]|[!?/]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let working_message = "working...".to_string();
-    let message_id = send_msg(db, cmd.at, &working_message).await?;
+    let message_id = send_msg(db, cmd.id, &working_message).await?;
 
     // Update all user-positioned tickers
     for row in get_sql("\
