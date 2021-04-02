@@ -172,9 +172,10 @@ fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
             (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
         };
 
+    let ticker_pretty = deref_ticker(ticker);
     Ok(format!("{}{}@{}{} {}{} {}% {} {}",
         gain_glyphs.0,
-        ticker,
+        ticker_pretty,
         money_pretty(quote.price),
         match quote.hours { 'r'=>"", 'p'=>"p", 'a'=>"a", _=>"?"},
         gain_glyphs.1,
@@ -331,7 +332,6 @@ impl Cmd {
                    hm.get("echo").unwrap().parse::<i64>().unwrap() ) )
             .collect::<HashMap<i64,i64>>();
 
-        error!("body = {:?}", &body);
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
         let message = &json["message"];
@@ -1274,7 +1274,7 @@ impl QuoteExecute {
                     let amt = aprice-price;
                     let per = amt/price;
                     let pretty = make_pretty_quote(
-                        &deref_ticker(ticker),
+                        ticker,
                         &Ticker{
                             price:aprice, amount:amt, percent:per,
                             title:"Self Stonk".into(), hours:'r', exchange:"™BOT".to_string() })?;
@@ -1376,7 +1376,7 @@ impl QuoteExecute {
                     let amt = aprice-price;
                     let per = amt/price;
                     let pretty = make_pretty_quote(
-                        &deref_ticker(ticker),
+                        ticker,
                         &Ticker{
                             price:aprice, amount:amt, percent:per,
                             title:"Self Stonk".into(), hours:'r', exchange:"™BOT".to_string() })?;
