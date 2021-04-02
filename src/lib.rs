@@ -533,6 +533,36 @@ async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
 
+async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
+    let caps = 
+        match Regex::new(r"^/echo ?([0-9]+)?")?.captures(&cmd.msg) {
+            None => return Ok("SKIP".into()),
+            Some(caps) => caps
+        };
+    let echo =
+        if caps.get(1).is_none() { // "/echo" just report current verbosity
+            let rows = get_sql(&format!("SELECT echo FROM modes WHERE id={}", cmd.at))?;
+            if rows.len() == 0 { // Create/set echo level for this channel
+                get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, 2))?;
+                2_i64
+            } else {
+                rows[0].get("echo").unwrap().parse::<i64>().unwrap()
+            }
+        } else { // "/echo n" set and report current verbosity
+            let echo = caps[1].parse::<i64>().unwrap();
+            if 2 < echo {
+                let msg = "*echo level must be 0…2*";
+                send_msg_markdown_id(cmd.into(), &msg).await?;
+                Err(msg)?
+            }
+            get_sql(&format!("UPDATE modes set echo={} WHERE id={}", echo, cmd.at))?;
+            echo
+        };
+
+    send_msg_markdown(cmd.level(0), &format!("`echo {}  verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
+    Ok("COMPLETED.")
+}
+
 pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() { return Ok("SKIP") }
     let delay = cmd.env.quote_delay_minutes;
@@ -1449,22 +1479,6 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
-    let state = 
-        match Regex::new(r"^/echo ([0-9]+)$")?.captures(&cmd.msg) {
-            None => return Ok("SKIP".into()),
-            Some(caps) => caps[1].parse::<u64>().unwrap()
-        };
-    if 2 < state {
-        let msg = "echo level must be 0..2";
-        send_msg_id(cmd.into(), &msg).await?;
-        Err(msg)?
-    }
-    get_sql(&format!("UPDATE modes SET echo={} WHERE id={}", state, cmd.at))?;
-    send_msg(cmd.level(0), &format!("echo level here is now {}", state)).await?;
-    Ok("COMPLETED.")
-}
-
 /*
 async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
     let caps =
@@ -1487,6 +1501,7 @@ async fn do_all(env:&Env, body: &web::Bytes) -> Bresult<()> {
     let cmd = Cmd::parse_cmd(env, body)?;
     info!("\x1b[33m{:?}", &cmd);
 
+    glogd!("do_echo =>",      do_echo(&cmd).await);
     glogd!("do_help =>",      do_help(&cmd).await);
     glogd!("do_like =>",      do_like(&cmd).await);
     glogd!("do_like_info =>", do_like_info(&cmd).await);
@@ -1500,7 +1515,6 @@ async fn do_all(env:&Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_trade_sell =>",do_trade_sell(&cmd).await);
     glogd!("do_exchange_bidask =>", do_exchange_bidask(&cmd).await);
     glogd!("do_orders =>", do_orders(&cmd).await);
-    glogd!("do_echo =>", do_echo(&cmd).await);
     Ok(())
 }
 
@@ -1527,7 +1541,7 @@ fn do_schema() -> Bresult<()> {
         let name = v.next().ok_or("User DB malformed.")?.to_string();
         sql.execute( format!("INSERT INTO entitys VALUES ( {}, '{}' )", id, name)).map_or_else(gwarn, ginfo);
         if id.parse::<i64>().unwrap() < 0 {
-            sql.execute( format!("INSERT INTO modes VALUES ({}, 1)", id) ).map_or_else(gwarn, ginfo);
+            sql.execute( format!("INSERT INTO modes VALUES ({}, 2)", id) ).map_or_else(gwarn, ginfo);
         }
     }
 
