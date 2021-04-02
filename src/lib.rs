@@ -1,17 +1,9 @@
 //! # External Chat Service Robot
-
-mod util;
-mod comm;
-mod srvs;
-mod db;
-
-pub use crate::util::*;
-use crate::comm::*;
-use crate::srvs::*;
-use crate::db::*;
-
-use ::std::{
-    env,
+mod util;  pub use crate::util::*;
+mod comm;  use crate::comm::*;
+mod srvs;  use crate::srvs::*;
+mod db;    use crate::db::*;
+use ::std::{env,
     mem::transmute,
     time::{Duration},
     collections::{HashMap, HashSet},
@@ -20,12 +12,10 @@ use ::std::{
     sync::{Mutex} };
 use ::log::*;
 use ::regex::{Regex};
-use ::datetime::{
-    Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, ISO,
-    Weekday::{Sunday, Friday, Saturday} }; // ISO
+use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece, ISO,
+    Weekday::{Sunday, Friday, Saturday} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
-use ::actix_web::{
-    web, App, HttpRequest, HttpServer, HttpResponse, Route,
+use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
     client::{Client, Connector} };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -143,17 +133,27 @@ fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
             .filter_map(|(i, capname)| { // Over capture group names (or indices)
                 capname.map_or(
                     captures
-                        .get(i) // Get match via index
-                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())), // Match is None or a string
+                        .get(i) // Get match via index.  This could be null which is filter by filter_map
+                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())),
                     |capname| {
                         captures
-                            .name(capname) // Get match via capture name
-                            .map(|capmatch| (capname.into(), capmatch.as_str().into())) // Match is None or a string
+                            .name(capname) // Get match via capture name.  Could be null which is filter by filter_map
+                            .map(|capmatch| (capname.into(), capmatch.as_str().into()))
                     },
                 )
             })
             .collect()
     })
+}
+
+fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Regex::new(re)?.captures(msg) //Option<Captures>
+    .map_or(Ok(Vec::new()),
+        |captures| // Return None or Option<Vec>
+        Ok(captures.iter() // Iterator over Option<Match>
+            .map( |o_match| // Return None or Some<String>
+                    o_match.map( |mtch| mtch.as_str().into() ) )
+            .collect()))
 }
 
 fn is_self_stonk (s:&str) -> bool {
@@ -532,15 +532,27 @@ async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<
 ////////////////////////////////////////////////////////////////////////////////
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
+trait AsI64 {
+    fn as_i64 (&self, i:usize) -> Option<i64>;
+}
+
+impl AsI64 for Vec<Option<String>> {
+    fn as_i64 (&self, i:usize) -> Option<i64> {
+        self[i].as_ref().map_or(None, |s| s.parse::<i64>().ok() )
+    }
+}
 
 async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
-    let caps = 
-        match Regex::new(r"^/echo ?([0-9]+)?")?.captures(&cmd.msg) {
-            None => return Ok("SKIP".into()),
-            Some(caps) => caps
+    let caps = regex_to_vec("^/echo ?([0-9]+)?", &cmd.msg)?;
+    let oecho =
+        if caps.is_empty() {
+            return Ok("SKIP")
+        } else {
+            caps.as_i64(1)
         };
-    let echo =
-        if caps.get(1).is_none() { // "/echo" just report current verbosity
+
+    let echo = match oecho {
+        None => {
             let rows = get_sql(&format!("SELECT echo FROM modes WHERE id={}", cmd.at))?;
             if rows.len() == 0 { // Create/set echo level for this channel
                 get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, 2))?;
@@ -548,8 +560,8 @@ async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
             } else {
                 rows[0].get("echo").unwrap().parse::<i64>().unwrap()
             }
-        } else { // "/echo n" set and report current verbosity
-            let echo = caps[1].parse::<i64>().unwrap();
+        }
+        Some(echo) => {  // "/echo n" set and report current verbosity
             if 2 < echo {
                 let msg = "*echo level must be 0…2*";
                 send_msg_markdown_id(cmd.into(), &msg).await?;
@@ -557,7 +569,8 @@ async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
             }
             get_sql(&format!("UPDATE modes set echo={} WHERE id={}", echo, cmd.at))?;
             echo
-        };
+        }
+    };
 
     send_msg_markdown(cmd.level(0), &format!("`echo {}  verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
     Ok("COMPLETED.")
@@ -760,16 +773,21 @@ async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
-    let mut msg = String::new();
+    let working_message = "working...".to_string();
+    let message_id = send_msg(cmd.level(1), &working_message).await?;
 
+    let mut msg = String::new();
     for ticker in &tickers {
         // Catch error and continue looking up tickers
         match get_quote_pretty(cmd, ticker).await {
-            Ok(res) => msg.push_str( &(res + "\n")),
+            Ok(res) => {
+                msg.push_str( &(res + "\n"));
+                if !msg.is_empty() { send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?; }
+            },
             e => { glogd!("get_quote_pretty => ", e); }
         }
     }
-    if !msg.is_empty() { send_msg_markdown(cmd.level(1), &msg).await?; }
+    if msg.is_empty() { send_edit_msg_markdown(cmd.level(1), message_id, "no results").await?; }
     Ok("COMPLETED.")
 }
 
@@ -1665,6 +1683,9 @@ fn fun () {
 TODO:
   @usernick-1  sell 1 market order (best ask price) will update stonk price
   @usernick+1  buy 1 market order (best ask price) will update stonk price
+
+REGEX
+    ?P<capturegroupname>
 
 SQL
   DROP   TABLE users

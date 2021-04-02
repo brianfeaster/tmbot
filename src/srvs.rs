@@ -122,31 +122,27 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     };
 
     let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
-
-    if details.is_null() {
-         Err("Unable to find quote data in json key 'QuoteSummaryStore'")?
-    }
-
+    if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
     info!("{}", details);
 
-    let title = getin_str(&details, &["longName"])?.trim_end_matches(|e|e=='.').to_string();
+    let title =
+        getin_str(&details, &["longName"])
+        .or_else(|_e|getin_str(&details, &["shortName"]))?
+        .trim_end_matches(|e|e=='.')
+        .to_string();
     let exchange = getin_str(&details, &["exchange"])?;
-
     let mut details = [
-        (getin_str(&details, &["preMarketPrice", "fmt"]).unwrap_or("?".into()),
-         getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0),
+        (getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["preMarketTime"]).unwrap_or(0),
          'p'),
-        (getin_str(&details, &["regularMarketPrice", "fmt"]).unwrap_or("?".into()),
-         getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0),
+        (getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["regularMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["regularMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["regularMarketTime"]).unwrap_or(0),
          'r'),
-        (getin_str(&details, &["postMarketPrice", "fmt"]).unwrap_or("?".into()),
-         getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0),
+        (getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["postMarketChange", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["postMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["postMarketTime"]).unwrap_or(0),
@@ -157,18 +153,18 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
         send_msg_id(cmd.to(308188500_i64),
             &format!("{} \"{}\" ({})\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%",
                 ticker, title, exchange,
-                LocalDateTime::from_instant(Instant::at(details[0].4)).iso(), details[0].1, details[0].2, details[0].3,
-                LocalDateTime::from_instant(Instant::at(details[1].4)).iso(), details[1].1, details[1].2, details[1].3,
-                LocalDateTime::from_instant(Instant::at(details[2].4)).iso(), details[2].1, details[2].2, details[2].3)
+                LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
+                LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
+                LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2)
         ).await);
 
-    details.sort_by( |a,b| b.4.cmp(&a.4) ); // Find latest quote details
+    details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
     Ok(Ticker{
-        price       :details[0].1,
-        amount      :roundqty(details[0].2), // Round for cases: -0.00999999 -1.3400116
-        percent     :details[0].3,
+        price       :details[0].0,
+        amount      :roundqty(details[0].1), // Round for cases: -0.00999999 -1.3400116
+        percent     :details[0].2,
         title       :title,
-        hours       :details[0].5,
+        hours       :details[0].4,
         exchange    :exchange})
 } // get_ticker_quote
