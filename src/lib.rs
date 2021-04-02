@@ -34,18 +34,6 @@ const QUOTE_DELAY_MINUTES :i64 = 2;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-
-trait Fun {
-    fn fun (&self) -> &Self;
-}
-
-impl<T : std::fmt::Debug> Fun for T {
-    fn fun (&self) -> &Self {
-        println!("Here is your hashy {:?}", self);
-        self
-    }
-}
-
 // Return time (seconds midnight UTC) for the next trading day
 fn next_trading_day (day :LocalDate) -> i64 {
     let skip_days =
@@ -66,7 +54,7 @@ fn next_trading_day (day :LocalDate) -> i64 {
 ///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
-fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
+fn update_ticker_p (env :&Env, time :i64, now :i64) -> bool {
 
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
     // 0100Z the next morning, subtract a number of seconds so that the
@@ -81,15 +69,15 @@ fn update_ticker_p (db :&DB, time :i64, now :i64) -> bool {
             _ => true
         };
 
-    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9-db.dst_hours_adjust, 00, 0).unwrap()).to_instant().seconds();
+    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9-env.dst_hours_adjust, 00, 0).unwrap()).to_instant().seconds();
     let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing for slow trades.
 
     return
         if is_market_day  &&  time < time_close {
-            time_open <= now  &&  (time+(db.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
+            time_open <= now  &&  (time+(env.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
         } else {
             let day = LocalDateTime::from_instant(Instant::at(time)).date();
-            update_ticker_p(db, next_trading_day(day)+90*60, now)
+            update_ticker_p(env, next_trading_day(day)+90*60, now)
         }
 }
 
@@ -197,10 +185,11 @@ fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
     ))
 }
 
-async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
+async fn get_stonk (cmd :&Cmd, ticker :&str) -> Bresult<HashMap<String, String>> {
     // Expected symbols:  GME  308188500   Illegal: @shrewm
     if &ticker[0..1] == "@" { Err("Illegal ticker")? }
 
+    let env = &cmd.env;
     let nowsecs :i64 = Instant::now().seconds();
     let is_self_stonk = is_self_stonk(ticker);
 
@@ -209,7 +198,7 @@ async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
         if !res.is_empty() { // Stonks table contains this ticker
             let hm = &res[0];
             let timesecs = hm.get("time").ok_or("table missing 'time'")?.parse::<i64>()?;
-            if !update_ticker_p(db, timesecs, nowsecs) || is_self_stonk {
+            if !update_ticker_p(env, timesecs, nowsecs) || is_self_stonk {
                 return Ok(hm.clone())
             }
             true
@@ -226,7 +215,7 @@ async fn get_stonk (db :&DB, ticker :&str) -> Bresult<HashMap<String, String>> {
             hours:'r',
             exchange:"™BOT".to_string() }
     } else {
-        get_ticker_quote(db, ticker).await?
+        get_ticker_quote(cmd, ticker).await?
     };
 
     let pretty = make_pretty_quote(ticker, &quote)?;
@@ -270,56 +259,107 @@ pub fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Blobs
+/*
+trait Copy { fn copy (&self) -> Self; }
+impl Copy for String {
+    fn copy (&self) -> Self { self.to_string() }
+}
+*/
 
 #[derive(Clone, Debug)]
-pub struct DB {
+pub struct Env {
     url_api: String,
     chat_id_default: i64,
     quote_delay_minutes: i64,
     dst_hours_adjust: i8,
 }
 
-type MDB = Mutex<DB>;
+impl Env {
+    fn copy (&self) -> Self {
+        Self{
+            url_api: self.url_api.to_string(),
+            chat_id_default: self.chat_id_default,
+            quote_delay_minutes: self.quote_delay_minutes,
+            dst_hours_adjust: self.dst_hours_adjust
+        }
+    }
+}
+
+type MEnv = Mutex<Env>;
 
 ////////////////////////////////////////
 
 #[derive(Debug)]
 pub struct Cmd {
-    id: i64,
-    at: i64,
-    to: i64,
+    env: Env,
+    id: i64, // Entity that send the message message.from.id
+    at: i64, // Group (or entity/DM) that the message was sent in message.chat.id
+    to: i64, // To whom the message is addressed (contains a message.reply_to_message.from.id) defaults to id
+    id_level: i64,
+    at_level: i64,
+    to_level: i64,
     msg: String
+}
+impl Cmd {
+    fn copy (&self) -> Self {
+        Self{
+            env: self.env.copy(),
+            id:  self.id,
+            at:  self.at,
+            to:  self.to,
+            id_level:  self.id_level,
+            at_level:  self.at_level,
+            to_level:  self.to_level,
+            msg: self.msg.to_string()
+        }
+    }
+    fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
+    fn to (&self, to:i64) -> MsgCmd { MsgCmd::from(self).to(to) }
 }
 
 impl Cmd {
     /// Creates a Cmd object from the useful details of a Telegram message.
-    fn parse_cmd(body: &web::Bytes) -> Bresult<Self> {
+    fn parse_cmd(env :&Env, body: &web::Bytes) -> Bresult<Self> {
 
+        // Create hash map id -> echoLevel
+        let getsqlres = get_sql(&format!("SELECT id, echo FROM entitys NATURAL JOIN modes"))?;
+        let echo_levels =
+            getsqlres
+            .iter()
+            .map( |hm| // tuple -> hashmap
+                 ( hm.get("id").unwrap().parse::<i64>().unwrap(),
+                   hm.get("echo").unwrap().parse::<i64>().unwrap() ) )
+            .collect::<HashMap<i64,i64>>();
+
+        error!("body = {:?}", &body);
         let json: Value = bytes2json(&body)?;
-
         let inline_query = &json["inline_query"];
-        if inline_query.is_object() {
-            let id = getin_i64(inline_query, &["from", "id"])?;
-            let msg = getin_str(inline_query, &["query"])?.to_string();
-            return Ok(Cmd { id, at:id, to:id, msg }); // Inline query message
-        }
-
         let message = &json["message"];
-        if message.is_object() {
-            let id = getin_i64(message, &["from", "id"])?;
-            let at = getin_i64(message, &["chat", "id"])?;
-            let msg = getin_str(message, &["text"])?.to_string();
 
-            return Ok(
+        let (id, at, to, msg) =
+            if inline_query.is_object() {
+                let id = getin_i64(inline_query, &["from", "id"])?;
+                let msg = getin_str(inline_query, &["query"])?.to_string();
+                (id, id, id, msg) // Inline queries are strictly DMs (no associated "at" groups nor reply "to" messages)
+            } else if message.is_object() {
+                let id = getin_i64(message, &["from", "id"])?;
+                let at = getin_i64(message, &["chat", "id"])?;
+                let msg = getin_str(message, &["text"])?.to_string();
                 if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
-                    Self { id, at, to, msg } // Reply message
+                    (id, at, to, msg) // Reply to message
                 } else {
-                    Self { id, at, to:id, msg } // Normal message
+                    (id, at, id, msg) // TODO: should "to" be the "at" group and not the "id" sender?  Check existing logic first.
                 }
-            );
-        }
+            } else { Err("Nothing to do.")? };
 
-        Err("Nothing to do.")?
+        Ok(Self {
+            env:env.copy(),
+            id, at, to,
+            id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
+            at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
+            to_level: echo_levels.get(&to).map(|v|*v).unwrap_or(2_i64),
+            msg
+        })
     }
 }
 
@@ -424,7 +464,7 @@ fn deref_ticker (t :&str) -> String {
     .unwrap_or(t.to_string())
 }
 
-async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
+async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 // Expects:  GME 308188500 @shrewm.   Includes local level 2 quotes as well.  Used by do_quotes only
     let ticker = ref_ticker(ticker).unwrap_or(ticker.to_string());
     let isselfstonk = is_self_stonk(&ticker);
@@ -449,7 +489,7 @@ async fn get_quote_pretty (db :&DB, ticker :&str) -> Bresult<String> {
             "".to_string()
         };
 
-    let stonk = get_stonk(db, &ticker).await?;
+    let stonk = get_stonk(cmd, &ticker).await?;
     let updated_indicator = if stonk.contains_key("updated") { "·" } else { "" };
 
     Ok( format!("{}{}{}",
@@ -479,12 +519,12 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         qty, roundcents(cost)))
 }
 
-async fn position_to_pretty (pos:&HashMap<String, String>, db:&DB) -> Bresult<(String, f64)> {
+async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64)> {
     let ticker = pos.get("ticker").unwrap();
     let pretty_ticker = deref_ticker(ticker);
     let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
     let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
-    let price = get_stonk(db, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    let price = get_stonk(cmd, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
     Ok( ( format_position(&pretty_ticker, qty, cost, price)?, qty*price ) ) // Return tuple
 }
 
@@ -493,41 +533,39 @@ async fn position_to_pretty (pos:&HashMap<String, String>, db:&DB) -> Bresult<(S
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
 
-pub async fn do_help (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
-
-    if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() {
-        return Ok("SKIP")
-    }
-
-    send_msg_markdown(db, cmd.id, &format!(
-"`/yolo  ` `Stonks leaderboard`
+pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
+    if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() { return Ok("SKIP") }
+    let delay = cmd.env.quote_delay_minutes;
+    send_msg_markdown(cmd.into(), &format!(
+"`          ™Bot Commands          `
+`/echo 2` `Echo level (verbose 2…0 quiet)`
+`word:  ` `Definition lookup`
+`word;  ` `Related lookup`
+`+?     ` `Likes leaderboard`
+`/yolo  ` `Stonks leaderboard`
 `/stonks` `Your Stonkfolio`
 `gme$   ` `Quote ({}min delay)`
-`gme+   ` `Buy all`
-`gme-   ` `Sell all`
+`gme+   ` `Buy GME max cash`
+`gme-   ` `Sell off GME position`
 `gme+2  ` `Buy 2 shares (min qty 0.0001)`
 `gme-2  ` `Sell 2 shares`
-`gme+$2 ` `Buy $2 worth (min amt $0.01`
+`gme+$2 ` `Buy $2 worth (min amt $0.01)`
 `gme-$2 ` `Sell $2 worth`
-`word:  ` `Definition`
-`word;  ` `Synonyms`
-`+?     ` `Likes leaderboard`
 `@usr+1@3` `Bid/buy  2 shares of '@usr' at $3`
 `@usr-5@2` `Ask/sell 5 shares of '@usr' at $2`
-`/orders ` `Your open bid/ask orders`", db.quote_delay_minutes)).await?;
+`/orders ` `Your @shares and bid/ask orders`", delay)).await?;
     Ok("COMPLETED.")
 }
 
-async fn _do_curse (db :&DB, cmd:&Cmd) -> Bresult<&'static str> {
-
+async fn _do_curse (cmd:&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"/curse").unwrap().captures(&cmd.msg).is_none() { return Ok("SKIP") }
-    send_msg_markdown(db, cmd.at, 
+    send_msg_markdown(cmd.into(), 
         ["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7]
     ).await?;
     Ok("COMPLETED.")
 }
 
-async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
+async fn do_like (cmd:&Cmd) -> Bresult<String> {
 
     let amt =
         match Regex::new(r"^([+-])1")?.captures(&cmd.msg) {
@@ -567,12 +605,12 @@ async fn do_like (db :&DB, cmd:&Cmd) -> Bresult<String> {
     let fromname = people.get(&cmd.id).unwrap_or(&sfrom);
     let toname   = people.get(&cmd.to).unwrap_or(&sto);
     let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    send_msg(db, cmd.id, &text).await?;
+    send_msg(cmd.into(), &text).await?;
 
     Ok("COMPLETED.".into())
 }
 
-async fn do_like_info (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_like_info (cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.msg != "+?" { return Ok("SKIP"); }
 
@@ -597,12 +635,12 @@ async fn do_like_info (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     for (likes,nom) in likes {
         text.push_str(&format!("{}{} ", nom, num2heart(likes)));
     }
-    //info!("HEARTS -> msg tmbot {:?}", send_msg(db, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    send_msg(db, cmd.at, &text).await?;
-    Ok("Ok do_like_info")
+    //info!("HEARTS -> msg tmbot {:?}", send_msg(env, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
+    send_msg(cmd.level(1), &text).await?;
+    Ok("COMPLETED.")
 }
 
-async fn do_syn (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_syn (cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -613,19 +651,18 @@ async fn do_syn (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let mut defs = get_syns(word).await?;
 
     if 0 == defs.len() {
-        send_msg_markdown(db, cmd.id, &format!("*{}* synonyms is empty", word)).await?;
+        send_msg_markdown(cmd.into(), &format!("*{}* synonyms is empty", word)).await?;
         return Ok("do_syn empty synonyms");
     }
 
     let mut msg = String::new() + "*\"" + word + "\"* ";
     defs.truncate(10);
     msg.push_str( &defs.join(", ") );
-    send_msg_markdown(db, cmd.at, &msg).await?;
-
-    Ok("Ok do_syn")
+    send_msg_markdown(cmd.level(1), &msg).await?;
+    Ok("COMPLETED.")
 }
 
-async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -634,8 +671,8 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let defs = get_definition(word).await?;
 
     if defs.is_empty() {
-        send_msg_markdown(db, cmd.id, &format!("*{}* def is empty", word)).await?;
-        return Ok("do_def def is empty");
+        send_msg_markdown_id(cmd.into(), &format!("*{}* def is empty", word)).await?;
+        return Ok("def is empty");
     }
 
     let mut msg = String::new() + "*" + word;
@@ -649,59 +686,64 @@ async fn do_def (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
             msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replacen("`", "\\`", 10000)));
         }
     }
-
-    send_msg_markdown(db, cmd.at, &msg).await?;
-
-    Ok("Ok do_def")
+    send_msg_markdown(cmd.level(1), &msg).await?;
+    Ok("COMPLETED.")
 }
 
-async fn do_sql (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.id != 308188500 { return Ok("do_sql invalid user"); }
 
-    let cap = Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("SKIP"); }
-    let expr = &cap.unwrap()[1];
+    let expr =
+        match Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg) {
+            None => return Ok("SKIP"),
+            Some(caps) => caps[1].to_string()
+        };
 
-    let result = get_sql(expr);
-    if let Err(e) = result {
-        send_msg_markdown(db, cmd.id, &format!("{:?}", e)).await?;
-        return Err(e);
-    }
-    let results = result.unwrap();
+    let results =
+        match get_sql(&expr) {
+            Err(e)  => {
+                send_msg(cmd.into(), &format!("{:?}", e)).await?;
+                return Err(e)
+            }
+            Ok(r) => r
+        };
 
-    if results.is_empty() {
-        send_msg(db, cmd.id, &format!("\"{}\" results is empty", expr)).await?;
-        return Ok("do_sql def is empty");
-    }
+    // SQL rows to single string.
+    let msg =
+        results.iter().fold(
+            String::new(),
+            |mut b, vv| {
+                vv.iter().for_each( |(key,val)| {b+=&format!(" {}:{}", key, val);} );
+                b+="\n";
+                b
+            } );
 
-    for res in results {
-        let mut buff = String::new();
-        res.iter().for_each( |(k,v)| buff.push_str(&format!("{}:{} ", k, v)) );
-        let res = format!("{}\n", buff);
-        send_msg(db, cmd.id, &res).await?;
-    }
+    if msg.is_empty() { send_msg(cmd.into(), "empty results").await?; }
+    else { send_msg(cmd.into(), &msg).await?; }
 
     Ok("Ok do_sql")
 }
 
-async fn do_quotes (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
 
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
+    let mut msg = String::new();
+
     for ticker in &tickers {
         // Catch error and continue looking up tickers
-        match get_quote_pretty(db, ticker).await {
-            Ok(res) => { send_msg_markdown(db, cmd.at, &res).await?; }
+        match get_quote_pretty(cmd, ticker).await {
+            Ok(res) => msg.push_str( &(res + "\n")),
             e => { glogd!("get_quote_pretty => ", e); }
         }
     }
-
+    if !msg.is_empty() { send_msg_markdown(cmd.level(1), &msg).await?; }
     Ok("COMPLETED.")
 }
 
-async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_portfolio (cmd :&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let mut total = 0.0;
@@ -710,7 +752,7 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
     for pos in positions {
         info!("{} position {:?}", cmd.id, pos);
-        let (pretty, value) = position_to_pretty(&pos, db).await?;
+        let (pretty, value) = position_to_pretty(&pos, cmd).await?;
         msg.push_str(&pretty);
         total += value;
     }
@@ -718,17 +760,17 @@ async fn do_portfolio (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     let cash = get_bank_balance(cmd.id)?;
     msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
 
-    send_msg_markdown(db, cmd.id, &msg).await?;
+    send_msg_markdown(cmd.into(), &msg).await?;
     Ok("COMPLETED.")
 }
 
-async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
 
     // Handle: !yolo ?yolo yolo! yolo?
     if Regex::new(r"YOLO[!?]|[!?/]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let working_message = "working...".to_string();
-    let message_id = send_msg(db, cmd.id, &working_message).await?;
+    let message_id = send_msg(cmd.level(1), &working_message).await?;
 
     // Update all user-positioned tickers
     for row in get_sql("\
@@ -749,8 +791,8 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         let ticker = row.get("ticker").unwrap();
         //working_message.push_str(ticker);
         //working_message.push_str("...");
-        //send_edit_msg(db, cmd.at, message_id, &working_message).await?;
-        info!("Stonk \x1b[33m{:?}", get_stonk(db, ticker).await?);
+        //send_edit_msg(cmd, message_id, &working_message).await?;
+        info!("Stonk \x1b[33m{:?}", get_stonk(cmd, ticker).await?);
     }
 
     /* Everyone's YOLO including non positioned YOLOers
@@ -797,9 +839,7 @@ async fn do_yolo (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
             row.get("yolo").unwrap().parse::<f64>()?,
             row.get("name").unwrap()) );
     }
-
-    send_edit_msg_markdown(db, cmd.id, message_id, &msg).await?;
-
+    send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -821,9 +861,9 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
 struct TradeBuy { qty:f64, price:f64, bank_balance: f64, trade: Trade }
 
 impl TradeBuy {
-    async fn new (trade:Trade, db:&DB) -> Bresult<Self> {
+    async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
         let price =
-            get_stonk(db, &trade.ticker).await?
+            get_stonk(cmd, &trade.ticker).await?
             .get("price").ok_or("price missing from stonk")?
             .parse::<f64>()?;
         let bank_balance = get_bank_balance(trade.id)?;
@@ -839,7 +879,7 @@ impl TradeBuy {
 struct TradeBuyCalc { qty:f64, new_balance:f64, new_qty:f64, new_cost:f64, positions:Vec<Position>, tradebuy:TradeBuy }
 
 impl TradeBuyCalc {
-    async fn compute_position (obj:TradeBuy, db:&DB) -> Bresult<Self> {
+    async fn compute_position (obj:TradeBuy, cmd:&Cmd) -> Bresult<Self> {
         let (qty, new_balance) =
             match
                 verify_qty(obj.qty, obj.price, obj.bank_balance)
@@ -849,7 +889,7 @@ impl TradeBuyCalc {
                 .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, obj.bank_balance) )
                 .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, obj.bank_balance) ) {
                 Err(e) => {  // Message user problem and log
-                    send_msg(db, obj.trade.id, &e).await?;
+                    send_msg_id(cmd.into(), &e).await?;
                     return Err(e.into())
                 },
                 Ok(r) => r
@@ -896,17 +936,17 @@ impl ExecuteBuy {
     }
 }
 
-async fn do_trade_buy (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_trade_buy (cmd :&Cmd) -> Bresult<&'static str> {
     let trade = Trade::new(cmd.id, &cmd.msg)?;
     if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
 
     let res =
-        TradeBuy::new(trade.unwrap(), db).await
-        .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy, db))?.await
+        TradeBuy::new(trade.unwrap(), cmd).await
+        .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy, cmd))?.await
         .map(ExecuteBuy::execute)?.await
         .map(|res| { info!("\x1b[1;31mResult {:#?}", &res); res })?;
 
-    send_msg_markdown(db, cmd.id, &res.msg).await?; // Report to user
+    send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -925,18 +965,18 @@ struct TradeSell {
 }
 
 impl TradeSell {
-    async fn new (trade:Trade, db:&DB) -> Bresult<Self> {
+    async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
         let id = trade.id;
         let ticker = &trade.ticker;
 
         let positions = Position::query(id, ticker)?;
         if 1 != positions.len() {
-            send_msg(db, id, "You lack a valid position.").await?;
+            send_msg_id(cmd.into(), "You lack a valid position.").await?;
              Err("expect 1 position in table")?
         }
         let pos_qty = positions[0].qty;
 
-        let price = get_stonk(db, ticker).await?.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
+        let price = get_stonk(cmd, ticker).await?.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
 
         let mut qty =
             roundqty(match trade.amt {
@@ -944,7 +984,7 @@ impl TradeSell {
                 None => pos_qty // no amount set, so set to entire qty
             });
         if qty <= 0.0 {
-            send_msg(db, id, "Quantity too low.").await?;
+            send_msg_id(cmd.into(), "Quantity too low.").await?;
             Err("sell qty too low")?
         }
 
@@ -963,7 +1003,7 @@ impl TradeSell {
         }
 
         if pos_qty < qty {
-            send_msg(db, id, "You can't sell more than you own.").await?;
+            send_msg_id(cmd.into(), "You can't sell more than you own.").await?;
             return Err("not enough shares to sell".into());
         }
 
@@ -1003,16 +1043,16 @@ impl ExecuteSell {
     }
 }
 
-async fn do_trade_sell (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_trade_sell (cmd :&Cmd) -> Bresult<&'static str> {
     let trade = Trade::new(cmd.id, &cmd.msg)?;
     if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
 
     let res =
-        TradeSell::new(trade.unwrap(), db).await
+        TradeSell::new(trade.unwrap(), cmd).await
         .map(ExecuteSell::execute)?.await?;
 
     info!("\x1b[1;31mResult {:#?}", res);
-    send_msg_markdown(db, cmd.id, &res.msg).await?; // Report to user
+    send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -1127,7 +1167,7 @@ struct QuoteExecute {
 }
 
 impl QuoteExecute {
-    async fn doit(mut obj :QuoteCancelMine, db:&DB) -> Bresult<Self> {
+    async fn doit(mut obj :QuoteCancelMine, cmd:&Cmd) -> Bresult<Self> {
         let id = obj.quote.id;
         let ticker = &obj.quote.ticker;
         let price = obj.quote.price;
@@ -1198,7 +1238,7 @@ impl QuoteExecute {
 
                     // Update stonk quote value
                     let price =
-                        get_stonk(db, ticker).await?
+                        get_stonk(cmd, ticker).await?
                         .get("price").ok_or("price missing from stonk")?
                         .parse::<f64>()?;
                     let amt = aprice-price;
@@ -1300,7 +1340,7 @@ impl QuoteExecute {
 
                     // Update stonk quote value
                     let price =
-                        get_stonk(db, ticker).await?
+                        get_stonk(cmd, ticker).await?
                         .get("price").ok_or("price missing from stonk")?
                         .parse::<f64>()?;
                     let amt = aprice-price;
@@ -1341,26 +1381,26 @@ impl QuoteExecute {
     }
 }
 
-async fn do_exchange_bidask (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_exchange_bidask (cmd :&Cmd) -> Bresult<&'static str> {
 
     let quote = Quote::scan(cmd.id, &cmd.msg)?;
     let quote = if quote.is_none() { return Ok("SKIP") } else { quote.unwrap() };
 
     let ret =
         QuoteCancelMine::doit(quote)
-        .map(|obj| QuoteExecute::doit(obj, db) )?.await?;
+        .map(|obj| QuoteExecute::doit(obj, cmd) )?.await?;
     info!("\x1b[1;31mResult {:#?}", ret);
     if 0!=ret.msg.len() {
-        send_msg_markdown(db, cmd.id,
+        send_msg_markdown(cmd.into(),
             &ret.msg
             .replacen("_", "\\_", 1000)
             .replacen(">", "\\>", 1000)
         ).await?;
-    } // Report to user
+    } // Report to group
     Ok("COMPLETED.")
 }
 
-async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"/ORDERS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
     let id = cmd.id;
     let mut bids = String::from("");
@@ -1382,7 +1422,7 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
     // Include all self-stonks positions (mine and others)
     for pos in get_sql(&format!("SELECT * FROM positions WHERE id={}", id))? {
         if is_self_stonk(pos.get("ticker").unwrap()) {
-            let (m, _value) = position_to_pretty(&pos, db).await?;
+            let (m, _value) = position_to_pretty(&pos, cmd).await?;
             msg += &m;
         }
     }
@@ -1405,27 +1445,62 @@ async fn do_orders (db :&DB, cmd :&Cmd) -> Bresult<&'static str> {
         }
     }
     info!("{:?}", &msg);
-    send_msg_markdown(db, cmd.id, &msg).await?;
+    send_msg_markdown(cmd.into(), &msg).await?;
     Ok("COMPLETED.")
 }
 
-async fn do_all(db: &DB, body: &web::Bytes) -> Bresult<()> {
-    let cmd = Cmd::parse_cmd(&body)?;
+async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
+    let state = 
+        match Regex::new(r"^/echo ([0-9]+)$")?.captures(&cmd.msg) {
+            None => return Ok("SKIP".into()),
+            Some(caps) => caps[1].parse::<u64>().unwrap()
+        };
+    if 2 < state {
+        let msg = "echo level must be 0..2";
+        send_msg_id(cmd.into(), &msg).await?;
+        Err(msg)?
+    }
+    get_sql(&format!("UPDATE modes SET echo={} WHERE id={}", state, cmd.at))?;
+    send_msg(cmd.level(0), &format!("echo level here is now {}", state)).await?;
+    Ok("COMPLETED.")
+}
+
+/*
+async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
+    let caps =
+        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmd.msg) {
+            None => return Ok("SKIP".into()),
+            Some(caps) => caps
+        };
+
+    let id2 = cmd.id;
+    let delay = caps[1].parse::<u64>().unwrap();
+    let msg = caps[2].to_string();
+    let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
+    let sendmsg = send_msg(env, id2, &msg);
+    println!("join = {:?}", ::futures::join!(delay, sendmsg));
+    Ok("do_repeat done?".into())
+}
+*/
+
+async fn do_all(env:&Env, body: &web::Bytes) -> Bresult<()> {
+    let cmd = Cmd::parse_cmd(env, body)?;
     info!("\x1b[33m{:?}", &cmd);
 
-    glogd!("do_help =>",      do_help(&db, &cmd).await);
-    glogd!("do_like =>",      do_like(&db, &cmd).await);
-    glogd!("do_like_info =>", do_like_info(&db, &cmd).await);
-    glogd!("do_syn =>",       do_syn(&db, &cmd).await);
-    glogd!("do_def =>",       do_def(&db, &cmd).await);
-    glogd!("do_sql =>",       do_sql(&db, &cmd).await);
-    glogd!("do_quotes => ",   do_quotes(&db, &cmd).await);
-    glogd!("do_portfolio =>", do_portfolio(&db, &cmd).await);
-    glogd!("do_yolo =>",      do_yolo(&db, &cmd).await);
-    glogd!("do_trade_buy =>", do_trade_buy(&db, &cmd).await);
-    glogd!("do_trade_sell =>",do_trade_sell(&db, &cmd).await);
-    glogd!("do_exchange_bidask =>", do_exchange_bidask(&db, &cmd).await);
-    glogd!("do_orders =>", do_orders(&db, &cmd).await);
+    glogd!("do_help =>",      do_help(&cmd).await);
+    glogd!("do_like =>",      do_like(&cmd).await);
+    glogd!("do_like_info =>", do_like_info(&cmd).await);
+    glogd!("do_syn =>",       do_syn(&cmd).await);
+    glogd!("do_def =>",       do_def(&cmd).await);
+    glogd!("do_sql =>",       do_sql(&cmd).await);
+    glogd!("do_quotes => ",   do_quotes(&cmd).await);
+    glogd!("do_portfolio =>", do_portfolio(&cmd).await);
+    glogd!("do_yolo =>",      do_yolo(&cmd).await);
+    glogd!("do_trade_buy =>", do_trade_buy(&cmd).await);
+    glogd!("do_trade_sell =>",do_trade_sell(&cmd).await);
+    glogd!("do_exchange_bidask =>", do_exchange_bidask(&cmd).await);
+    glogd!("do_orders =>", do_orders(&cmd).await);
+    glogd!("do_echo =>", do_echo(&cmd).await);
     Ok(())
 }
 
@@ -1441,19 +1516,26 @@ fn do_schema() -> Bresult<()> {
     ").map_or_else(gwarn, ginfo);
 
     sql.execute("
-        CREATE TABLE accounts (
-            id    INTEGER  NOT NULL UNIQUE,
-            balance FLOAT  NOT NULL);
+        CREATE TABLE modes (
+            id   INTEGER  NOT NULL,
+            echo INTEGER  NOT NULL);
     ").map_or_else(gwarn, ginfo);
 
     for l in read_to_string("tmbot/users.txt").unwrap().lines() {
         let mut v = l.split(" ");
         let id = v.next().ok_or("User DB malformed.")?;
         let name = v.next().ok_or("User DB malformed.")?.to_string();
-        sql.execute(
-            format!("INSERT INTO entitys VALUES ( {}, '{}' )", id, name)
-        ).map_or_else(gwarn, ginfo);
+        sql.execute( format!("INSERT INTO entitys VALUES ( {}, '{}' )", id, name)).map_or_else(gwarn, ginfo);
+        if id.parse::<i64>().unwrap() < 0 {
+            sql.execute( format!("INSERT INTO modes VALUES ({}, 1)", id) ).map_or_else(gwarn, ginfo);
+        }
     }
+
+    sql.execute("
+        CREATE TABLE accounts (
+            id    INTEGER  NOT NULL UNIQUE,
+            balance FLOAT  NOT NULL);
+    ").map_or_else(gwarn, ginfo);
 
     sql.execute("
         --DROP TABLE stonks;
@@ -1514,13 +1596,13 @@ fn log_header () {
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
 
-    let db = req.app_data::<web::Data<MDB>>().unwrap().lock().unwrap();
-    info!("\x1b[1m{:?}", &db);
+    let env = req.app_data::<web::Data<MEnv>>().unwrap().lock().unwrap();
+    info!("\x1b[1m{:?}", &env);
     info!("\x1b[35m{}", format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
     info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""));
     info!("\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
 
-    do_all(&db, &body)
+    do_all(&env, &body)
         .await
         .unwrap_or_else(|r| error!("{:?}", r));
 
@@ -1538,15 +1620,15 @@ pub async fn main() -> Bresult<()> {
     let chat_id_default  = env::args().nth(2).ok_or("bad index")?.parse::<i64>()?;
     let dst_hours_adjust = env::args().nth(3).ok_or("bad index")?.parse::<i8>()?;
 
-    if !true { do_schema()?; }
-    fun();
+    if !true { do_schema()? }
+    if !true { fun() }
 
     Ok(HttpServer::new(
         move ||
             App::new()
             .data(
                 Mutex::new(
-                    DB {
+                    Env {
                         url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
                         chat_id_default:     chat_id_default,
                         dst_hours_adjust:    dst_hours_adjust,
@@ -1559,10 +1641,10 @@ pub async fn main() -> Bresult<()> {
     .run().await?)
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 fn fun () {
-    let mut hm = HashMap::<String, String>::new();
-    hm.insert("hi".into(), "there".into());
-    hm.fun();
+    println!("{:?}", "PlayGround-101");
 }
 
 /*

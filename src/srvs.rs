@@ -94,7 +94,7 @@ pub struct Ticker {
     pub exchange: String
 }
 
-pub async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Ticker> {
+pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
@@ -154,7 +154,7 @@ pub async fn get_ticker_quote (db :&DB, ticker: &str) -> Bresult<Ticker> {
 
     // TODO: for now log all prices to me privately for debugging/verification
     glogd!("send_msg => \x1b[35m",
-        send_msg(db, 308188500_i64,
+        send_msg_id(cmd.to(308188500_i64),
             &format!("{} \"{}\" ({})\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%",
                 ticker, title, exchange,
                 LocalDateTime::from_instant(Instant::at(details[0].4)).iso(), details[0].1, details[0].2, details[0].3,
