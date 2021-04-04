@@ -87,10 +87,11 @@ pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
 #[derive(Debug)]
 pub struct Ticker {
     pub price: f64,
+    pub hours: i64,
     pub amount: f64,
     pub percent: f64,
     pub title: String,
-    pub hours: char,
+    pub market: char,
     pub exchange: String
 }
 
@@ -131,6 +132,10 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
         .trim_end_matches(|e|e=='.')
         .to_string();
     let exchange = getin_str(&details, &["exchange"])?;
+
+    let hours = getin(&details, &["volume24Hr"]);
+    let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
+
     let mut details = [
         (getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0),
          getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
@@ -149,10 +154,11 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
          'a')];
 
     // TODO: for now log all prices to me privately for debugging/verification
-    glogd!("send_msg => \x1b[35m",
-        send_msg_id(cmd.to(308188500_i64),
-            &format!("{} \"{}\" ({})\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%",
-                ticker, title, exchange,
+    glogd!("get_ticker_quote  send_msg_id => ", 
+        send_msg_id(
+            cmd.level(3), // An insignificant level that no one can legally set theirs at so msg sent to sysadmin.
+            &format!("{} \"{}\" ({}) {}hrs\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%\n{} {:.2} {:.2} {:.2}%",
+                ticker, title, exchange, hours,
                 LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
                 LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
                 LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2)
@@ -161,10 +167,11 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
     Ok(Ticker{
-        price       :details[0].0,
-        amount      :roundqty(details[0].1), // Round for cases: -0.00999999 -1.3400116
-        percent     :details[0].2,
-        title       :title,
-        hours       :details[0].4,
-        exchange    :exchange})
+        price:    details[0].0,
+        hours,
+        amount:   roundqty(details[0].1), // Round for cases: -0.00999999 -1.3400116
+        percent:  details[0].2,
+        title,
+        market:   details[0].4,
+        exchange})
 } // get_ticker_quote

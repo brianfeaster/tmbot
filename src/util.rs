@@ -5,11 +5,13 @@ use ::std::{
 pub use ::serde_json::{Value};
 use log::*;
 
-/// Types //////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+/// Types
 
 pub type Bresult<T> = Result<T, Box<dyn Error>>;
 
-/// Logging ////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+/// Logging
 
 pub fn ginfo<T:  std::fmt::Debug>(e: T) -> bool { info!("{:?}",  e); true }
 pub fn gwarn<T:  std::fmt::Debug>(e: T) -> bool { warn!("{:?}",  e); true }
@@ -42,12 +44,12 @@ macro_rules! glogd {
             Ok(r) => ::log::info!("{} {:?}", $pre, r),
             Err(r) => ::log::error!("{} {:?}", $pre, r)
         }
-        //r
     } )
 }
 
 
-/// UTF-8 //////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+/// UTF-8
 
 pub fn num2heart (n :i32) -> &'static str {
     if n < -4 { return from_utf8(b"\xCE\xBB").unwrap(); } // lambda
@@ -68,12 +70,14 @@ pub fn num2heart (n :i32) -> &'static str {
     return from_utf8(b"\xF0\x9F\x8D\x86").unwrap(); // egg plant
 }
 
-
-/// JSON ///////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+/// JSON
 
 pub fn bytes2json (body: &[u8]) -> Result<Value, Box<dyn Error>> {
     Ok( serde_json::from_str( from_utf8(&body)? )? )
 }
+
+////////////////////////////////////////
 
 pub fn getin<'t> (mut j :&'t Value, keys :&[&str]) -> &'t Value {
     for k in keys { j = &j[*k] }
@@ -85,11 +89,13 @@ pub fn getin_i64 (json :&Value, keys :&[&str]) -> Result<i64, String> {
     .as_i64()
     .ok_or( format!("Unable to parse {:?} as_i64", keys) )
 }
+
 pub fn getin_f64 (json :&Value, keys :&[&str]) -> Result<f64, String> {
     getin(json, keys)
     .as_f64()
     .ok_or( format!("Unable to parse {:?} as_f64", keys) )
 }
+
 pub fn getin_str <'t> (json :&'t Value, keys :&[&str]) -> Result<String, String> {
     getin(json, keys)
     .as_str()

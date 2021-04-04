@@ -23,6 +23,51 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
 const QUOTE_DELAY_MINUTES :i64 = 2;
 
 ////////////////////////////////////////////////////////////////////////////////
+/// Rust primitives enahancements
+
+trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
+impl AsI64 for Vec<Option<String>> {
+    fn as_i64 (&self, i:usize) -> Bresult<i64> {
+        Ok(self.get(i).ok_or("Can't index vector")?
+           .as_ref().ok_or("Can't parse i64 from None")?
+           .parse::<i64>()?)
+    }
+}
+
+trait AsStr { fn as_istr (&self, i:usize) -> Bresult<&str>; }
+impl AsStr for Vec<Option<String>> {
+    fn as_istr (&self, i:usize) -> Bresult<&str> {
+        Ok(self.get(i)
+            .ok_or("can't index vector")?.as_ref()
+            .ok_or("can't infer str from None")? )
+    }
+}
+
+trait GetI64 { fn get_i64 (&self, k:&str) -> Bresult<i64>; }
+impl GetI64 for HashMap<String, String> {
+    fn get_i64 (&self, k:&str) -> Bresult<i64> {
+        Ok(self
+            .get(k).ok_or(format!("Can't find key '{}'", k))?
+            .parse::<i64>()?)
+    }
+}
+
+/*
+// Trying to implement without using ? for the learns.
+impl AsStr for Vec<Option<String>> {
+    fn as_istr (&self, i:usize) -> Bresult<&str> {
+        self.get(i) // Option< Option<String> >
+        .ok_or("can't index vector".into()) // Result< Option<String>>, Bresult<> >
+        .map_or_else(
+            |e| e, // the previous error
+            |o| o.ok_or("can't infer str from None".into())
+                .map( |r| &r.to_string()) ) // Result< String, Bresult >
+    }
+}
+*/
+
+////////////////////////////////////////////////////////////////////////////////
+/// Abstracted primitive types helpers
 
 // Return time (seconds midnight UTC) for the next trading day
 fn next_trading_day (day :LocalDate) -> i64 {
@@ -44,7 +89,9 @@ fn next_trading_day (day :LocalDate) -> i64 {
 ///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
-fn update_ticker_p (env :&Env, time :i64, now :i64) -> bool {
+fn update_ticker_p (env:&Env, time:i64, now:i64, traded_all_day:bool) -> bool {
+
+    if traded_all_day { return time+(env.quote_delay_minutes*60) < now }
 
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
     // 0100Z the next morning, subtract a number of seconds so that the
@@ -67,7 +114,7 @@ fn update_ticker_p (env :&Env, time :i64, now :i64) -> bool {
             time_open <= now  &&  (time+(env.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
         } else {
             let day = LocalDateTime::from_instant(Instant::at(time)).date();
-            update_ticker_p(env, next_trading_day(day)+90*60, now)
+            update_ticker_p(env, next_trading_day(day)+90*60, now, false)
         }
 }
 
@@ -147,17 +194,42 @@ fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
 }
 
 fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re)?.captures(msg) //Option<Captures>
-    .map_or(Ok(Vec::new()),
-        |captures| // Return None or Option<Vec>
+    Regex::new(re)?.captures(msg) // An Option<Captures>
+    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
+        |captures|          // ...or return Ok Vec of Option<Vec>
         Ok(captures.iter() // Iterator over Option<Match>
-            .map( |o_match| // Return None or Some<String>
+            .map( |o_match| // None or Some<String>
                     o_match.map( |mtch| mtch.as_str().into() ) )
             .collect()))
 }
 
+// Transforms "@user nickname" to "USER ID"
+fn ref_ticker (s :&str) -> Option<String> {
+    // Expects:  @shrewm   Returns: Some(308188500)
+    if &s[0..1] == "@" {
+        // Ticker is whomever this nick matches
+        get_sql(&format!("SELECT id FROM entitys WHERE name='{}'", &s[1..]))
+            .ok()
+            .filter( |v| 1 == v.len() )
+            .map( |v| v[0].get("id").unwrap().to_string() )
+    } else { None }
+}
+
+// Transforms "USER ID" to "@usernickname"
+fn deref_ticker (t :&str) -> String {
+    if is_self_stonk(t) {
+        get_sql(&format!("SELECT name FROM entitys WHERE id={}", t))
+        .ok()
+        .filter( |v| 1 == v.len() )
+        .map( |v| "@".to_string() + v[0].get("name").unwrap() )
+        .unwrap_or(t.to_string())
+    } else {
+        t.to_string()
+    }
+}
+
 fn is_self_stonk (s:&str) -> bool {
-    Regex::new(r"^[0-9]+$").unwrap().captures(s).is_some()
+    Regex::new(r"^[0-9]+$").unwrap().find(s).is_some()
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -173,11 +245,12 @@ fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
         };
 
     let ticker_pretty = deref_ticker(ticker);
-    Ok(format!("{}{}@{}{} {}{} {}% {} {}",
+    Ok(format!("{}{}@{}{}{} {}{} {}% {} {}",
         gain_glyphs.0,
         ticker_pretty,
         money_pretty(quote.price),
-        match quote.hours { 'r'=>"", 'p'=>"p", 'a'=>"a", _=>"?"},
+        match quote.market { 'r'=>"", 'p'=>"p", 'a'=>"a", _=>"?"},
+        if quote.hours == 24 { "!" } else { "" },
         gain_glyphs.1,
         money_pretty(quote.amount.abs()),
         percent_squish(quote.percent.abs()),
@@ -187,44 +260,47 @@ fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
 }
 
 async fn get_stonk (cmd :&Cmd, ticker :&str) -> Bresult<HashMap<String, String>> {
-    // Expected symbols:  GME  308188500   Illegal: @shrewm
+
+    // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
     if &ticker[0..1] == "@" { Err("Illegal ticker")? }
 
-    let env = &cmd.env;
-    let nowsecs :i64 = Instant::now().seconds();
+    let now :i64 = Instant::now().seconds();
     let is_self_stonk = is_self_stonk(ticker);
 
-    let res = get_sql(&format!("SELECT * FROM stonks WHERE ticker='{}'", ticker))?;
+    let res = get_sql(&format!("SELECT ticker, price, hours, time, pretty FROM stonks WHERE ticker='{}'", ticker))?;
     let is_in_table =
-        if !res.is_empty() { // Stonks table contains this ticker
+        !res.is_empty() && { // Stonks table contains this ticker
             let hm = &res[0];
-            let timesecs = hm.get("time").ok_or("table missing 'time'")?.parse::<i64>()?;
-            if !update_ticker_p(env, timesecs, nowsecs) || is_self_stonk {
+            let timesecs = hm.get_i64("time")?;
+            let traded_all_day = 24 == hm.get_i64("hours")?;
+            if is_self_stonk || !update_ticker_p(&cmd.env, timesecs, now, traded_all_day) {
                 return Ok(hm.clone())
             }
             true
-        } else { false };
+        };
 
     // Either not in table or need to update table
 
     let quote = if is_self_stonk { // Need to create the self-stonk ticker in the stonks table
         Ticker {
             price:0.0,
+            hours:24,
             amount:0.0,
             percent:0.0,
             title:"Self Stonk".to_string(),
-            hours:'r',
+            market:'r',
             exchange:"™BOT".to_string() }
     } else {
         get_ticker_quote(cmd, ticker).await?
     };
 
     let pretty = make_pretty_quote(ticker, &quote)?;
+    let hours = quote.hours;
 
     let sql = if is_in_table {
-        format!("UPDATE stonks SET price={},time={},pretty='{}'WHERE ticker='{}'", quote.price, nowsecs, pretty, ticker)
+        format!("UPDATE stonks SET price={},hours={},time={},pretty='{}'WHERE ticker='{}'", quote.price, hours, now, pretty, ticker)
     } else {
-        format!("INSERT INTO stonks VALUES('{}',{},{},'{}')", ticker, quote.price, nowsecs, pretty)
+        format!("INSERT INTO stonks VALUES('{}',{},{},{},'{}')", ticker, quote.price, hours, now, pretty)
     };
     get_sql(&sql)?;
 
@@ -232,7 +308,7 @@ async fn get_stonk (cmd :&Cmd, ticker :&str) -> Bresult<HashMap<String, String>>
     hm.insert("updated".into(), "".into());
     hm.insert("ticker".into(), ticker.to_string());
     hm.insert("price".into(),  quote.price.to_string());
-    hm.insert("time".into(),   nowsecs.to_string());
+    hm.insert("time".into(),   now.to_string());
     hm.insert("pretty".into(), pretty);
     return Ok(hm);
 } // get_stonk
@@ -260,12 +336,6 @@ pub fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Blobs
-/*
-trait Copy { fn copy (&self) -> Self; }
-impl Copy for String {
-    fn copy (&self) -> Self { self.to_string() }
-}
-*/
 
 #[derive(Clone, Debug)]
 pub struct Env {
@@ -315,7 +385,7 @@ impl Cmd {
         }
     }
     fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
-    fn to (&self, to:i64) -> MsgCmd { MsgCmd::from(self).to(to) }
+    fn _to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
 }
 
 impl Cmd {
@@ -443,33 +513,11 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
     tickers
 }
 
-// Transforms "@user nickname" to "USER ID"
-fn ref_ticker (s :&str) -> Option<String> {
-    // Expects:  @shrewm   Returns: Some(308188500)
-    if &s[0..1] == "@" {
-        // Ticker is whomever this nick matches
-        get_sql(&format!("SELECT id FROM entitys WHERE name='{}'", &s[1..]))
-            .ok()
-            .filter( |v| 1 == v.len() )
-            .map( |v| v[0].get("id").unwrap().to_string() )
-    } else { None }
-}
-
-// Transforms "USER ID" to "@user nickname"
-fn deref_ticker (t :&str) -> String {
-    get_sql(&format!("SELECT name FROM entitys WHERE id={}", t))
-    .ok()
-    .filter( |v| 1 == v.len() )
-    .map( |v| "@".to_string() + v[0].get("name").unwrap() )
-    .unwrap_or(t.to_string())
-}
-
 async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 // Expects:  GME 308188500 @shrewm.   Includes local level 2 quotes as well.  Used by do_quotes only
     let ticker = ref_ticker(ticker).unwrap_or(ticker.to_string());
-    let isselfstonk = is_self_stonk(&ticker);
     let bidask =
-        if isselfstonk {
+        if is_self_stonk(&ticker) {
             let mut asks = "*Asks:*".to_string();
             for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
                 asks.push_str(&format!(" `{}@{}`",
@@ -532,52 +580,38 @@ async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<
 ////////////////////////////////////////////////////////////////////////////////
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
-trait AsI64 {
-    fn as_i64 (&self, i:usize) -> Option<i64>;
-}
 
-impl AsI64 for Vec<Option<String>> {
-    fn as_i64 (&self, i:usize) -> Option<i64> {
-        self[i].as_ref().map_or(None, |s| s.parse::<i64>().ok() )
-    }
-}
 
 async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
-    let caps = regex_to_vec("^/echo ?([0-9]+)?", &cmd.msg)?;
-    let oecho =
-        if caps.is_empty() {
-            return Ok("SKIP")
-        } else {
-            caps.as_i64(1)
-        };
-
-    let echo = match oecho {
-        None => {
-            let rows = get_sql(&format!("SELECT echo FROM modes WHERE id={}", cmd.at))?;
-            if rows.len() == 0 { // Create/set echo level for this channel
-                get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, 2))?;
-                2_i64
-            } else {
-                rows[0].get("echo").unwrap().parse::<i64>().unwrap()
-            }
-        }
-        Some(echo) => {  // "/echo n" set and report current verbosity
+    let caps :Vec<Option<String>> = regex_to_vec("^/echo ?([0-9]+)?", &cmd.msg)?;
+    if caps.is_empty() { return Ok("SKIP") }
+    match caps.as_i64(1) {
+        Ok(echo) => { // Update existing echo level
             if 2 < echo {
                 let msg = "*echo level must be 0…2*";
                 send_msg_markdown_id(cmd.into(), &msg).await?;
                 Err(msg)?
             }
             get_sql(&format!("UPDATE modes set echo={} WHERE id={}", echo, cmd.at))?;
-            echo
+            send_msg_markdown(cmd.level(0), &format!("`echo {} set verbosity {:.0}%`", echo, echo as f64/0.02)).await?;
         }
-    };
+        Err(_) => { // Create or return existing echo level
+            let rows = get_sql(&format!("SELECT echo FROM modes WHERE id={}", cmd.at))?;
+            let mut echo = 2;
+            if rows.len() == 0 { // Create/set echo level for this channel
+                get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, echo))?;
+            } else {
+                echo = rows[0].get("echo").unwrap().parse::<i64>().unwrap();
+            }
+            send_msg_markdown(cmd.level(0), &format!("`echo {} verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
+        }
+    }
 
-    send_msg_markdown(cmd.level(0), &format!("`echo {}  verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
     Ok("COMPLETED.")
 }
 
 pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/help").unwrap().captures(&cmd.msg).is_none() { return Ok("SKIP") }
+    if Regex::new(r"/help").unwrap().find(&cmd.msg).is_none() { return Ok("SKIP") }
     let delay = cmd.env.quote_delay_minutes;
     send_msg_markdown(cmd.into(), &format!(
 "`          ™Bot Commands          `
@@ -601,7 +635,7 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
 }
 
 async fn _do_curse (cmd:&Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/curse").unwrap().captures(&cmd.msg).is_none() { return Ok("SKIP") }
+    if Regex::new(r"/curse").unwrap().find(&cmd.msg).is_none() { return Ok("SKIP") }
     send_msg_markdown(cmd.into(), 
         ["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7]
     ).await?;
@@ -685,9 +719,8 @@ async fn do_like_info (cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_syn (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let cap = Regex::new(r"^([a-z]+);$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("SKIP"); }
-    let word = &cap.unwrap()[1];
+    let cap = regex_to_vec("^([a-z]+);$", &cmd.msg)?;
+    let word = if cap.is_empty() { return Ok("SKIP") } else { cap[1].as_ref().unwrap() };
 
     info!("looking up {:?}", word);
 
@@ -736,15 +769,11 @@ async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.id != 308188500 { return Ok("do_sql invalid user"); }
-
-    let expr =
-        match Regex::new(r"^(.*)ß$").unwrap().captures(&cmd.msg) {
-            None => return Ok("SKIP"),
-            Some(caps) => caps[1].to_string()
-        };
+    let rev = regex_to_vec("^(.*)ß$", &cmd.msg)?;
+    let expr = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
 
     let results =
-        match get_sql(&expr) {
+        match get_sql(expr) {
             Err(e)  => {
                 send_msg(cmd.into(), &format!("{:?}", e)).await?;
                 return Err(e)
@@ -773,17 +802,17 @@ async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
-    let working_message = "working...".to_string();
-    let message_id = send_msg(cmd.level(1), &working_message).await?;
+    let message_id = send_msg(cmd.level(1), "working...").await?;
 
     let mut msg = String::new();
     for ticker in &tickers {
         // Catch error and continue looking up tickers
         match get_quote_pretty(cmd, ticker).await {
             Ok(res) => {
-                msg.push_str( &(res + "\n"));
-                if !msg.is_empty() { send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?; }
-            },
+                msg.push_str(&res);
+                msg.push('\n');
+                send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?;
+            }
             e => { glogd!("get_quote_pretty => ", e); }
         }
     }
@@ -924,7 +953,7 @@ impl TradeBuy {
 }
 
 #[derive(Debug)]
-struct TradeBuyCalc { qty:f64, new_balance:f64, new_qty:f64, new_cost:f64, positions:Vec<Position>, tradebuy:TradeBuy }
+struct TradeBuyCalc { qty:f64, new_balance:f64, new_qty:f64, new_basis:f64, positions:Vec<Position>, tradebuy:TradeBuy }
 
 impl TradeBuyCalc {
     async fn compute_position (obj:TradeBuy, cmd:&Cmd) -> Bresult<Self> {
@@ -943,17 +972,17 @@ impl TradeBuyCalc {
                 Ok(r) => r
             };
         let positions = Position::query(obj.trade.id, &obj.trade.ticker)?;
-        let (new_qty, new_cost) = match positions.len() {
+        let (new_qty, new_basis) = match positions.len() {
             0 => (qty, obj.price),
             1 => {
                 let qty_old = positions[0].qty;
                 let price_old = positions[0].price;
-                let new_cost = (qty * obj.price + qty_old * price_old) / (qty + qty_old);
+                let new_basis = (qty * obj.price + qty_old * price_old) / (qty + qty_old);
                 let new_qty = roundqty(qty + qty_old);
-                (new_qty, new_cost) },
+                (new_qty, new_basis) },
             _ => return Err(format!("Ticker {} has {} positions, expect 0 or 1", &obj.trade.ticker, positions.len()).into())
         };
-        Ok(Self{qty, new_balance, new_qty, new_cost, positions, tradebuy:obj})
+        Ok(Self{qty, new_balance, new_qty, new_basis, positions, tradebuy:obj})
     }
 }
 
@@ -970,13 +999,13 @@ impl ExecuteBuy {
         let mut msg = format!("*Bought:*");
 
         if obj.positions.is_empty() {
-            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, obj.new_qty, obj.new_cost))?;
+            get_sql(&format!("INSERT INTO positions VALUES ({}, '{}', {}, {})", id, ticker, obj.new_qty, obj.new_basis))?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
-            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_cost);
-            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_cost, id, ticker))?;
+            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_basis);
+            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_basis, id, ticker))?;
         }
-        msg += &format_position(ticker, obj.new_qty, obj.new_cost, price)?;
+        msg += &format_position(ticker, obj.new_qty, obj.new_basis, price)?;
 
         get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
 
@@ -1294,8 +1323,8 @@ impl QuoteExecute {
                     let pretty = make_pretty_quote(
                         ticker,
                         &Ticker{
-                            price:aprice, amount:amt, percent:per,
-                            title:"Self Stonk".into(), hours:'r', exchange:"™BOT".to_string() })?;
+                            price:aprice, hours:24, amount:amt, percent:per,
+                            title:"Self Stonk".into(), market:'r', exchange:"™BOT".to_string() })?;
 
                     get_sql( &format!("UPDATE stonks SET price={}, pretty='{}' WHERE ticker={}", aprice, pretty, ticker) )?;
 
@@ -1396,8 +1425,8 @@ impl QuoteExecute {
                     let pretty = make_pretty_quote(
                         ticker,
                         &Ticker{
-                            price:aprice, amount:amt, percent:per,
-                            title:"Self Stonk".into(), hours:'r', exchange:"™BOT".to_string() })?;
+                            price:aprice, hours:24, amount:amt, percent:per,
+                            title:"Self Stonk".into(), market:'r', exchange:"™BOT".to_string() })?;
 
                     get_sql( &format!("UPDATE stonks SET price={}, pretty='{}' WHERE ticker={}", aprice, pretty, ticker) )?;
 
@@ -1572,10 +1601,11 @@ fn do_schema() -> Bresult<()> {
     sql.execute("
         --DROP TABLE stonks;
         CREATE TABLE stonks (
-            ticker  TEXT  NOT NULL UNIQUE,
-            price  FLOAT  NOT NULL,
-            time INTEGER  NOT NULL,
-            pretty  TEXT  NOT NULL);
+            ticker   TEXT  NOT NULL UNIQUE,
+            price   FLOAT  NOT NULL,
+            hours INTEGER  NOT NULL,
+            time  INTEGER  NOT NULL,
+            pretty   TEXT  NOT NULL);
     ").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO stonks VALUES ( 'TWNK', 14.97, 1613630678, '14.97')").map_or_else(gwarn, ginfo);
     //sql.execute("INSERT INTO stonks VALUES ( 'GOOG', 2128.31, 1613630678, '2,128.31')").map_or_else(gwarn, ginfo);
