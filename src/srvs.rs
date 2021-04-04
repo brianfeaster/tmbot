@@ -95,7 +95,7 @@ pub struct Ticker {
     pub exchange: String
 }
 
-pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
+pub async fn get_ticker_quote (_cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
@@ -153,7 +153,7 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
          getin_i64(&details, &["postMarketTime"]).unwrap_or(0),
          'a')];
 
-    // TODO: for now log all prices to me privately for debugging/verification
+    /* // Log all prices for sysadmin requires "use ::datetime::ISO"
     glogd!("get_ticker_quote  send_msg_id => ", 
         send_msg_id(
             cmd.level(3), // An insignificant level that no one can legally set theirs at so msg sent to sysadmin.
@@ -161,8 +161,7 @@ pub async fn get_ticker_quote (cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
                 ticker, title, exchange, hours,
                 LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
                 LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
-                LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2)
-        ).await);
+                LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2)).await); */
 
     details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
