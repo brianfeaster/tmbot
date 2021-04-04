@@ -944,7 +944,7 @@ impl TradeBuy {
         if Regex::new(r"PNK$").unwrap()
             .find(stonk.get("pretty").ok_or("No pretty column in table")?)
             .is_some() {
-                send_msg_id(cmd.into(), "OTC / PinkSheet Verboten Stonken").await?;
+                send_msg(cmd.into(), "OTC / PinkSheet Verboten Stonken").await?;
                 Err("OTC / PinkSheet Verboten Stonken")?
             }
         let price =
