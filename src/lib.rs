@@ -233,8 +233,9 @@ fn is_self_stonk (s:&str) -> bool {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+/// Umm
 
-
+// for get_stonk, do_exchange_bidask via quote_execute
 fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
     let gain_glyphs = if 0.0 < quote.amount {
             (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
@@ -371,6 +372,7 @@ pub struct Cmd {
     to_level: i64,
     msg: String
 }
+
 impl Cmd {
     fn copy (&self) -> Self {
         Self{
@@ -386,20 +388,16 @@ impl Cmd {
     }
     fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
     fn _to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
-}
-
-impl Cmd {
     /// Creates a Cmd object from the useful details of a Telegram message.
     fn parse_cmd(env :&Env, body: &web::Bytes) -> Bresult<Self> {
 
         // Create hash map id -> echoLevel
         let getsqlres = get_sql(&format!("SELECT id, echo FROM entitys NATURAL JOIN modes"))?;
         let echo_levels =
-            getsqlres
-            .iter()
+            getsqlres.iter()
             .map( |hm| // tuple -> hashmap
-                 ( hm.get("id").unwrap().parse::<i64>().unwrap(),
-                   hm.get("echo").unwrap().parse::<i64>().unwrap() ) )
+                 ( hm.get_i64("id").unwrap(),
+                   hm.get_i64("echo").unwrap() ) )
             .collect::<HashMap<i64,i64>>();
 
         let json: Value = bytes2json(&body)?;
@@ -445,8 +443,7 @@ struct Position {
 
 impl Position {
     fn query (id:i64, ticker:&str) -> Bresult<Vec<Position>> {
-        Ok(
-            get_sql(&format!("SELECT qty, price FROM positions WHERE id={} AND ticker='{}'", id, ticker))?
+        Ok(get_sql(&format!("SELECT qty, price FROM positions WHERE id={} AND ticker='{}'", id, ticker))?
             .iter()
             .map( |row|
                 Self {
@@ -454,7 +451,7 @@ impl Position {
                     ticker: ticker.into(),
                     qty: row.get("qty").unwrap().parse::<f64>().unwrap(),
                     price: row.get("price").unwrap().parse::<f64>().unwrap() } )
-            .collect::<Vec<_>>() )
+            .collect::<Vec<_>>())
     }
 }
 
@@ -490,7 +487,7 @@ impl Trade {
 /// Bot's Do Handler Helpers
 ////////////////////////////////////////////////////////////////////////////////
 
-// Return set of tickers that need attention
+// For do_quotes Return set of tickers that need attention
 pub fn extract_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
     let re = Regex::new(r"^[A-Za-z@._^]?[A-Za-z0-9^._=-]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
@@ -511,8 +508,9 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
         }
     }
     tickers
-}
+} // extract_tickers
 
+// for do_quotes
 async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 // Expects:  GME 308188500 @shrewm.   Includes local level 2 quotes as well.  Used by do_quotes only
     let ticker = ref_ticker(ticker).unwrap_or(ticker.to_string());
@@ -546,6 +544,7 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
             bidask) )
 } // get_quote_pretty
 
+// for do_trade_buy/sell via execute_buy/sell, position_to_pretty
 fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
     let basis = qty*cost;
     let value = qty*price;
@@ -560,13 +559,14 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>7.2}``{:>8} {:>4}% {}``{} @{:.2}` *{}*_@{:.2}_",
+    Ok(format!("\n`{:>7.2}``{:>7} {:>4}% {}``{} @{:.2}` *{}*_@{:.2}_",
         roundcents(value),
         gain, gain_percent, greenred,
         ticker, roundcents(price),
         qty, roundcents(cost)))
 }
 
+// for do_portfolio, do_orders
 async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64)> {
     let ticker = pos.get("ticker").unwrap();
     let pretty_ticker = deref_ticker(ticker);
@@ -939,8 +939,16 @@ struct TradeBuy { qty:f64, price:f64, bank_balance: f64, trade: Trade }
 
 impl TradeBuy {
     async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
+        let stonk = get_stonk(cmd, &trade.ticker).await?;
+
+        if Regex::new(r"PNK$").unwrap()
+            .find(stonk.get("pretty").ok_or("No pretty column in table")?)
+            .is_some() {
+                send_msg_id(cmd.into(), "OTC / PinkSheet Verboten Stonken").await?;
+                Err("OTC / PinkSheet Verboten Stonken")?
+            }
         let price =
-            get_stonk(cmd, &trade.ticker).await?
+            stonk
             .get("price").ok_or("price missing from stonk")?
             .parse::<f64>()?;
         let bank_balance = get_bank_balance(trade.id)?;
