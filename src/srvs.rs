@@ -126,30 +126,51 @@ pub async fn get_ticker_quote (_cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
     info!("{}", details);
 
-    let title =
-        getin_str(&details, &["longName"])
-        .or_else(|_e|getin_str(&details, &["shortName"]))?
-        .trim_end_matches(|e|e=='.')
-        .to_string();
+    let title_raw :&str =
+        &getin_str(&details, &["longName"])
+        .or_else(|_e|getin_str(&details, &["shortName"]))?;
+    let mut title = title_raw;
+    let title = loop { // Repeatedly strip title of useless things
+        let title_new = title
+            .trim_end_matches(".")
+            .trim_end_matches(" ")
+            .trim_end_matches(",")
+            .trim_end_matches("Inc")
+            .trim_end_matches("Corp")
+            .trim_end_matches("Corporation")
+            .trim_end_matches("Holdings")
+            .trim_end_matches("Brands")
+            .trim_end_matches("Company")
+            .trim_end_matches("USD");
+        if title == title_new { break title_new.to_string() }
+        title = title_new;
+    };
+    info!("title pretty {} => {}", title_raw, &title);
+
     let exchange = getin_str(&details, &["exchange"])?;
 
     let hours = getin(&details, &["volume24Hr"]);
     let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
 
+    let previous_close = getin_f64(&details, &["regularMarketPreviousClose", "raw"]).unwrap_or(0.0);
+    let pre_market_price = getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0);
+    let reg_market_price = getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0);
+    let pst_market_price = getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0);
+
     let mut details = [
-        (getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
+        (pre_market_price,
+         pre_market_price - previous_close, //getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
+         (pre_market_price - previous_close) / previous_close, // getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["preMarketTime"]).unwrap_or(0),
          'p'),
-        (getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["regularMarketChange", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["regularMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
+        (reg_market_price,
+         reg_market_price - previous_close, // getin_f64(&details, &["regularMarketChange", "raw"]).unwrap_or(0.0),
+         (reg_market_price - previous_close) / previous_close, // getin_f64(&details, &["regularMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["regularMarketTime"]).unwrap_or(0),
          'r'),
-        (getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["postMarketChange", "raw"]).unwrap_or(0.0),
-         getin_f64(&details, &["postMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
+        (pst_market_price,
+         pst_market_price - previous_close, // getin_f64(&details, &["postMarketChange", "raw"]).unwrap_or(0.0),
+         (pst_market_price - previous_close) / previous_close, //getin_f64(&details, &["postMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["postMarketTime"]).unwrap_or(0),
          'a')];
 
@@ -166,11 +187,11 @@ pub async fn get_ticker_quote (_cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
     details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
     Ok(Ticker{
-        price:    details[0].0,
+        price:   details[0].0,
         hours,
-        amount:   roundqty(details[0].1), // Round for cases: -0.00999999 -1.3400116
-        percent:  details[0].2,
+        amount:  roundqty(details[0].1), // Round for cases: -0.00999999 -1.3400116
+        percent: details[0].2,
         title,
-        market:   details[0].4,
+        market:  details[0].4,
         exchange})
 } // get_ticker_quote

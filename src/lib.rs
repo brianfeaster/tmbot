@@ -34,12 +34,31 @@ impl AsI64 for Vec<Option<String>> {
     }
 }
 
+trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
+impl AsF64 for Vec<Option<String>> {
+    fn as_f64 (&self, i:usize) -> Bresult<f64> {
+        Ok(self.get(i).ok_or("Can't index vector")?
+           .as_ref().ok_or("Can't parse f64 from None")?
+           .parse::<f64>()?)
+    }
+}
+
 trait AsStr { fn as_istr (&self, i:usize) -> Bresult<&str>; }
 impl AsStr for Vec<Option<String>> {
     fn as_istr (&self, i:usize) -> Bresult<&str> {
         Ok(self.get(i)
             .ok_or("can't index vector")?.as_ref()
             .ok_or("can't infer str from None")? )
+    }
+}
+
+trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
+impl AsString for Vec<Option<String>> {
+    fn as_string (&self, i:usize) -> Bresult<String> {
+        Ok(self.get(i)
+            .ok_or("can't index vector")?.as_ref()
+            .ok_or("can't infer str from None")?
+            .to_string() )
     }
 }
 
@@ -129,9 +148,19 @@ fn round (num:f64, dec:i32) -> f64 {
 fn roundqty (num:f64) -> f64 { round(num, 4) }
 fn roundcents (num:f64) -> f64 { round(num, 2) }
 
+// number to -> .12 1.12 999.99 1.99k
+fn roundkilofy (f:f64) -> String {
+    if 1000.0 <= f {
+        format!("{:2}k", roundcents(f/1000.0))
+    } else {
+        format!("{:2}", roundcents(f)).trim_start_matches('0').to_string()
+    }
+}
+
 // Trim trailing . and 0
 fn num_simp (num:&str) -> String {
     num
+    .trim_start_matches("0")
     .trim_end_matches("0")
     .trim_end_matches(".")
     .into()
@@ -139,17 +168,11 @@ fn num_simp (num:&str) -> String {
 
 // Try to squish number to 3 digits: "100%"  "99.9%"  "10.0%"  "9.99%"  "0.99%""
 fn percent_squish (num:f64) -> String {
-    if 100.0 <= num {
-        format!("{:.0}", num)
-    } else if 10.0 <= num {
-        format!("{:.1}", num)
-    } else if 1.0 <= num {
-        format!("{:.2}", num)
-    } else if num < 0.001 {
-        "0.0".into()
-    } else {
-        format!("{:.3}", num).trim_start_matches('0').into()
-    }
+    if 100.0 <= num{ return format!("{:.0}", num) }
+    if 10.0 <= num { return format!("{:.1}", num) }
+    if 1.0 <= num  { return format!("{:.2}", num) }
+    if num < 0.001 { return format!("{:.1}", num) }
+    format!("{:.3}", num).trim_start_matches('0').into() // .0001 ... .9999
 }
 
 // Stringify float to two decimal places unless under 10
@@ -194,7 +217,8 @@ fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
 }
 
 fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re)?.captures(msg) // An Option<Captures>
+    Regex::new(re)?
+    .captures(msg) // An Option<Captures>
     .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
         |captures|          // ...or return Ok Vec of Option<Vec>
         Ok(captures.iter() // Iterator over Option<Match>
@@ -204,10 +228,10 @@ fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
 }
 
 // Transforms "@user nickname" to "USER ID"
-fn ref_ticker (s :&str) -> Option<String> {
+fn deref_ticker (s :&str) -> Option<String> {
     // Expects:  @shrewm   Returns: Some(308188500)
     if &s[0..1] == "@" {
-        // Ticker is whomever this nick matches
+        // Ticker is ID of whomever this nick matches
         get_sql(&format!("SELECT id FROM entitys WHERE name='{}'", &s[1..]))
             .ok()
             .filter( |v| 1 == v.len() )
@@ -216,12 +240,13 @@ fn ref_ticker (s :&str) -> Option<String> {
 }
 
 // Transforms "USER ID" to "@usernickname"
-fn deref_ticker (t :&str) -> String {
+fn reference_ticker (t :&str) -> String {
     if is_self_stonk(t) {
-        get_sql(&format!("SELECT name FROM entitys WHERE id={}", t))
+        get_sql(&format!("SELECT name FROM entitys WHERE id={}", t)) // Result<Vec, Err>
+        .map_err( |e| error!("{:?}", e) )
         .ok()
         .filter( |v| 1 == v.len() )
-        .map( |v| "@".to_string() + v[0].get("name").unwrap() )
+        .map( |v| format!("@{}", v[0].get("name").unwrap()) )
         .unwrap_or(t.to_string())
     } else {
         t.to_string()
@@ -233,34 +258,39 @@ fn is_self_stonk (s:&str) -> bool {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Umm
+/// Helpers on complex types
 
-// for get_stonk, do_exchange_bidask via quote_execute
-fn make_pretty_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
+
+// Generates: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
+// Called by:  get_stonk  do_exchange_bidask->QuoteExecute 
+fn render_ticker_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
     let gain_glyphs = if 0.0 < quote.amount {
             (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
         } else if 0.0 == quote.amount {
-            (from_utf8(b"\xF0\x9F\x94\xB7")?, "") // Blue diamond, nothing
+            (from_utf8(b"\xF0\x9F\x94\xB7")?, "·") // Blue diamond, nothing
         } else {
             (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
         };
 
-    let ticker_pretty = deref_ticker(ticker);
-    Ok(format!("{}{}@{}{}{} {}{} {}% {} {}",
+    let ticker_pretty = reference_ticker(ticker);
+    Ok(format!("`{:>6}``{:>4}%``{}{} @{}` `{}``{}`",
+        format!("{}",
+            //gain_glyphs.1,
+            money_pretty(quote.amount.abs())),
+        percent_squish(quote.percent.abs()),
+
         gain_glyphs.0,
         ticker_pretty,
         money_pretty(quote.price),
-        match quote.market { 'r'=>"", 'p'=>"p", 'a'=>"a", _=>"?"},
-        if quote.hours == 24 { "!" } else { "" },
-        gain_glyphs.1,
-        money_pretty(quote.amount.abs()),
-        percent_squish(quote.percent.abs()),
+
         quote.title,
-        quote.exchange
+
+        if quote.hours == 24 { "∞" }
+        else { match quote.market { 'r'=>"", 'p'=>"ρ", 'a'=>"α", _=>"?" } }, // regular ι, pre, after hours
     ))
 }
 
-async fn get_stonk (cmd :&Cmd, ticker :&str) -> Bresult<HashMap<String, String>> {
+async fn get_stonk (cmd:&Cmd, ticker:&str) -> Bresult<HashMap<String, String>> {
 
     // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
     if &ticker[0..1] == "@" { Err("Illegal ticker")? }
@@ -295,7 +325,7 @@ async fn get_stonk (cmd :&Cmd, ticker :&str) -> Bresult<HashMap<String, String>>
         get_ticker_quote(cmd, ticker).await?
     };
 
-    let pretty = make_pretty_quote(ticker, &quote)?;
+    let pretty = render_ticker_quote(ticker, &quote)?;
     let hours = quote.hours;
 
     let sql = if is_in_table {
@@ -513,7 +543,7 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
 // for do_quotes
 async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 // Expects:  GME 308188500 @shrewm.   Includes local level 2 quotes as well.  Used by do_quotes only
-    let ticker = ref_ticker(ticker).unwrap_or(ticker.to_string());
+    let ticker = deref_ticker(ticker).unwrap_or(ticker.to_string());
     let bidask =
         if is_self_stonk(&ticker) {
             let mut asks = "*Asks:*".to_string();
@@ -544,12 +574,12 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
             bidask) )
 } // get_quote_pretty
 
-// for do_trade_buy/sell via execute_buy/sell, position_to_pretty
+// for do_trade_buy/sell via execute_buy/sell, do_portfolio->position_to_pretty
 fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
     let basis = qty*cost;
     let value = qty*price;
-    let gain = format!("{:.2}", value - basis);
-    let gain_percent = percent_squish((100.0 * (price-cost)/cost).abs());
+    let gain = format!("{:.2}", (value - basis).abs());
+    let gain_percent = (100.0 * (price-cost)/cost).abs();
     //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrows
     let greenred =
         if basis < value {
@@ -559,17 +589,21 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>7.2}``{:>7} {:>4}% {}``{} @{:.2}` *{}*_@{:.2}_",
+    Ok(format!("\n`{:>6.2}` `{:>6}``{:>4}%``{}{} @{:.2}` `{}@{}`",
         roundcents(value),
-        gain, gain_percent, greenred,
+
+        gain, percent_squish(gain_percent), greenred,
         ticker, roundcents(price),
-        qty, roundcents(cost)))
+
+        &qty.to_string().trim_start_matches('0'),
+        roundkilofy(cost)
+    ))
 }
 
 // for do_portfolio, do_orders
 async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64)> {
     let ticker = pos.get("ticker").unwrap();
-    let pretty_ticker = deref_ticker(ticker);
+    let pretty_ticker = reference_ticker(ticker);
     let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
     let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
     let price = get_stonk(cmd, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
@@ -802,7 +836,7 @@ async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
-    let message_id = send_msg(cmd.level(1), "working...").await?;
+    let message_id = send_msg(cmd.level(1), "…").await?;
 
     let mut msg = String::new();
     for ticker in &tickers {
@@ -827,17 +861,23 @@ async fn do_portfolio (cmd :&Cmd) -> Bresult<&'static str> {
     let mut msg = String::new();
 
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
+    let message_id = send_msg(cmd.level(1), "…").await?;
+
+    let mut prettys = Vec::new();
     for pos in positions {
         info!("{} position {:?}", cmd.id, pos);
         let (pretty, value) = position_to_pretty(&pos, cmd).await?;
-        msg.push_str(&pretty);
+        //msg.push_str(&pretty);
+        prettys.push(pretty);
         total += value;
     }
+    prettys.sort_by( |a, b| if a.len() < b.len() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater});
+    for p in prettys { msg.push_str(&p) }
 
     let cash = get_bank_balance(cmd.id)?;
     msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
 
-    send_msg_markdown(cmd.into(), &msg).await?;
+    send_edit_msg_markdown(cmd.into(), message_id, &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -1163,21 +1203,19 @@ struct Quote {
 
 impl Quote {
     fn scan (id:i64, msg:&str) -> Bresult<Option<Self>> {
-        let caps = //                  ____ticker_____  _____________qty____________________  @  ___________price______________
-            match regex_to_hashmap(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$", msg) {
-                Some(caps) => caps,
-                None => return Ok(None)
-            };
-        let thing = caps.get("1").unwrap().to_string();
-        Ok(ref_ticker(&thing).map(
-            |ticker|
-            Self {
-                id,
-                thing,
-                qty: roundqty(caps.get("2").unwrap().parse::<f64>().unwrap()),
-                price: caps.get("4").unwrap().parse::<f64>().unwrap(),
-                ticker,
-                now: Instant::now().seconds() }))
+         //                         ____ticker____  _____________qty____________________  $@  ___________price______________
+        let caps = regex_to_vec(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$", msg)?;
+        if caps.is_empty() { return Ok(None) }
+
+        let thing = caps.as_string(1)?;
+        let qty = roundqty(caps.as_f64(2)?);
+        let price = caps.as_f64(4)?;
+        let now = Instant::now().seconds();
+        deref_ticker(&thing) // Option<String>
+        .map_or(
+             Ok(None),
+            |ticker| // String
+                Ok(Some(Self{id, thing, qty, price, ticker, now})) ) // Result<Option<Quote>, Err>
     }
 }
 
@@ -1299,8 +1337,8 @@ impl QuoteExecute {
                     get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}", -value, aid) )?;
 
                     msg += &format!("\n*Settled:*\n{} `{}{:+}@{}` <-> `${}` {}",
-                            deref_ticker(&id.to_string()), obj.quote.thing, xqty, aprice,
-                            value, deref_ticker(&aid.to_string()));
+                            reference_ticker(&id.to_string()), obj.quote.thing, xqty, aprice,
+                            value, reference_ticker(&aid.to_string()));
 
                     // Update my position
                     let newposqty = roundqty(posqty - xqty);
@@ -1328,7 +1366,7 @@ impl QuoteExecute {
                         .parse::<f64>()?;
                     let amt = aprice-price;
                     let per = amt/price;
-                    let pretty = make_pretty_quote(
+                    let pretty = render_ticker_quote(
                         ticker,
                         &Ticker{
                             price:aprice, hours:24, amount:amt, percent:per,
@@ -1401,8 +1439,8 @@ impl QuoteExecute {
                     get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}",  value, aid) )?;
 
                     msg += &format!("\n*Settled:*\n{} `${}` <-> `{}{:+}@{}` {}",
-                            deref_ticker(&id.to_string()), value,
-                            obj.quote.thing, xqty, aprice, deref_ticker(&aid.to_string()));
+                            reference_ticker(&id.to_string()), value,
+                            obj.quote.thing, xqty, aprice, reference_ticker(&aid.to_string()));
 
                     // Update my position
                     if 0.0 == posqty {
@@ -1430,7 +1468,7 @@ impl QuoteExecute {
                         .parse::<f64>()?;
                     let amt = aprice-price;
                     let per = amt/price;
-                    let pretty = make_pretty_quote(
+                    let pretty = render_ticker_quote(
                         ticker,
                         &Ticker{
                             price:aprice, hours:24, amount:amt, percent:per,
@@ -1492,7 +1530,7 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     let mut asks = String::from("");
     for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
         let ticker = order.get("ticker").unwrap();
-        let stonk = deref_ticker(ticker).replacen("_", "\\_", 10000);
+        let stonk = reference_ticker(ticker).replacen("_", "\\_", 10000);
         let qty = order.get("qty").unwrap().parse::<f64>().unwrap();
         let price = order.get("price").unwrap();
         if qty < 0.0 {
@@ -1714,7 +1752,6 @@ pub async fn main() -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
 
 fn fun () {
-    println!("{:?}", "PlayGround-101");
 }
 
 /*
