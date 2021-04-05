@@ -578,7 +578,7 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
     let basis = qty*cost;
     let value = qty*price;
-    let gain = format!("{:.2}", (value - basis).abs());
+    let gain = format!("{:.2}", value - basis);
     let gain_percent = (100.0 * (price-cost)/cost).abs();
     //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrows
     let greenred =
