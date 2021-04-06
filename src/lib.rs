@@ -120,6 +120,7 @@ fn update_ticker_p (env:&Env, time:i64, now:i64, traded_all_day:bool) -> bool {
     let day_normalized =
         LocalDateTime::from_instant(Instant::at(time - 90*60 )) // 90 minutes
         .date();
+    error!("day_normalized {:?}", day_normalized);
 
     let is_market_day =
         match day_normalized.weekday() {
