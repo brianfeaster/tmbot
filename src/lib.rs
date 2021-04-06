@@ -9,7 +9,7 @@ use ::std::{env,
     collections::{HashMap, HashSet},
     str::{from_utf8},
     fs::{read_to_string, write},
-    sync::{Mutex} };
+    sync::{Arc, Mutex} };
 use ::log::*;
 use ::regex::{Regex};
 use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece,
@@ -374,6 +374,9 @@ pub struct Env {
     chat_id_default: i64,
     quote_delay_minutes: i64,
     dst_hours_adjust: i8,
+    message_id_read: i64,
+    message_id_write: i64,
+    message_buff_write: String,
 }
 
 impl Env {
@@ -382,12 +385,15 @@ impl Env {
             url_api: self.url_api.to_string(),
             chat_id_default: self.chat_id_default,
             quote_delay_minutes: self.quote_delay_minutes,
-            dst_hours_adjust: self.dst_hours_adjust
+            dst_hours_adjust: self.dst_hours_adjust,
+            message_id_read: self.message_id_read,
+            message_id_write: self.message_id_write,
+            message_buff_write: self.message_buff_write.to_string(),
         }
     }
 }
 
-type MEnv = Mutex<Env>;
+type AMEnv = Arc<Mutex<Env>>;
 
 ////////////////////////////////////////
 
@@ -400,6 +406,7 @@ pub struct Cmd {
     id_level: i64,
     at_level: i64,
     to_level: i64,
+    message_id: i64,
     msg: String
 }
 
@@ -413,6 +420,7 @@ impl Cmd {
             id_level:  self.id_level,
             at_level:  self.at_level,
             to_level:  self.to_level,
+            message_id: self.message_id,
             msg: self.msg.to_string()
         }
     }
@@ -421,18 +429,12 @@ impl Cmd {
     /// Creates a Cmd object from the useful details of a Telegram message.
     fn parse_cmd(env :&Env, body: &web::Bytes) -> Bresult<Self> {
 
-        // Create hash map id -> echoLevel
-        let getsqlres = get_sql(&format!("SELECT id, echo FROM entitys NATURAL JOIN modes"))?;
-        let echo_levels =
-            getsqlres.iter()
-            .map( |hm| // tuple -> hashmap
-                 ( hm.get_i64("id").unwrap(),
-                   hm.get_i64("echo").unwrap() ) )
-            .collect::<HashMap<i64,i64>>();
-
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
-        let message = &json["message"];
+
+        let edited_message = &json["edited_message"];
+        let message = if edited_message.is_object() { edited_message } else { &json["message"] };
+        let message_id = getin_i64(message, &["message_id"]).unwrap_or(0);
 
         let (id, at, to, msg) =
             if inline_query.is_object() {
@@ -450,12 +452,22 @@ impl Cmd {
                 }
             } else { Err("Nothing to do.")? };
 
+        // Create hash map id -> echoLevel
+        let getsqlres = get_sql(&format!("SELECT id, echo FROM entitys NATURAL JOIN modes"))?;
+        let echo_levels =
+            getsqlres.iter()
+            .map( |hm| // tuple -> hashmap
+                 ( hm.get_i64("id").unwrap(),
+                   hm.get_i64("echo").unwrap() ) )
+            .collect::<HashMap<i64,i64>>();
+
         Ok(Self {
             env:env.copy(),
             id, at, to,
             id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
             at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
             to_level: echo_levels.get(&to).map(|v|*v).unwrap_or(2_i64),
+            message_id,
             msg
         })
     }
@@ -589,7 +601,7 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>6.2}` `{:>6}``{:>4}%``{}{} @{:.2}` `{}@{}`",
+    Ok(format!("\n`{:>7.2}` `{:>6}``{:>4}%``{}{} @{:.2}` `{}@{}`",
         roundcents(value),
 
         gain, percent_squish(gain_percent), greenred,
@@ -831,26 +843,41 @@ async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("Ok do_sql")
 }
 
-async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
+
+    error!("{:#?}", cmd);
 
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
-    let message_id = send_msg(cmd.level(1), "…").await?;
+    if cmd.env.message_id_read != cmd.message_id {
+        cmd.env.message_id_read = cmd.message_id;
+        cmd.env.message_id_write = send_msg(cmd.level(1), "…").await?;
+        cmd.env.message_buff_write.clear();
+    }
 
-    let mut msg = String::new();
+    let mut didwork = false;
     for ticker in &tickers {
         // Catch error and continue looking up tickers
         match get_quote_pretty(cmd, ticker).await {
             Ok(res) => {
-                msg.push_str(&res);
-                msg.push('\n');
-                send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?;
+                didwork = true;
+                cmd.env.message_buff_write.push_str(&res);
+                cmd.env.message_buff_write.push('\n');
+                send_edit_msg_markdown(cmd.level(1), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
             }
             e => { glogd!("get_quote_pretty => ", e); }
         }
     }
-    if msg.is_empty() { send_edit_msg_markdown(cmd.level(1), message_id, "no results").await?; }
+
+    // Notify if no results (message not saved)
+    if !didwork {
+        send_edit_msg_markdown(
+            cmd.level(1),
+            cmd.env.message_id_write,
+            &format!("{}\nno results", &cmd.env.message_buff_write)
+        ).await?;
+    }
     Ok("COMPLETED.")
 }
 
@@ -1590,8 +1617,8 @@ async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
 }
 */
 
-async fn do_all(env:&Env, body: &web::Bytes) -> Bresult<()> {
-    let cmd = Cmd::parse_cmd(env, body)?;
+async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
+    let mut cmd = Cmd::parse_cmd(env, body)?;
     info!("\x1b[33m{:?}", &cmd);
 
     glogd!("do_echo =>",      do_echo(&cmd).await);
@@ -1601,13 +1628,19 @@ async fn do_all(env:&Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_syn =>",       do_syn(&cmd).await);
     glogd!("do_def =>",       do_def(&cmd).await);
     glogd!("do_sql =>",       do_sql(&cmd).await);
-    glogd!("do_quotes => ",   do_quotes(&cmd).await);
+    glogd!("do_quotes => ",   do_quotes(&mut cmd).await);
     glogd!("do_portfolio =>", do_portfolio(&cmd).await);
     glogd!("do_yolo =>",      do_yolo(&cmd).await);
     glogd!("do_trade_buy =>", do_trade_buy(&cmd).await);
     glogd!("do_trade_sell =>",do_trade_sell(&cmd).await);
     glogd!("do_exchange_bidask =>", do_exchange_bidask(&cmd).await);
     glogd!("do_orders =>", do_orders(&cmd).await);
+
+    // Copy back important altered state for next time.
+    env.message_id_read = cmd.env.message_id_read;
+    env.message_id_write = cmd.env.message_id_write;
+    env.message_buff_write.clear();
+    env.message_buff_write.push_str(&cmd.env.message_buff_write);
     Ok(())
 }
 
@@ -1704,16 +1737,18 @@ fn log_header () {
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
 
-    let env = req.app_data::<web::Data<MEnv>>().unwrap().lock().unwrap();
+    let mut env = req.app_data::<web::Data<AMEnv>>().unwrap().lock().unwrap(); // TODO: want to edit this for state
+
     info!("\x1b[1m{:?}", &env);
     info!("\x1b[35m{}", format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
     info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""));
-    info!("\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
+    info!("body:\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
 
-    do_all(&env, &body)
+    do_all(&mut env, &body)
         .await
         .unwrap_or_else(|r| error!("{:?}", r));
 
+    error!("{:#?}", env);
     info!("End.");
 
     HttpResponse::from("")
@@ -1731,22 +1766,28 @@ pub async fn main() -> Bresult<()> {
     if !true { do_schema()? }
     if !true { fun() }
 
-    Ok(HttpServer::new(
+    let amenv =  // Shared between all calls.
+        Arc::new(Mutex::new( Env{
+            url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
+            chat_id_default:     chat_id_default,
+            dst_hours_adjust:    dst_hours_adjust,
+            quote_delay_minutes: QUOTE_DELAY_MINUTES,
+            message_id_read:     0,
+            message_id_write:    0,
+            message_buff_write:  String::new(),
+        } ) );
+
+    Ok( HttpServer::new(
         move ||
-            App::new()
-            .data(
-                Mutex::new(
-                    Env {
-                        url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
-                        chat_id_default:     chat_id_default,
-                        dst_hours_adjust:    dst_hours_adjust,
-                        quote_delay_minutes: QUOTE_DELAY_MINUTES} ) )
-            .service(
-                web::resource("*")
-                .route(
-                    Route::new().to(main_dispatch) ) ) )
+        App::new()
+        .data(amenv.clone())
+        .service(
+            web::resource("*")
+            .route(
+                Route::new()
+                .to(main_dispatch) ) ) )
     .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
-    .run().await?)
+    .run().await? )
 }
 
 ////////////////////////////////////////////////////////////////////////////////
