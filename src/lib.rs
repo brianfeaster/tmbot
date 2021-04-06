@@ -845,8 +845,6 @@ async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
 
-    error!("{:#?}", cmd);
-
     let tickers = extract_tickers(&cmd.msg);
     if tickers.is_empty() { return Ok("SKIP") }
 
@@ -881,30 +879,36 @@ async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn do_portfolio (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let mut total = 0.0;
-    let mut msg = String::new();
+    //let mut msg = String::new();
 
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
-    let message_id = send_msg(cmd.level(1), "…").await?;
 
-    let mut prettys = Vec::new();
+    //let message_id = send_msg(cmd.level(1), "…").await?;
+    if cmd.env.message_id_read != cmd.message_id {
+        cmd.env.message_id_read = cmd.message_id;
+        cmd.env.message_id_write = send_msg(cmd.level(1), "…").await?;
+        cmd.env.message_buff_write.clear();
+    }
+
+    //let mut prettys = Vec::new();
     for pos in positions {
         info!("{} position {:?}", cmd.id, pos);
         let (pretty, value) = position_to_pretty(&pos, cmd).await?;
-        //msg.push_str(&pretty);
-        prettys.push(pretty);
+        cmd.env.message_buff_write.push_str(&pretty);
+        //prettys.push(pretty);
         total += value;
     }
-    prettys.sort_by( |a, b| if a.len() < b.len() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater});
-    for p in prettys { msg.push_str(&p) }
+    //prettys.sort_by( |a, b| if a.len() < b.len() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater});
+    //for p in prettys { msg.push_str(&p) }
 
     let cash = get_bank_balance(cmd.id)?;
-    msg.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
+    cmd.env.message_buff_write.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
 
-    send_edit_msg_markdown(cmd.into(), message_id, &msg).await?;
+    send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
     Ok("COMPLETED.")
 }
 
@@ -1629,7 +1633,7 @@ async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_def =>",       do_def(&cmd).await);
     glogd!("do_sql =>",       do_sql(&cmd).await);
     glogd!("do_quotes => ",   do_quotes(&mut cmd).await);
-    glogd!("do_portfolio =>", do_portfolio(&cmd).await);
+    glogd!("do_portfolio =>", do_portfolio(&mut cmd).await);
     glogd!("do_yolo =>",      do_yolo(&cmd).await);
     glogd!("do_trade_buy =>", do_trade_buy(&cmd).await);
     glogd!("do_trade_sell =>",do_trade_sell(&cmd).await);

@@ -24,6 +24,12 @@ impl From<&Cmd> for MsgCmd {
     }
 }
 
+impl From<&mut Cmd> for MsgCmd {
+    fn from (cmd :&mut Cmd) -> Self {
+        MsgCmd{cmd:cmd.copy(), chat_id:None, level:2}
+    }
+}
+
 impl MsgCmd {
     pub fn _to (mut self, to:i64) -> Self {
          self.chat_id = Some(to);
