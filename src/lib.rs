@@ -110,6 +110,8 @@ fn next_trading_day (day :LocalDate) -> i64 {
 ///  Duration   5.5h        6.5h     4h               8h
 fn update_ticker_p (env:&Env, time:i64, now:i64, traded_all_day:bool) -> bool {
 
+    error!("now {:?}", now);
+
     if traded_all_day { return time+(env.quote_delay_minutes*60) < now }
 
     // Since UTC time is used and the pre/regular/after hours are from 0900Z to
@@ -128,6 +130,10 @@ fn update_ticker_p (env:&Env, time:i64, now:i64, traded_all_day:bool) -> bool {
     let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9-env.dst_hours_adjust, 00, 0).unwrap()).to_instant().seconds();
     let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing for slow trades.
 
+    error!("time {:?}", time);
+    error!("time_open {:?}", time_open);
+    error!("time_close {:?}", time_close);
+    error!("is_market_day {:?}", is_market_day);
     return
         if is_market_day  &&  time < time_close {
             time_open <= now  &&  (time+(env.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
@@ -899,6 +905,7 @@ async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
         info!("{} position {:?}", cmd.id, pos);
         let (pretty, value) = position_to_pretty(&pos, cmd).await?;
         cmd.env.message_buff_write.push_str(&pretty);
+        send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
         //prettys.push(pretty);
         total += value;
     }
@@ -906,7 +913,7 @@ async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
     //for p in prettys { msg.push_str(&p) }
 
     let cash = get_bank_balance(cmd.id)?;
-    cmd.env.message_buff_write.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`", roundcents(cash), roundcents(total+cash)));
+    cmd.env.message_buff_write.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`\n", roundcents(cash), roundcents(total+cash)));
 
     send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
     Ok("COMPLETED.")

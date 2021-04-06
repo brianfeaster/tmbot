@@ -14,7 +14,7 @@ use ::log::*;
 #[derive(Debug)]
 pub struct MsgCmd {
     cmd: Cmd,
-    chat_id: Option<i64>, // Unoverridable destination chat_id
+    chat_id: Option<i64>, // Unoverideable un-overridable destination chat_id
     level: i64,
 }
 
