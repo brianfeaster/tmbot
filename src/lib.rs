@@ -5,14 +5,13 @@ mod srvs;  use crate::srvs::*;
 mod db;    use crate::db::*;
 use ::std::{env,
     mem::transmute,
-    time::{Duration},
     collections::{HashMap, HashSet},
     str::{from_utf8},
     fs::{read_to_string, write},
     sync::{Arc, Mutex} };
 use ::log::*;
 use ::regex::{Regex};
-use ::datetime::{Instant, LocalTime, LocalDateTime, DatePiece,
+use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece,
     Weekday::{Sunday, Saturday} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
@@ -93,45 +92,43 @@ impl AsStr for Vec<Option<String>> {
 ///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
-fn update_ticker_p (env:&Env, cached_time:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
+fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
 
-    info!("update_ticker_p  cached_time:{}  now:{}  traded_all_day:{}", cached_time, now, traded_all_day);
+    info!("update_ticker_p  cached:{}  now:{}  traded_all_day:{}", cached, now, traded_all_day);
 
-    if traded_all_day { return Ok(cached_time+(env.quote_delay_minutes*60) < now) }
+    if traded_all_day { return Ok(cached+(env.quote_delay_minutes*60) < now) }
+
+    // Absolute time (UTC) when US pre-markets open (1AM PT)
+    let start_time = LocalTime::hm(9-env.dst_hours_adjust, 0)?; // Pre markets open at 0900 or 0800Z
+    let start_duration = Duration::of(start_time.to_seconds());
+    let market_hours_duration = Duration::of( LocalTime::hm(16, 30)?.to_seconds() ); // Add 30 minutes for delayed orders
+    let lookup_throttle_duration = Duration::of( 60 * env.quote_delay_minutes );
+
+    // Do everything in DateTime
+    let cached = LocalDateTime::at(cached);
+    let now = LocalDateTime::at(now);
 
     // Shift now to the current trading date. Since pre-markets start at
     // 0900Z (or 0800Z when the US is in daylight savings time) treat that as
     // the start of the trading day so subtract that many hours to midnight to
     // adjust the yesterday/today cutoff.
-    let now_normalized = now - LocalTime::hm(9-env.dst_hours_adjust, 0)?.to_seconds();
-
-    // Generate a Date from the normalized now.
-    let day_normalized = LocalDateTime::from_instant(Instant::at(now_normalized)).date();
+    let now_norm_date :LocalDate = (now - start_duration).date();
 
     // How many days ago (inclusive) were the markets open?
-    let days_since_last_open_market =
-        match day_normalized.weekday() {
-            Sunday => -2,
-            Saturday => -1,
-            _ => 0
-        };
+    let since_last_market_duration =
+        Duration::of( LocalTime::hm(24, 0)?.to_seconds() )
+        * match now_norm_date.weekday() { Sunday=>2, Saturday=>1, _=>0 };
 
-    // Absolute time the markets opened last. Could be future time.
-    let time_open = 
-        LocalDateTime::new(day_normalized, LocalTime::hm(9-env.dst_hours_adjust, 0)?)
-            .add_seconds( -LocalTime::hm(days_since_last_open_market, 0)?.to_seconds() )
-            .to_instant()
-            .seconds();
+    // Absolute time the markets opened/closed last. Could be future time.
+    let time_open = LocalDateTime::new(now_norm_date, start_time) - since_last_market_duration;
+    let time_close = time_open + market_hours_duration; // Add extra 30m for delayed market orders.
 
-    // Absolute time the markets closed last.  16 hours after pre-markets open.  Could be future time.
-    let time_close = time_open + LocalTime::hm(16, 30)?.to_seconds(); // Add extra 30m for delayed market orders.
+    info!("update_ticker_p  cached:{:?}  now:{:?}  now_norm_date:{:?}  since_last_market_duration:{:?}  time_open:{:?}  time_close:{:?}",
+        cached, now, now_norm_date, since_last_market_duration, time_open, time_close);
 
-    info!("update_ticker_p  now_normalized:{}  day_normalized:{:?}  days_since_last_open_market:{}  time_open:{}  time_close:{}",
-        now_normalized, day_normalized, days_since_last_open_market, time_open, time_close);
-
-    Ok(cached_time <= time_close
+    Ok(cached <= time_close
         && time_open <= now
-        && (cached_time+(env.quote_delay_minutes*60) < now  ||  time_close <= now))
+        && (cached + lookup_throttle_duration < now  ||  time_close <= now))
 }
 
 /// Round a float at the specified decimal offset
