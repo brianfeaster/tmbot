@@ -12,8 +12,8 @@ use ::std::{env,
     sync::{Arc, Mutex} };
 use ::log::*;
 use ::regex::{Regex};
-use ::datetime::{Instant, LocalDate, LocalTime, LocalDateTime, DatePiece,
-    Weekday::{Sunday, Friday, Saturday} };
+use ::datetime::{Instant, LocalTime, LocalDateTime, DatePiece,
+    Weekday::{Sunday, Saturday} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
     client::{Client, Connector} };
@@ -88,61 +88,50 @@ impl AsStr for Vec<Option<String>> {
 ////////////////////////////////////////////////////////////////////////////////
 /// Abstracted primitive types helpers
 
-// Return time (seconds midnight UTC) for the next trading day
-fn next_trading_day (day :LocalDate) -> i64 {
-    let skip_days =
-        match day.weekday() {
-            Friday => 3,
-            Saturday => 2,
-            _ => 1
-        };
-    LocalDateTime::new(day, LocalTime::midnight())
-        .add_seconds( skip_days * 24 * 60 * 60 )
-        .to_instant()
-        .seconds()
-}
-
-
 /// Decide if a ticker's price should be refreshed given its last lookup time.
 ///    Market   PreMarket   Regular  AfterHours       Closed
 ///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
-fn update_ticker_p (env:&Env, time:i64, now:i64, traded_all_day:bool) -> bool {
+fn update_ticker_p (env:&Env, cached_time:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
 
-    error!("now {:?}", now);
+    info!("update_ticker_p  cached_time:{}  now:{}  traded_all_day:{}", cached_time, now, traded_all_day);
 
-    if traded_all_day { return time+(env.quote_delay_minutes*60) < now }
+    if traded_all_day { return Ok(cached_time+(env.quote_delay_minutes*60) < now) }
 
-    // Since UTC time is used and the pre/regular/after hours are from 0900Z to
-    // 0100Z the next morning, subtract a number of seconds so that the
-    // "current day" is the same for the entire trading hours range.
-    let day_normalized =
-        LocalDateTime::from_instant(Instant::at(time - 90*60 )) // 90 minutes
-        .date();
-    error!("localdatetime {:?}", LocalDateTime::from_instant(Instant::at(time)));
-    error!("day_normalized {:?}", day_normalized);
+    // Shift now to the current trading date. Since pre-markets start at
+    // 0900Z (or 0800Z when the US is in daylight savings time) treat that as
+    // the start of the trading day so subtract that many hours to midnight to
+    // adjust the yesterday/today cutoff.
+    let now_normalized = now - LocalTime::hm(9-env.dst_hours_adjust, 0)?.to_seconds();
 
-    let is_market_day =
+    // Generate a Date from the normalized now.
+    let day_normalized = LocalDateTime::from_instant(Instant::at(now_normalized)).date();
+
+    // How many days ago (inclusive) were the markets open?
+    let days_since_last_open_market =
         match day_normalized.weekday() {
-            Saturday|Sunday => false,
-            _ => true
+            Sunday => -2,
+            Saturday => -1,
+            _ => 0
         };
 
-    let time_open = LocalDateTime::new(day_normalized, LocalTime::hms(9-env.dst_hours_adjust, 00, 0).unwrap()).to_instant().seconds();
-    let time_close = time_open + 60*60*16 + 60*30; // add an extra half hour to after market closing for slow trades.
+    // Absolute time the markets opened last. Could be future time.
+    let time_open = 
+        LocalDateTime::new(day_normalized, LocalTime::hm(9-env.dst_hours_adjust, 0)?)
+            .add_seconds( -LocalTime::hm(days_since_last_open_market, 0)?.to_seconds() )
+            .to_instant()
+            .seconds();
 
-    error!("time {:?}", time);
-    error!("time_open {:?}", time_open);
-    error!("time_close {:?}", time_close);
-    error!("is_market_day {:?}", is_market_day);
-    return
-        if is_market_day  &&  time < time_close {
-            time_open <= now  &&  (time+(env.quote_delay_minutes*60) < now  ||  time_close <= now) // X minutes delay/throttle
-        } else {
-            let day = LocalDateTime::from_instant(Instant::at(time)).date();
-            update_ticker_p(env, next_trading_day(day)+90*60, now, false)
-        }
+    // Absolute time the markets closed last.  16 hours after pre-markets open.  Could be future time.
+    let time_close = time_open + LocalTime::hm(16, 30)?.to_seconds(); // Add extra 30m for delayed market orders.
+
+    info!("update_ticker_p  now_normalized:{}  day_normalized:{:?}  days_since_last_open_market:{}  time_open:{}  time_close:{}",
+        now_normalized, day_normalized, days_since_last_open_market, time_open, time_close);
+
+    Ok(cached_time <= time_close
+        && time_open <= now
+        && (cached_time+(env.quote_delay_minutes*60) < now  ||  time_close <= now))
 }
 
 /// Round a float at the specified decimal offset
@@ -312,7 +301,7 @@ async fn get_stonk (cmd:&Cmd, ticker:&str) -> Bresult<HashMap<String, String>> {
             let hm = &res[0];
             let timesecs = hm.get_i64("time")?;
             let traded_all_day = 24 == hm.get_i64("hours")?;
-            if is_self_stonk || !update_ticker_p(&cmd.env, timesecs, now, traded_all_day) {
+            if is_self_stonk || !update_ticker_p(&cmd.env, timesecs, now, traded_all_day)? {
                 return Ok(hm.clone())
             }
             true
