@@ -1,0 +1,31 @@
+// For more information: https://go.microsoft.com/fwlink/?linkid=830387
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "tmbot",
+            "sourceLanguages": ["rust"],
+            "env": {"RUST_LOG":"info"},
+            "cwd": "${workspaceFolder}",
+            "program": "${cargo:program}",
+            "cargo": { "args": [ "run", "-p", "tmbot" ] },
+            "args": [ "1544486685:AAGcw-z_PeTIsmJLXnXtlRCb6-J1n0huc_c", "308188500", "1"],
+            //"stopOnEntry": false,
+            //"sourceMap": { "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-x86_64-apple-darwin/lib/rustlib/src/rust" },
+        },{
+            "type": "lldb",
+            "request": "launch",
+            "name": "rust",
+            "sourceLanguages": ["rust"],
+            "env": {"RUST_LOG":"info"},
+            "cwd": "${workspaceFolder}",
+            "program": "${cargo:program}",
+            "cargo": { "args": [ "run" ] },
+            "args": [],
+            //"stopOnEntry": false,
+            //"sourceMap": { "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-x86_64-apple-darwin/lib/rustlib/src/rust" },
+        },
+    ]
+}
