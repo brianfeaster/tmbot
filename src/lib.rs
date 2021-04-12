@@ -780,7 +780,7 @@ async fn do_syn (cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let cap = Regex::new(r"^([a-z]+):$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^([A-Za-z-]+):$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let word = &cap.unwrap()[1];
 
