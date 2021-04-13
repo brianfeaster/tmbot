@@ -1205,14 +1205,20 @@ struct ExecuteSell {
 }
 
 impl ExecuteSell {
-    async fn execute (obj:TradeSell) -> Bresult<Self> {
+    async fn execute (obj:TradeSell, env:&Env) -> Bresult<Self> {
+        let now = Instant::now().seconds();
+
+        if obj.hours!=24 && !trading_hours_p(env, now)? {
+            return Ok(Self{msg:"Unable to trade after hours".into(), tradesell:obj});
+        }
+
         let id = obj.trade.id;
         let ticker = &obj.trade.ticker;
         let position = &obj.positions[0];
         let qty = obj.qty;
         let price = obj.price;
         let new_qty = obj.new_qty;
-        sql_table_order_insert(id, ticker, -qty, price, Instant::now().seconds())?;
+        sql_table_order_insert(id, ticker, -qty, price, now)?;
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
             get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", id, ticker))?;
@@ -1234,7 +1240,7 @@ async fn do_trade_sell (cmd :&Cmd) -> Bresult<&'static str> {
 
     let res =
         TradeSell::new(trade.unwrap(), cmd).await
-        .map(ExecuteSell::execute)?.await?;
+        .map(|tradesell| ExecuteSell::execute(tradesell, &cmd.env))?.await?;
 
     info!("\x1b[1;31mResult {:#?}", res);
     send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
