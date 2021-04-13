@@ -159,8 +159,8 @@ pub async fn get_ticker_quote (_cmd:&Cmd, ticker: &str) -> Bresult<Ticker> {
 
     let mut details = [
         (pre_market_price,
-         pre_market_price - previous_close, //getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
-         (pre_market_price - previous_close) / previous_close, // getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
+         pre_market_price - reg_market_price, //getin_f64(&details, &["preMarketChange", "raw"]).unwrap_or(0.0),
+         (pre_market_price - reg_market_price) / reg_market_price, // getin_f64(&details, &["preMarketChangePercent", "raw"]).unwrap_or(0.0) * 100.0,
          getin_i64(&details, &["preMarketTime"]).unwrap_or(0),
          'p'),
         (reg_market_price,

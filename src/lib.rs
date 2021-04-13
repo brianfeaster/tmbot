@@ -69,6 +69,14 @@ impl GetI64 for HashMap<String, String> {
             .parse::<i64>()?)
     }
 }
+trait GetF64 { fn get_f64 (&self, k:&str) -> Bresult<f64>; }
+impl GetF64 for HashMap<String, String> {
+    fn get_f64 (&self, k:&str) -> Bresult<f64> {
+        Ok(self
+            .get(k).ok_or(format!("Can't find key '{}'", k))?
+            .parse::<f64>()?)
+    }
+}
 
 /*
 // Trying to implement without using ? for the learns.
@@ -92,29 +100,22 @@ impl AsStr for Vec<Option<String>> {
 ///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
-fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
-
-    info!("update_ticker_p  cached:{}  now:{}  traded_all_day:{}", cached, now, traded_all_day);
-
-    if traded_all_day { return Ok(cached+(env.quote_delay_minutes*60) < now) }
-
-    // Absolute time (UTC) when US pre-markets open (1AM PT)
-    let start_time = LocalTime::hm(9-env.dst_hours_adjust, 0)?; // Pre markets open at 0900 or 0800Z
+fn most_recent_trading_hours (
+    env: &Env,
+    now: LocalDateTime,
+) -> Bresult<(LocalDateTime, LocalDateTime)> {
+    // Absolute time (UTC) when US pre-markets open 1AMPT / 0900Z|0800Z
+    let start_time = LocalTime::hm(9-env.dst_hours_adjust, 0)?; 
     let start_duration = Duration::of(start_time.to_seconds());
     let market_hours_duration = Duration::of( LocalTime::hm(16, 30)?.to_seconds() ); // Add 30 minutes for delayed orders
-    let lookup_throttle_duration = Duration::of( 60 * env.quote_delay_minutes );
 
-    // Do everything in DateTime
-    let cached = LocalDateTime::at(cached);
-    let now = LocalDateTime::at(now);
-
-    // Shift now to the current trading date. Since pre-markets start at
-    // 0900Z (or 0800Z when the US is in daylight savings time) treat that as
-    // the start of the trading day so subtract that many hours to midnight to
-    // adjust the yesterday/today cutoff.
+    // Consider the current trading date relative to now. Since pre-markets
+    // start at 0900Z (0800Z during daylight savings) treat that as the
+    // start of the trading day so subtract that many hours (shift to midnight)
+    // to shift the yesterday/today cutoff.
     let now_norm_date :LocalDate = (now - start_duration).date();
 
-    // How many days ago (inclusive) were the markets open?
+    // How many days ago (in seconds) were the markets open?
     let since_last_market_duration =
         Duration::of( LocalTime::hm(24, 0)?.to_seconds() )
         * match now_norm_date.weekday() { Sunday=>2, Saturday=>1, _=>0 };
@@ -123,8 +124,33 @@ fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresu
     let time_open = LocalDateTime::new(now_norm_date, start_time) - since_last_market_duration;
     let time_close = time_open + market_hours_duration; // Add extra 30m for delayed market orders.
 
-    info!("update_ticker_p  cached:{:?}  now:{:?}  now_norm_date:{:?}  since_last_market_duration:{:?}  time_open:{:?}  time_close:{:?}",
-        cached, now, now_norm_date, since_last_market_duration, time_open, time_close);
+    info!("most_recent_trading_hours  now:{:?}  now_norm_date:{:?}  since_last_market_duration:{:?}  time_open:{:?}  time_close:{:?}",
+        now, now_norm_date, since_last_market_duration, time_open, time_close);
+
+    Ok((time_open, time_close))
+}
+
+fn trading_hours_p (env:&Env, now:i64) -> Bresult<bool>{
+    let now = LocalDateTime::at(now);
+    let (time_open, time_close) = most_recent_trading_hours(env, now)?;
+    Ok(time_open <= now && now <= time_close)
+}
+
+fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
+    info!("update_ticker_p  cached:{}  now:{}  traded_all_day:{}", cached, now, traded_all_day);
+
+    if traded_all_day { return Ok(cached+(env.quote_delay_minutes*60) < now) }
+
+    let lookup_throttle_duration = Duration::of( 60 * env.quote_delay_minutes ); // Lookup tickers every 2 minutes
+
+    // Do everything in DateTime
+    let cached = LocalDateTime::at(cached);
+    let now = LocalDateTime::at(now);
+
+    let (time_open, time_close) = most_recent_trading_hours(env, now)?;
+
+    info!("update_ticker_p  cached:{:?}  now:{:?}  time_open:{:?}  time_close:{:?}",
+        cached, now, time_open, time_close);
 
     Ok(cached <= time_close
         && time_open <= now
@@ -333,6 +359,7 @@ async fn get_stonk (cmd:&Cmd, ticker:&str) -> Bresult<HashMap<String, String>> {
     hm.insert("updated".into(), "".into());
     hm.insert("ticker".into(), ticker.to_string());
     hm.insert("price".into(),  quote.price.to_string());
+    hm.insert("hours".into(),  hours.to_string());
     hm.insert("time".into(),   now.to_string());
     hm.insert("pretty".into(), pretty);
     return Ok(hm);
@@ -485,8 +512,8 @@ impl Position {
                 Self {
                     id,
                     ticker: ticker.into(),
-                    qty: row.get("qty").unwrap().parse::<f64>().unwrap(),
-                    price: row.get("price").unwrap().parse::<f64>().unwrap() } )
+                    qty: row.get_f64("qty").unwrap(),
+                    price: row.get_f64("price").unwrap() } )
             .collect::<Vec<_>>())
     }
 }
@@ -503,19 +530,18 @@ struct Trade {
 }
 
 impl Trade {
-    fn new (id:i64, msg:&str) -> Bresult<Option<Self>> {
-        let caps = //                  _____ticker____  _+-_  _$_   ____________amt_______________
-            match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", msg) {
-                Some(caps) => caps,
-                None => return Ok(None)
-            };
-        Ok(Some(Self {
-            id,
-            ticker: caps.get("1").unwrap().to_uppercase(),
-            action: caps.get("2").unwrap().chars().nth(0).unwrap(),
-            is_dollars: caps.get("3").is_some(),
-            amt: caps.get("4").map(|m| m.parse::<f64>().unwrap())
-        }))
+    fn new (id:i64, msg:&str) -> Option<Self> {
+        //                         _____ticker____  _+-_  _$_   ____________amt_______________
+        match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", msg) {
+            Some(caps) => 
+                Some(Self {
+                    id,
+                    ticker:     caps.get("1").unwrap().to_uppercase(),
+                    action:     caps.get("2").unwrap().chars().nth(0).unwrap(),
+                    is_dollars: caps.get("3").is_some(),
+                    amt:        caps.get("4").map(|m| m.parse::<f64>().unwrap()) }),
+                None => return None
+        }
     }
 }
 
@@ -556,14 +582,14 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
             for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker='{}' order by price;", ticker))? {
                 asks.push_str(&format!(" `{}@{}`",
                     num_simp(ask.get("qty").unwrap()),
-                    ask.get("price").unwrap().parse::<f64>()?,
+                    ask.get_f64("price")?,
                 ));
             }
             let mut bids = "*Bids:*".to_string();
             for bid in get_sql(&format!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker='{}' order by price desc;", ticker))? {
                 bids.push_str(&format!(" `{}@{}`",
                     num_simp(bid.get("qty").unwrap()),
-                    bid.get("price").unwrap().parse::<f64>()?,
+                    bid.get_f64("price")?,
                 ));
             }
             format!("\n{}\n{}", asks, bids).to_string()
@@ -610,9 +636,9 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
 async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64)> {
     let ticker = pos.get("ticker").unwrap();
     let pretty_ticker = reference_ticker(ticker);
-    let qty = pos.get("qty").unwrap().parse::<f64>().unwrap();
-    let cost = pos.get("price").unwrap().parse::<f64>().unwrap();
-    let price = get_stonk(cmd, &ticker).await?.get("price").unwrap().parse::<f64>().unwrap();
+    let qty = pos.get_f64("qty")?;
+    let cost = pos.get_f64("price")?;
+    let price = get_stonk(cmd, &ticker).await?.get_f64("price")?;
     Ok( ( format_position(&pretty_ticker, qty, cost, price)?, qty*price ) ) // Return tuple
 }
 
@@ -641,7 +667,7 @@ async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
             if rows.len() == 0 { // Create/set echo level for this channel
                 get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, echo))?;
             } else {
-                echo = rows[0].get("echo").unwrap().parse::<i64>().unwrap();
+                echo = rows[0].get_i64("echo")?;
             }
             send_msg_markdown(cmd.level(0), &format!("`echo {} verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
         }
@@ -979,7 +1005,7 @@ async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
     let mut msg = "*YOLOlians*".to_string();
     for row in results {
         msg.push_str( &format!(" `{:.2}@{}`",
-            row.get("yolo").unwrap().parse::<f64>()?,
+            row.get_f64("yolo")?,
             row.get("name").unwrap()) );
     }
     send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?;
@@ -1001,28 +1027,26 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
 /// Stonk Buy
 
 #[derive(Debug)]
-struct TradeBuy { qty:f64, price:f64, bank_balance: f64, trade: Trade }
+struct TradeBuy { qty:f64, price:f64, bank_balance: f64, hours: i64, trade: Trade }
 
 impl TradeBuy {
     async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
         let stonk = get_stonk(cmd, &trade.ticker).await?;
 
         if Regex::new(r"PNK$").unwrap()
-            .find(stonk.get("pretty").ok_or("No pretty column in table")?)
+            .find( stonk.get("pretty").ok_or("No pretty column in table")? )
             .is_some() {
                 send_msg_markdown(cmd.into(), "`OTC / PinkSheet Verboten Stonken`").await?;
                 Err("OTC / PinkSheet Verboten Stonken")?
             }
-        let price =
-            stonk
-            .get("price").ok_or("price missing from stonk")?
-            .parse::<f64>()?;
+        let price = stonk.get_f64("price")?;
         let bank_balance = get_bank_balance(trade.id)?;
+        let hours = stonk.get_i64("hours")?;
         let qty = match trade.amt {
             Some(amt) => if trade.is_dollars { amt/price } else { amt },
             None => roundqty(bank_balance / price)
         };
-        Ok( Self{qty, price, bank_balance, trade} )
+        Ok( Self{qty, price, bank_balance, hours, trade} )
     }
 }
 
@@ -1064,12 +1088,19 @@ impl TradeBuyCalc {
 struct ExecuteBuy { msg:String, tradebuycalc:TradeBuyCalc }
 
 impl ExecuteBuy {
-    async fn execute (obj:TradeBuyCalc) -> Bresult<Self> {
+    async fn execute (obj:TradeBuyCalc, env:&Env) -> Bresult<Self> {
+
+        let now = Instant::now().seconds();
+
+        if obj.tradebuy.hours!=24 && !trading_hours_p(env, now)? {
+            return Ok(Self{msg:"Unable to trade after hours".into(), tradebuycalc:obj});
+        }
+
         let id = obj.tradebuy.trade.id;
         let ticker = &obj.tradebuy.trade.ticker;
         let price = obj.tradebuy.price;
 
-        sql_table_order_insert(id, ticker, obj.qty, price, Instant::now().seconds())?;
+        sql_table_order_insert(id, ticker, obj.qty, price, now)?;
         let mut msg = format!("*Bought:*");
 
         if obj.positions.is_empty() {
@@ -1088,13 +1119,13 @@ impl ExecuteBuy {
 }
 
 async fn do_trade_buy (cmd :&Cmd) -> Bresult<&'static str> {
-    let trade = Trade::new(cmd.id, &cmd.msg)?;
+    let trade = Trade::new(cmd.id, &cmd.msg);
     if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
 
     let res =
         TradeBuy::new(trade.unwrap(), cmd).await
         .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy, cmd))?.await
-        .map(ExecuteBuy::execute)?.await
+        .map(|tradebuycalc| ExecuteBuy::execute(tradebuycalc, &cmd.env))?.await
         .map(|res| { info!("\x1b[1;31mResult {:#?}", &res); res })?;
 
     send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
@@ -1112,6 +1143,7 @@ struct TradeSell {
     bank_balance: f64,
     new_balance: f64,
     new_qty: f64,
+    hours: i64,
     trade: Trade
 }
 
@@ -1127,7 +1159,9 @@ impl TradeSell {
         }
         let pos_qty = positions[0].qty;
 
-        let price = get_stonk(cmd, ticker).await?.get("price").ok_or("price missing from stonk")?.parse::<f64>().unwrap();
+        let stonk = get_stonk(cmd, ticker).await?;
+        let price = stonk.get_f64("price")?;
+        let hours = stonk.get_i64("hours")?;
 
         let mut qty =
             roundqty(match trade.amt {
@@ -1160,7 +1194,7 @@ impl TradeSell {
 
         let new_qty = roundqty(pos_qty-qty);
 
-        Ok( Self{positions, qty, price, bank_balance, new_balance, new_qty, trade} )
+        Ok( Self{positions, qty, price, bank_balance, new_balance, new_qty, hours, trade} )
     }
 }
 
@@ -1195,7 +1229,7 @@ impl ExecuteSell {
 }
 
 async fn do_trade_sell (cmd :&Cmd) -> Bresult<&'static str> {
-    let trade = Trade::new(cmd.id, &cmd.msg)?;
+    let trade = Trade::new(cmd.id, &cmd.msg);
     if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
 
     let res =
@@ -1263,13 +1297,13 @@ impl QuoteCancelMine {
         let mut msg = String::new();
 
         let mut myasks = get_sql( &format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND qty<0.0 ORDER BY price", id, ticker) )?;
-        let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get("qty").unwrap().parse::<f64>().unwrap() ).sum::<f64>());
+        let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get_f64("qty").unwrap() ).sum::<f64>());
         let mut mybids = get_sql( &format!("SELECT * FROM exchange WHERE id={} AND ticker='{}' AND 0.0<=qty ORDER BY price DESC", id, ticker) )?;
 
         if qty < 0.0 { // This is an ask quote
             // Remove/decrement a matching bid in the current settled market
-            if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get("price").unwrap().parse::<f64>().unwrap() ) {
-                let bidqty = roundqty(mybid.get("qty").unwrap().parse::<f64>()?);
+            if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
+                let bidqty = roundqty(mybid.get_f64("qty")?);
                 if bidqty <= -qty {
                     get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker='{}' AND qty = {} AND price = {}", id, ticker, bidqty, price) )?;
                     mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
@@ -1285,8 +1319,8 @@ impl QuoteCancelMine {
             }
         } else if 0.0 < qty { // This is a bid quote
             // Remove/decrement a matching ask in the current settled market
-            if let Some(myask) = myasks.iter_mut().find( |b| price == b.get("price").unwrap().parse::<f64>().unwrap() ) {
-                let askqty = roundqty(myask.get("qty").unwrap().parse::<f64>()?);
+            if let Some(myask) = myasks.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
+                let askqty = roundqty(myask.get_f64("qty")?);
                 if -askqty <= qty {
                     get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker='{}' AND qty = {} AND price = {}", id, ticker, askqty, price) )?;
                     myask.insert("*UPDATED*".into(), "*REMOVED*".into());
@@ -1339,10 +1373,10 @@ impl QuoteExecute {
             if posqty < -qty + asksqty { // does it exceed my current ask qty?
                 msg += "\nYou lack that available quantity to sell.";
             } else {
-                for abid in bids.iter_mut().filter( |b| price <= b.get("price").unwrap().parse::<f64>().unwrap() ) {
-                    let aid = abid.get("id").unwrap().parse::<i64>()?;
-                    let aqty = roundqty(abid.get("qty").unwrap().parse::<f64>()?);
-                    let aprice = abid.get("price").unwrap().parse::<f64>()?;
+                for abid in bids.iter_mut().filter( |b| price <= b.get_f64("price").unwrap() ) {
+                    let aid = abid.get_i64("id")?;
+                    let aqty = roundqty(abid.get_f64("qty")?);
+                    let aprice = abid.get_f64("price")?;
                     let xqty = aqty.min(-qty); // quantity exchanged is the smaller of the two (could be equal)
 
                     if xqty == aqty { // bid to be entirely settled
@@ -1406,10 +1440,10 @@ impl QuoteExecute {
 
                 // create or increment in exchange table my ask.  This could also be the case if no bids were executed.
                 if qty < 0.0 {
-                    if let Some(myask) = myasks.iter_mut().find( |a| price == a.get("price").unwrap().parse::<f64>().unwrap() ) {
-                        let oldqty = myask.get("qty").unwrap().parse::<f64>().unwrap();
+                    if let Some(myask) = myasks.iter_mut().find( |a| price == a.get_f64("price").unwrap() ) {
+                        let oldqty = myask.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty); // both negative, so "increased" ask qty
-                        let mytime = myask.get("time").unwrap().parse::<i64>().unwrap();
+                        let mytime = myask.get_i64("time").unwrap();
                         get_sql(&format!("UPDATE exchange set qty={} WHERE id={} AND ticker='{}' AND price = {} AND time={}", newqty, id, ticker, price, mytime))?;
                         myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", obj.quote.thing, oldqty, price, newqty, price);
@@ -1429,18 +1463,18 @@ impl QuoteExecute {
             let bank_balance = get_bank_balance(id)?;
             let mybidsprice =
                 mybids.iter().map( |bid|
-                    bid.get("qty").unwrap().parse::<f64>().unwrap()
-                    * bid.get("price").unwrap().parse::<f64>().unwrap() )
+                    bid.get_f64("qty").unwrap()
+                    * bid.get_f64("price").unwrap() )
                 .sum::<f64>();
 
             if bank_balance < mybidsprice + basis { // Verify not over spending as this order could become a bid
                 msg += "Available cash lacking for this bid.";
             } else {
-                for aask in asks.iter_mut().filter( |a| a.get("price").unwrap().parse::<f64>().unwrap() <= price ) {
+                for aask in asks.iter_mut().filter( |a| a.get_f64("price").unwrap() <= price ) {
                     //error!("{:?}", mybid);
-                    let aid = aask.get("id").unwrap().parse::<i64>()?;
-                    let aqty = roundqty(aask.get("qty").unwrap().parse::<f64>()?); // This is a negative value
-                    let aprice = aask.get("price").unwrap().parse::<f64>()?;
+                    let aid = aask.get_i64("id")?;
+                    let aqty = roundqty(aask.get_f64("qty")?); // This is a negative value
+                    let aprice = aask.get_f64("price")?;
                     //error!("my ask qty {}  asksqty sum {}  bid qty {}", qty, asksqty, aqty);
 
                     let xqty = roundqty(qty.min(-aqty)); // quantity exchanged is the smaller of the two (could be equal)
@@ -1508,10 +1542,10 @@ impl QuoteExecute {
 
                 // create or increment in exchange table my bid.  This could also be the case if no asks were executed.
                 if 0.0 < qty{
-                    if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get("price").unwrap().parse::<f64>().unwrap() ) {
-                        let oldqty = mybid.get("qty").unwrap().parse::<f64>().unwrap();
+                    if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
+                        let oldqty = mybid.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty);
-                        let mytime = mybid.get("time").unwrap().parse::<i64>().unwrap();
+                        let mytime = mybid.get_i64("time").unwrap();
                         get_sql(&format!("UPDATE exchange set qty={} WHERE id={} AND ticker='{}' AND price = {} AND time={}", newqty, id, ticker, price, mytime))?;
                         mybid.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", obj.quote.thing, oldqty, price, newqty, price);
@@ -1557,7 +1591,7 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
         let ticker = order.get("ticker").unwrap();
         let stonk = reference_ticker(ticker).replacen("_", "\\_", 10000);
-        let qty = order.get("qty").unwrap().parse::<f64>().unwrap();
+        let qty = order.get_f64("qty")?;
         let price = order.get("price").unwrap();
         if qty < 0.0 {
             asks += &format!("\n{}{:+}@{}", stonk, qty, price);
