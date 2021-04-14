@@ -1,0 +1,12 @@
+[package]
+name = "macros"
+version = "0.0.0"
+authors = ["b f <brianf@geemale.kom>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "1.0"
+quote = "1.0"
