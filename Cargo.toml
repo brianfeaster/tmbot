@@ -5,6 +5,7 @@ authors = ["b f <brianf@geemale.kom>"]
 edition = "2018"
 
 [dependencies]
+macros = { path = "macros" }
 log = "*"
 env_logger = "*"
 regex = "*"

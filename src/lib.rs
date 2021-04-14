@@ -552,7 +552,7 @@ impl Trade {
 // For do_quotes Return set of tickers that need attention
 pub fn extract_tickers (txt :&str) -> HashSet<String> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^[A-Za-z@._^]?[A-Za-z0-9^._=-]+$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
+    let re = Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -1830,8 +1830,14 @@ pub async fn main() -> Bresult<()> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+use macros::*;
+
+#[derive(HelloMacro)]
+struct Greetings {z:i32}
 
 fn fun () {
+    let g = Greetings{z:42};
+    g.hello_macro();
 }
 
 /*
