@@ -170,10 +170,12 @@ fn roundcents (num:f64) -> f64 { round(num, 2) }
 
 // number to -> .12 1.12 999.99 1.99k
 fn roundkilofy (f:f64) -> String {
-    if 1000.0 <= f {
-        format!("{:2}k", roundcents(f/1000.0))
+    if 0.0 == f {
+        format!(".00")
+    } else if 1000.0 <= f {
+        format!("{}k", roundcents(f/1000.0))
     } else {
-        format!("{:2}", roundcents(f)).trim_start_matches('0').to_string()
+        format!("{}", roundcents(f)).trim_start_matches('0').to_string()
     }
 }
 
@@ -621,13 +623,13 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>7.2}` `{:>6}``{:>4}%``{}{} @{:.2}` `{}@{}`",
+    Ok(format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{:.2}` `{}@{}`",
         roundcents(value),
 
         gain, percent_squish(gain_percent), greenred,
         ticker, roundcents(price),
 
-        &qty.to_string().trim_start_matches('0'),
+        if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string() },
         roundkilofy(cost)
     ))
 }
@@ -902,7 +904,6 @@ async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
 async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
     if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
-    let mut total = 0.0;
     //let mut msg = String::new();
 
     let positions = get_sql(&format!("SELECT * FROM positions WHERE id={}", cmd.id))?;
@@ -914,14 +915,17 @@ async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
         cmd.env.message_buff_write.clear();
     }
 
+    let mut total = 0.0;
     //let mut prettys = Vec::new();
     for pos in positions {
-        info!("{} position {:?}", cmd.id, pos);
-        let (pretty, value) = position_to_pretty(&pos, cmd).await?;
-        cmd.env.message_buff_write.push_str(&pretty);
-        send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
-        //prettys.push(pretty);
-        total += value;
+        if !is_self_stonk(pos.get("ticker").unwrap()) {
+            info!("{} position {:?}", cmd.id, pos);
+            let (pretty, value) = position_to_pretty(&pos, cmd).await?;
+            cmd.env.message_buff_write.push_str(&pretty);
+            send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
+            //prettys.push(pretty);
+            total += value;
+        }
     }
     //prettys.sort_by( |a, b| if a.len() < b.len() { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater});
     //for p in prettys { msg.push_str(&p) }
@@ -1592,8 +1596,8 @@ async fn do_exchange_bidask (cmd :&Cmd) -> Bresult<&'static str> {
 async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"/ORDERS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
     let id = cmd.id;
-    let mut bids = String::from("");
     let mut asks = String::from("");
+    let mut bids = String::from("");
     for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
         let ticker = order.get("ticker").unwrap();
         let stonk = reference_ticker(ticker).replacen("_", "\\_", 10000);
@@ -1607,14 +1611,29 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     }
 
     let mut msg = String::new();
+    let mut total = 0.0;
 
     // Include all self-stonks positions (mine and others)
-    for pos in get_sql(&format!("SELECT * FROM positions WHERE id={}", id))? {
+    let sql = format!("
+        SELECT {} AS id, id AS ticker, 0.0 AS qty, 0.0 AS price \
+        FROM entitys \
+        WHERE 0<id \
+        AND id NOT IN (SELECT ticker FROM positions WHERE id={} GROUP BY ticker)
+            UNION \
+        SELECT * FROM positions WHERE id={} AND ticker IN (SELECT id FROM entitys WHERE 0<id)", id, id, id);
+    for pos in get_sql(&sql)? {
         if is_self_stonk(pos.get("ticker").unwrap()) {
-            let (m, _value) = position_to_pretty(&pos, cmd).await?;
+            let (m, value) = position_to_pretty(&pos, cmd).await?;
             msg += &m;
+            total += value;
         }
     }
+
+    let cash = get_bank_balance(cmd.id)?;
+    msg += &format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`",
+        roundcents(cash),
+        roundcents(total+cash));
+
     if 0 < msg.len() { msg += "\n" }
     if bids.len() == 0 && asks.len() == 0 {
         msg += "*NO BIDS/ASKS*"
@@ -1802,8 +1821,9 @@ pub async fn main() -> Bresult<()> {
     let chat_id_default  = env::args().nth(2).ok_or("bad index")?.parse::<i64>()?;
     let dst_hours_adjust = env::args().nth(3).ok_or("bad index")?.parse::<i8>()?;
 
+    info!("wat");
     if !true { do_schema()? }
-    if !true { fun() }
+    if !true { fun() } else {
 
     let amenv =  // Shared between all calls.
         Arc::new(Mutex::new( Env{
@@ -1827,27 +1847,27 @@ pub async fn main() -> Bresult<()> {
                 .to(main_dispatch) ) ) )
     .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
     .run().await? )
-}
+
+} }
 
 ////////////////////////////////////////////////////////////////////////////////
 use macros::*;
 
 #[derive(HelloMacro)]
-struct Greetings {z:i32}
+struct Greetings {
+    z:i32
+}
 
-fn fun () {
+fn fun () -> Bresult<()> {
     let g = Greetings{z:42};
     g.hello_macro();
+    Ok(())
 }
 
 /*
 TODO:
-  @usernick-1  sell 1 market order (best ask price) will update stonk price
-  @usernick+1  buy 1 market order (best ask price) will update stonk price
-
 REGEX
     ?P<capturegroupname>
-
 SQL
   DROP   TABLE users
   CREATE TABLE users (name TEXT, age INTEGER)

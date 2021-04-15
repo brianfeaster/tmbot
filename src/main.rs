@@ -31,7 +31,7 @@ fn _logger_init () {
 async fn main() {
     _logger_init();
     let r = ::tmbot::main().await;
-    tmbot::glogd!("hmm", r);
+    tmbot::glogd!("main()", r);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
