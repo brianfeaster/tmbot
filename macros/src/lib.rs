@@ -1,17 +1,17 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn;
+use syn::{parse, DeriveInput};
 
 
-#[proc_macro_derive(HelloMacro)]
-pub fn hello_macro_derive(input: TokenStream) -> TokenStream {
-    let ast = syn::parse::<syn::DeriveInput>(input).unwrap();
+#[proc_macro_derive(Hello)]
+pub fn hello_macro(input: TokenStream) -> TokenStream {
+    let ast = parse::<DeriveInput>(input).unwrap();
     let name = ast.ident;
     //eprintln!("{:#?}", ast);
     (quote!{
         impl #name {
-            fn hello_macro(&self) {
-                println!("Hello, Macro! My name is {} and am {}!", stringify!(#name), self.z);
+            fn hello(&self) {
+                println!("{} = {:#?}", stringify!(#name), self);
             }
         }
     }).into()

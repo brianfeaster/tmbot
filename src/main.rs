@@ -30,8 +30,8 @@ fn _logger_init () {
 #[actix_web::main]
 async fn main() {
     _logger_init();
-    let r = ::tmbot::main().await;
-    tmbot::glogd!("main()", r);
+    let r = ::tmbot::launch().await;
+    tmbot::glogd!("main() => ", r);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

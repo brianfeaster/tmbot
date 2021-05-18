@@ -4,6 +4,7 @@ mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
 mod db;    use crate::db::*;
 use ::std::{env,
+    error::Error,
     mem::transmute,
     collections::{HashMap, HashSet},
     str::{from_utf8},
@@ -1812,18 +1813,28 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     HttpResponse::from("")
 }
 
-pub async fn main() -> Bresult<()> {
+pub async fn launch() -> Bresult<()> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    ssl_acceptor_builder .set_private_key_file("key.pem", SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
 
-    let botkey           = env::args().nth(1).ok_or("bad index")?;
-    let chat_id_default  = env::args().nth(2).ok_or("bad index")?.parse::<i64>()?;
-    let dst_hours_adjust = env::args().nth(3).ok_or("bad index")?.parse::<i8>()?;
+    let botkey           = env::args().nth(1).ok_or("args[1] missing")?;
+    let chat_id_default  = env::args().nth(2).ok_or("args[2] missing")?.parse::<i64>()?;
+    let dst_hours_adjust = env::args().nth(3).ok_or("args[3] missing")?.parse::<i8>()?;
 
-    info!("wat");
     if !true { do_schema()? }
-    if !true { fun() } else {
+    if !true {
+        let r = fun();
+        match r {
+            Ok(o) => Ok(o),
+            Err(e) => {
+                info!("{:?}", e);
+                //info!("{:?}", e.is::<std::fmt::Error>());
+                //info!("{:?}", e.is::<std::io::Error>());
+                Err(e.into())
+            }
+        }
+    } else {
 
     let amenv =  // Shared between all calls.
         Arc::new(Mutex::new( Env{
@@ -1831,7 +1842,7 @@ pub async fn main() -> Bresult<()> {
             chat_id_default:     chat_id_default,
             dst_hours_adjust:    dst_hours_adjust,
             quote_delay_minutes: QUOTE_DELAY_MINUTES,
-            message_id_read:     0,
+            message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
             message_id_write:    0,
             message_buff_write:  String::new(),
         } ) );
@@ -1853,15 +1864,18 @@ pub async fn main() -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
 use macros::*;
 
-#[derive(HelloMacro)]
+#[derive(Debug, Hello)]
 struct Greetings {
-    z:i32
+    z:i32,
+    err:Box<dyn Error>
 }
 
-fn fun () -> Bresult<()> {
-    let g = Greetings{z:42};
-    g.hello_macro();
-    Ok(())
+fn fun() -> Result<(), Box<dyn std::error::Error>> {
+    let g = Greetings{z:42, err:"".into() };
+    //Err("oh noe".into())
+    //return Err(std::fmt::Error{});
+    Err(std::io::Error::from_raw_os_error(0))?;
+    Ok(g.hello())
 }
 
 /*
