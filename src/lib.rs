@@ -160,23 +160,37 @@ fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresu
 
 /// Round a float at the specified decimal offset
 ///  println!("{:?}", num::Float::integer_decode(n) );
-fn round (num:f64, dec:i32) -> f64 {
+fn roundfloat (num:f64, dec:i32) -> f64 {
     let fac = 10f64.powi(dec);
     let num_incremented = unsafe { transmute::<u64, f64>(transmute::<f64, u64>(num) + 1) };
     (num_incremented * fac).round() / fac
 }
 
-fn roundqty (num:f64) -> f64 { round(num, 4) }
-fn roundcents (num:f64) -> f64 { round(num, 2) }
+fn roundqty (num:f64) -> f64 { roundfloat(num, 4) }
+fn roundcents (num:f64) -> f64 { roundfloat(num, 2) }
 
-// number to -> .12 1.12 999.99 1.99k
+fn round (f:f64) -> String {
+    if 0.0 == f {
+        format!(".00")
+    } else if f < 1.0 {
+        format!("{:.4}", roundqty(f))
+            .trim_start_matches('0').to_string()
+    } else {
+        format!("{:.2}", roundcents(f))
+    }
+}
+// number to -> .1234 1.12 999.99 1.99k
 fn roundkilofy (f:f64) -> String {
     if 0.0 == f {
         format!(".00")
     } else if 1000.0 <= f {
-        format!("{}k", roundcents(f/1000.0))
+        format!("{:.2}k", roundcents(f/1000.0))
+    } else if f < 1.0 {
+        format!("{:.4}", roundqty(f))
+            .trim_start_matches('0').to_string()
     } else {
-        format!("{}", roundcents(f)).trim_start_matches('0').to_string()
+        format!("{:.2}", roundcents(f))
+            .trim_start_matches('0').to_string()
     }
 }
 
@@ -624,11 +638,12 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{:.2}` `{}@{}`",
+    Ok(format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{}` `{}@{}`",
         roundcents(value),
 
-        gain, percent_squish(gain_percent), greenred,
-        ticker, roundcents(price),
+        gain, percent_squish(gain_percent),
+        greenred, ticker,
+        round(price),
 
         if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string() },
         roundkilofy(cost)
