@@ -20,7 +20,7 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const QUOTE_DELAY_MINUTES :i64 = 2;
+const QUOTE_DELAY_MINUTES :i64 = 1;
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Rust primitives enahancements
@@ -310,7 +310,7 @@ fn render_ticker_quote (ticker:&str, quote:&Ticker) -> Bresult<String> {
         };
 
     let ticker_pretty = reference_ticker(ticker);
-    Ok(format!("`{:>6}``{:>4}%``{}{} @{}` `{}``{}`",
+    Ok(format!("`{:>6}` `{:>4}%``{}{} @{}` `{}``{}`",
         format!("{}",
             //gain_glyphs.1,
             money_pretty(quote.amount.abs())),
@@ -624,10 +624,11 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 } // get_quote_pretty
 
 // for do_trade_buy/sell via execute_buy/sell, do_portfolio->position_to_pretty
-fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String> {
+fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<(String, f64)> {
     let basis = qty*cost;
     let value = qty*price;
-    let gain = format!("{:.2}", value - basis);
+    let gain = value - basis;
+    let gainstr = format!("{:.2}", gain);
     let gain_percent = (100.0 * (price-cost)/cost).abs();
     //let updown = if basis <= value { from_utf8(b"\xE2\x86\x91")? } else { from_utf8(b"\xE2\x86\x93")? }; // up down arrows
     let greenred =
@@ -638,26 +639,28 @@ fn format_position (ticker:&str, qty:f64, cost:f64, price:f64) -> Bresult<String
         } else {
             from_utf8(b"\xF0\x9F\x9F\xA5")? // red block
         };
-    Ok(format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{}` `{}@{}`",
+    let pretty = format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{}` `{}@{}`",
         roundcents(value),
 
-        gain, percent_squish(gain_percent),
+        gainstr, percent_squish(gain_percent),
         greenred, ticker,
         round(price),
 
         if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string() },
         roundkilofy(cost)
-    ))
+    );
+    Ok((pretty, gain))
 }
 
 // for do_portfolio, do_orders
-async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64)> {
+async fn position_to_pretty (pos:&HashMap<String, String>, cmd:&Cmd) -> Bresult<(String, f64, f64)> {
     let ticker = pos.get("ticker").unwrap();
     let pretty_ticker = reference_ticker(ticker);
     let qty = pos.get_f64("qty")?;
     let cost = pos.get_f64("price")?;
     let price = get_stonk(cmd, &ticker).await?.get_f64("price")?;
-    Ok( ( format_position(&pretty_ticker, qty, cost, price)?, qty*price ) ) // Return tuple
+    let (pretty, gain) = format_position(&pretty_ticker, qty, cost, price)?;
+    Ok((pretty, gain, qty*price)) // Return tuple
 }
 
 
@@ -933,10 +936,12 @@ async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
 
     let mut total = 0.0;
     //let mut prettys = Vec::new();
+    //let quotes :Vec<(f64, String)> = vec!();
     for pos in positions {
         if !is_self_stonk(pos.get("ticker").unwrap()) {
             info!("{} position {:?}", cmd.id, pos);
-            let (pretty, value) = position_to_pretty(&pos, cmd).await?;
+            let (pretty, _gain, value) = position_to_pretty(&pos, cmd).await?;
+            //quotes.push((gain, pretty));
             cmd.env.message_buff_write.push_str(&pretty);
             send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
             //prettys.push(pretty);
@@ -1130,7 +1135,7 @@ impl ExecuteBuy {
             info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.positions[0].qty, obj.positions[0].price, obj.new_qty, obj.new_basis);
             get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id='{}' AND ticker='{}'", obj.new_qty, obj.new_basis, id, ticker))?;
         }
-        msg += &format_position(ticker, obj.new_qty, obj.new_basis, price)?;
+        msg += &format_position(ticker, obj.new_qty, obj.new_basis, price)?.0;
 
         get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
 
@@ -1242,11 +1247,11 @@ impl ExecuteSell {
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
             get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker='{}'", id, ticker))?;
-            msg += &format_position(ticker, qty, position.price, price)?;
+            msg += &format_position(ticker, qty, position.price, price)?.0;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                 qty*price, ticker, qty, price,
-                &format_position(ticker, new_qty, position.price, price)?);
+                &format_position(ticker, new_qty, position.price, price)?.0);
             get_sql(&format!("UPDATE positions SET qty={} WHERE id='{}' AND ticker='{}'", new_qty, id, ticker))?;
         }
         get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
@@ -1639,7 +1644,7 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
         SELECT * FROM positions WHERE id={} AND ticker IN (SELECT id FROM entitys WHERE 0<id)", id, id, id);
     for pos in get_sql(&sql)? {
         if is_self_stonk(pos.get("ticker").unwrap()) {
-            let (m, value) = position_to_pretty(&pos, cmd).await?;
+            let (m, _, value) = position_to_pretty(&pos, cmd).await?;
             msg += &m;
             total += value;
         }
@@ -1837,8 +1842,8 @@ pub async fn launch() -> Bresult<()> {
     let chat_id_default  = env::args().nth(2).ok_or("args[2] missing")?.parse::<i64>()?;
     let dst_hours_adjust = env::args().nth(3).ok_or("args[3] missing")?.parse::<i8>()?;
 
-    if !true { do_schema()? }
-    if !true {
+    if !true { do_schema()? } // Create DB
+    if !true { // Hacks and other test code
         let r = fun();
         match r {
             Ok(o) => Ok(o),
