@@ -92,6 +92,7 @@ async fn _send_msg (
     let text = if is_markdown {
         text // Poor person's uni/url decode
         .replacen("%20", " ", 10000)
+        .replacen("%27", "'", 10000)
         .replacen("%28", "(", 10000)
         .replacen("%29", ")", 10000)
         .replacen("%3D", "=", 10000)

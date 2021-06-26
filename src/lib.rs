@@ -702,22 +702,22 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
     let delay = cmd.env.quote_delay_minutes;
     send_msg_markdown(cmd.into(), &format!(
 "`          ™Bot Commands          `
-`/echo 2` `Echo level (verbose 2…0 quiet)`
 `word:  ` `Definition lookup`
-`word;  ` `Related lookup`
-`+?     ` `Likes leaderboard`
+`+1     ` `Like someone's post (via reply)`
+`+?     ` `Like leaderboard`
 `/yolo  ` `Stonks leaderboard`
 `/stonks` `Your Stonkfolio`
 `gme$   ` `Quote ({}min delay)`
-`gme+   ` `Buy GME max cash`
-`gme-   ` `Sell off GME position`
-`gme+2  ` `Buy 2 shares (min qty 0.0001)`
-`gme-2  ` `Sell 2 shares`
-`gme+$2 ` `Buy $2 worth (min amt $0.01)`
-`gme-$2 ` `Sell $2 worth`
-`@usr+1@3` `Bid/buy  2 shares of '@usr' at $3`
-`@usr-5@2` `Ask/sell 5 shares of '@usr' at $2`
-`/orders ` `Your @shares and bid/ask orders`", delay)).await?;
+`gme+   ` `Buy max GME shares`
+`gme-   ` `Sell all GME shares`
+`gme+3  ` `Buy 3 shares (min qty 0.0001)`
+`gme-5  ` `Sell 5 share`
+`gme+$18` `Buy $18 worth (min $0.01)`
+`gme-$.9 ` `Sell 90¢ worth`
+`@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
+`@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
+`/orders ` `Your @shares and bid/ask orders`
+`/echo 2` `Echo level (verbose 2…0 quiet)`", delay)).await?;
     Ok("COMPLETED.")
 }
 
@@ -804,6 +804,7 @@ async fn do_like_info (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+/*
 async fn do_syn (cmd :&Cmd) -> Bresult<&'static str> {
 
     let cap = regex_to_vec("^([a-z]+);$", &cmd.msg)?;
@@ -824,6 +825,7 @@ async fn do_syn (cmd :&Cmd) -> Bresult<&'static str> {
     send_msg_markdown(cmd.level(1), &msg).await?;
     Ok("COMPLETED.")
 }
+*/
 
 async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 
@@ -831,25 +833,48 @@ async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
     if cap.is_none() { return Ok("SKIP"); }
     let word = &cap.unwrap()[1];
 
+    info!("looking up {:?}", word);
+
+    let mut msg = String::new();
+
+    // Definitions
+
     let defs = get_definition(word).await?;
 
     if defs.is_empty() {
         send_msg_markdown_id(cmd.into(), &format!("*{}* def is empty", word)).await?;
-        return Ok("def is empty");
-    }
-
-    let mut msg = String::new() + "*" + word;
-
-    
-    if 1 == defs.len() {
-        msg.push_str( &format!(":* {}", defs[0].to_string().replacen("`", "\\`", 10000)));
     } else {
-        msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string().replacen("`", "\\`", 10000)));
-        for i in 1..std::cmp::min(4, defs.len()) {
-            msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replacen("`", "\\`", 10000)));
+        msg.push_str( &format!("*{}", word) );
+        if 1 == defs.len() { // If multiple definitions, leave off the colon
+            msg.push_str( &format!(":* {}", defs[0].to_string().replacen("`", "\\`", 10000)));
+        } else {
+            msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string().replacen("`", "\\`", 10000)));
+            for i in 1..std::cmp::min(4, defs.len()) {
+                msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replacen("`", "\\`", 10000)));
+            }
         }
     }
-    send_msg_markdown(cmd.level(1), &msg).await?;
+
+    // Synonym
+
+    let mut syns = get_syns(word).await?;
+
+    if syns.is_empty() {
+        send_msg_markdown(cmd.into(), &format!("*{}* synonyms is empty", word)).await?;
+    } else {
+        if msg.is_empty() {
+            msg.push_str( &format!("*{}:* _", word) );
+        } else {
+            msg.push_str("\n_");
+        }
+        syns.truncate(12);
+        msg.push_str( &syns.join(", ") );
+        msg.push_str("_");
+    }
+
+    if !msg.is_empty() {
+        send_msg_markdown(cmd.level(1), &msg).await?;
+    }
     Ok("COMPLETED.")
 }
 
@@ -921,7 +946,7 @@ async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
 }
 
 async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"STONKS[!?]|[!?/]STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    if Regex::new(r"/STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     //let mut msg = String::new();
 
@@ -960,8 +985,8 @@ async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
 
 async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
 
-    // Handle: !yolo ?yolo yolo! yolo?
-    if Regex::new(r"YOLO[!?]|[!?/]YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    // Handle: /yolo
+    if Regex::new(r"/YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
 
     let working_message = "working...".to_string();
     let message_id = send_msg(cmd.level(1), &working_message).await?;
@@ -1704,7 +1729,7 @@ async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_help =>",      do_help(&cmd).await);
     glogd!("do_like =>",      do_like(&cmd).await);
     glogd!("do_like_info =>", do_like_info(&cmd).await);
-    glogd!("do_syn =>",       do_syn(&cmd).await);
+    //glogd!("do_syn =>",       do_syn(&cmd).await);
     glogd!("do_def =>",       do_def(&cmd).await);
     glogd!("do_sql =>",       do_sql(&cmd).await);
     glogd!("do_quotes => ",   do_quotes(&mut cmd).await);
