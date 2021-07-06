@@ -647,7 +647,7 @@ impl Quote {
 
         // Create the new formatted string
 
-        Ok(Regex::new("(?s)(%([A-Z%])|.)").unwrap()
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
             .captures_iter(fmt)
             .fold(String::new(), |mut s, cap| {
                 match cap.get(2) {
@@ -890,7 +890,7 @@ impl Position {
                 (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
             };
 
-        Ok(Regex::new("(?s)(%([A-Z%])|.)").unwrap()
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
             .captures_iter(fmt)
             .fold(String::new(), |mut s, cap|
                 match cap.get(2) {
