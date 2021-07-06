@@ -660,7 +660,7 @@ impl Quote {
                             "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
                             "C" => s.push_str( &percent_squish(self.percent.abs()) ), // inter-day percent
                             "D" => s.push_str(gain_glyphs.0), // red/green light
-                            "E" => s.push_str(&reference_ticker(&self.ticker)),  // ticker symbol
+                            "E" => s.push_str(&reference_ticker(&self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
                             "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                             "G" => s.push_str(&self.title),  // ticker company title
                             "H" => s.push_str( // Market regular, pre, after
@@ -674,6 +674,7 @@ impl Quote {
                             "u" => s.push_str("__"),
                             "s" => s.push_str("~"),
                             "q" => s.push_str("'"),
+                            "n" => s.push_str("\n"),
                             c => { s.push_str("%"); s.push_str(c) }
                         }
                     }
@@ -904,7 +905,7 @@ impl Position {
                             "C" => s.push_str( gain_glyphs.1), // Arrow
                             "D" => s.push_str( &percent_squish(gain_percent)), // gain%
                             "E" => s.push_str( gain_glyphs.0 ), // Color
-                            "F" => s.push_str( &reference_ticker(&self.ticker) ), // Ticker
+                            "F" => s.push_str( &reference_ticker(&self.ticker).replacen("_", "\\_", 10000) ), // Ticker
                             "G" => s.push_str( &money_pretty(price) ), // latet stonks value
                             "H" => s.push_str( &if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string() } ), // qty
                             "I" => s.push_str( &roundkilofy(cost) ), // cost
@@ -918,6 +919,7 @@ impl Position {
                             "u" => s.push_str("__"),
                             "s" => s.push_str("~"),
                             "q" => s.push_str("'"),
+                            "n" => s.push_str("\n"),
                             c => { s.push_str("%"); s.push_str(c) }
                         }; s
                     } } ) )
