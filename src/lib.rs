@@ -988,7 +988,10 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
 `@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
 `@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
 `/orders ` `Your @shares and bid/ask orders`
-`/echo 2` `Echo level (verbose 2…0 quiet)`", delay)).await?;
+`/echo 2` `Echo level (verbose 2…0 quiet)`
+`/fmt`    `Show format strings`
+`/fmt q ...` `Set quote fmt str`
+`/fmt p ...` `Set position fmt str`", delay)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1969,7 +1972,7 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
             } else {
                 res[0].get_str("position")?
             };
-        send_msg_id(cmd.into(), &format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).await?;
+        send_msg(cmd.into(), &format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).await?;
         return Ok("COMPLETED.")
     }
 
@@ -1987,7 +1990,7 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
     }
 
     // notify user the change
-    send_msg_id(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
+    send_msg(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
 
     // make change to DB
     get_sql(&format!(r#"UPDATE formats SET {}="{}" WHERE id={}"#, c, s.replacen("\"", "\"\"", 10000), cmd.id))?;
