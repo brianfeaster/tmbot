@@ -88,7 +88,7 @@ async fn _send_msg (
             cmd.id // Message user-ish
         } else {
             cmd.env.chat_id_default // Message sysadmin
-        };
+        }.to_string();
     let text = if is_markdown {
         text // Poor person's uni/url decode
         .replacen("%20", " ", 10000)
@@ -116,7 +116,6 @@ async fn _send_msg (
         format!("{}/{}",
             cmd.env.url_api,
             if is_edit_message { "editmessagetext" } else { "sendmessage"} );
-    let chat_id = chat_id.to_string();
 
     let mut query = vec![
         ["chat_id", &chat_id],
@@ -124,7 +123,7 @@ async fn _send_msg (
         ["disable_notification", "true"],
     ];
 
-    let mut edit_msg_id_str = String::new(); // BC required due to array of &str
+    let mut edit_msg_id_str = String::new(); // Str must exist as long as query has ref
     if let Some(edit_msg_id) = edit_msg_id {
         edit_msg_id_str.push_str(&edit_msg_id.to_string());
         query.push( ["message_id", &edit_msg_id_str] )
