@@ -913,6 +913,7 @@ impl Position {
                             "K" => s.push_str( &money_pretty(day_gain) ), // inter-day delta
                             "L" => s.push_str( day_gain_glyphs.1 ), // day arrow
                             "M" => s.push_str( &percent_squish(day_gain_percent) ), // inter-day percent
+            //"*Total %%* %A%C\n*Quote* %F"; // @fuzzie_wuzzie
                             "%" => s.push_str("%"),
                             "b" => s.push_str("*"),
                             "i" => s.push_str("_"),
@@ -1950,30 +1951,43 @@ async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
 */
 
 async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
-    let cap = Regex::new(r"^/fmt ([qp]) (.*)$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^/fmt( ([qp])[ ]?(.*)?)?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let cap = cap.unwrap();
 
-    let c = match &cap[1] {
+    if cap.get(1) == None {
+        let res = get_sql(&format!(r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id={}"#, cmd.id))?;
+        let fmt_quote =
+            if res.is_empty() || res[0].get_str("quote")?.is_empty() {
+                format!("DEFAULT {:?}", cmd.fmt_quote.to_string())
+            } else {
+                res[0].get_str("quote")?
+            };
+        let fmt_position =
+            if res.is_empty() || res[0].get_str("position")?.is_empty() {
+                format!("DEFAULT {:?}", cmd.fmt_position.to_string())
+            } else {
+                res[0].get_str("position")?
+            };
+        send_msg_id(cmd.into(), &format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).await?;
+        return Ok("COMPLETED.")
+    }
+
+    let c = match &cap[2] {
         "q" => "quote",
-         _  => "position"
+        _ => "position"
     };
-    let s = &cap[2];
+    let s = &cap[3];
 
     info!("set format {} to {:?}", c, s);
 
-    let res = get_sql(&format!("SELECT {} FROM formats WHERE id={}", c, cmd.id))?;
-
-    let was =
-        if res.is_empty() {
-            get_sql(&format!(r#"INSERT INTO formats VALUES ({}, "", "")"#, cmd.id))?;
-            "DEFAULT".to_string()
-        } else {
-            res[0].get_str(c)?
-        };
+    let res = get_sql(&format!("SELECT id FROM formats WHERE id={}", cmd.id))?;
+    if res.is_empty() {
+        get_sql(&format!(r#"INSERT INTO formats VALUES ({}, "", "")"#, cmd.id))?;
+    }
 
     // notify user the change
-    send_msg_id(cmd.into(), &format!("Setting fmt {} from {:?} to {:?}", c, was, s)).await?;
+    send_msg_id(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
 
     // make change to DB
     get_sql(&format!(r#"UPDATE formats SET {}="{}" WHERE id={}"#, c, s.replacen("\"", "\"\"", 10000), cmd.id))?;
@@ -2161,9 +2175,8 @@ pub async fn launch() -> Bresult<()> {
             message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
             message_id_write:    0,
             message_buff_write:  String::new(),
-            fmt_quote:           "`%B%A%C%% %D %E@%F %G %H%I`".to_string(),
-            fmt_position:        "\n`%A` `%B%C%D%%` `%E%F@%G` `%H@%I`".to_string(),
-            //"*Total %%* %A%C\n*Quote* %F"; // @fuzzie_wuzzie
+            fmt_quote:           "%q%B%A%C%% %D %E@%F %G %H%I%q".to_string(),
+            fmt_position:        "%n%q%A%q %q%B%C%D%%%q %q%E%F@%G%q %q%H@%I%q".to_string(),
         } ) );
 
     Ok( HttpServer::new(
@@ -2198,7 +2211,7 @@ fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fun () -> Bresult<()> {
-    let fmt = "`%A` `%B%%` `%C%D@%E` `%F` ";
+    let fmt = "%q%A%q %q%B%%%q %q%C%D@%E%q %q%F%q";
     Ok(info!("{:?}", Regex::new("(%([A-Z])|.)").unwrap().captures_iter(fmt)
         .fold(String::new(), |mut s, cap| {
             match cap.get(2) {
