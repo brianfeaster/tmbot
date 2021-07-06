@@ -973,25 +973,24 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
     let delay = cmd.env.quote_delay_minutes;
     send_msg_markdown(cmd.into(), &format!(
 "`          ™Bot Commands          `
-`word:  ` `Definition lookup`
-`+1     ` `Like someone's post (via reply)`
-`+?     ` `Like leaderboard`
-`/yolo  ` `Stonks leaderboard`
+`/echo 2` `Echo level (verbose 2…0 quiet)`
+`word: ` `Definition lookup`
+`+1    ` `Like someone's post (via reply)`
+`+?    ` `Like leaderboard`
 `/stonks` `Your Stonkfolio`
+`/orders` `Your @shares and bid/ask orders`
+`/yolo  ` `Stonks leaderboard`
 `gme$   ` `Quote ({}min delay)`
 `gme+   ` `Buy max GME shares`
 `gme-   ` `Sell all GME shares`
 `gme+3  ` `Buy 3 shares (min qty 0.0001)`
 `gme-5  ` `Sell 5 share`
 `gme+$18` `Buy $18 worth (min $0.01)`
-`gme-$.9 ` `Sell 90¢ worth`
+`gme-$.9` `Sell 90¢ worth`
 `@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
 `@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
-`/orders ` `Your @shares and bid/ask orders`
-`/echo 2` `Echo level (verbose 2…0 quiet)`
-`/fmt`    `Show format strings`
-`/fmt q ...` `Set quote fmt str`
-`/fmt p ...` `Set position fmt str`", delay)).await?;
+`/fmt [?]     ` `Show format strings, help`
+`/fmt [qp] ...` `Set quote/position fmt str`", delay)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1954,7 +1953,7 @@ async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
 */
 
 async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
-    let cap = Regex::new(r"^/fmt( ([qp])[ ]?(.*)?)?$").unwrap().captures(&cmd.msg);
+    let cap = Regex::new(r"^/fmt( ([qp?])[ ]?(.*)?)?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let cap = cap.unwrap();
 
@@ -1977,6 +1976,43 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
     }
 
     let c = match &cap[2] {
+        "?" => {
+            send_msg_markdown(
+                cmd.into(),
+"` ™Bot Quote Formatting `
+`%A` `Gain Arrow`
+`%B` `Gain`
+`%C` `Gain %`
+`%D` `Gain Color`
+`%E` `Ticker Symbol`
+`%F` `Stock Price`
+`%G` `Company Title`
+`%H` `Market 'p're 'a'fter '∞'`
+`%I` `Updated indicator`
+`%[%nbiusq]` `% newline bold italics underline strikeout quote`
+"
+            ).await?;
+            send_msg_markdown(
+                cmd.into(),
+"` ™Bot Position Formatting `
+`%A` `Value`
+`%B` `Gain`
+`%C` `Gain Arrow`
+`%D` `Gain %`
+`%E` `Gain Color`
+`%F` `Ticker Symbol`
+`%G` `Stock Price`
+`%H` `Share Count`
+`%I` `Cost Basis per Share`
+`%J` `Day Color`
+`%K` `Day Gain`
+`%L` `Day Arrow`
+`%M` `Day Gain %`
+`%[%nbiusq]` `% newline bold italics underline strikeout quote`
+"
+            ).await?;
+            return Ok("COMPLETED.");
+        },
         "q" => "quote",
         _ => "position"
     };
