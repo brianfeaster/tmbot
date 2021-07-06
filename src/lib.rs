@@ -673,7 +673,7 @@ impl Quote {
                             "i" => s.push_str("_"),
                             "u" => s.push_str("__"),
                             "s" => s.push_str("~"),
-                            "q" => s.push_str("'"),
+                            "q" => s.push_str("`"),
                             "n" => s.push_str("\n"),
                             c => { s.push_str("%"); s.push_str(c) }
                         }
@@ -918,7 +918,7 @@ impl Position {
                             "i" => s.push_str("_"),
                             "u" => s.push_str("__"),
                             "s" => s.push_str("~"),
-                            "q" => s.push_str("'"),
+                            "q" => s.push_str("`"),
                             "n" => s.push_str("\n"),
                             c => { s.push_str("%"); s.push_str(c) }
                         }; s
