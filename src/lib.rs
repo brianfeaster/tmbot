@@ -194,7 +194,7 @@ fn roundfloat (num:f64, dec:i32) -> f64 {
 fn roundqty (num:f64) -> f64 { roundfloat(num, 4) }
 fn roundcents (num:f64) -> f64 { roundfloat(num, 2) }
 
-fn _round (f:f64) -> String {
+fn round (f:f64) -> String {
     if 0.0 == f {
         format!(".00")
     } else if f < 1.0 {
@@ -872,7 +872,6 @@ impl Position {
         let gain = value - basis;
         let day_gain = value - last_value;
 
-        let gainstr = format!("{:.2}", gain);
         let gain_percent = (100.0 * (price-cost)/cost).abs();
         let day_gain_percent = (100.0 * (price-last)/last).abs();
 
@@ -901,7 +900,7 @@ impl Position {
                     m => { // Aliased character which needs expanding
                         match m.unwrap().as_str() {
                             "A" => s.push_str( &format!("{:.2}", roundcents(value)) ), // value
-                            "B" => s.push_str( &gainstr), // gain
+                            "B" => s.push_str( &round(gain.abs())), // gain
                             "C" => s.push_str( gain_glyphs.1), // Arrow
                             "D" => s.push_str( &percent_squish(gain_percent)), // gain%
                             "E" => s.push_str( gain_glyphs.0 ), // Color
@@ -2215,7 +2214,7 @@ pub async fn launch() -> Bresult<()> {
             message_id_write:    0,
             message_buff_write:  String::new(),
             fmt_quote:           "%q%B%A%C%% %D %E@%F %G %H%I%q".to_string(),
-            fmt_position:        "%n%q%A%q %q%B%C%D%%%q %q%E%F@%G%q %q%H@%I%q".to_string(),
+            fmt_position:        "%n%q%A%q %q%C%B %D%%%E%F@%G%q %q%H@%I%q".to_string(),
         } ) );
 
     Ok( HttpServer::new(
