@@ -249,6 +249,10 @@ fn money_pretty (n:f64) -> String {
     }
 }
 
+fn percentify (a: f64, b: f64) -> f64 {
+    (b-a)/a*100.0
+}
+
 // (5,"a","bb") => "a..bb"
 fn _pad_between(width: usize, a:&str, b:&str) -> String {
     let lenb = b.len();
@@ -289,7 +293,7 @@ fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
             .collect()))
 }
 
-// Transforms "@user nickname" to "USER ID"
+// Transforms @user_nickname to {USER_ID}
 fn deref_ticker (s :&str) -> Option<String> {
     // Expects:  @shrewm   Returns: Some(308188500)
     if &s[0..1] == "@" {
@@ -301,7 +305,7 @@ fn deref_ticker (s :&str) -> Option<String> {
     } else { None }
 }
 
-// Transforms "USER ID" to "@usernickname"
+// Transforms {USER_ID} to @user_nickname
 fn reference_ticker (t :&str) -> String {
     if is_self_stonk(t) {
         get_sql(&format!("SELECT name FROM entitys WHERE id={}", t)) // Result<Vec, Err>
@@ -498,10 +502,11 @@ impl Quote {
         if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
         info!("{}", details);
 
-        let title_raw :&str =
+        let title_raw =
             &getin_str(&details, &["longName"])
-            .or_else( |_e| getin_str(&details, &["shortName"]) )?;
-        let mut title = title_raw;
+            .or_else( |_e| getin_str(&details, &["shortName"]) )?
+            .replacen("'","",10000);
+        let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
             let title_new = title
                 .trim_end_matches(".")
@@ -555,7 +560,7 @@ impl Quote {
             ticker:  ticker.to_string(),
             price, last,
             amount:  roundqty(price-last),
-            percent: 100.0*(price-last)/last,
+            percent: percentify(last,price),
             market:  details[0].2,
             hours, exchange, title,
             updated: true})
@@ -594,7 +599,7 @@ impl Quote {
                     ticker:   hm.get_str("ticker")?,
                     price, last,
                     amount:   roundqty(price-last),
-                    percent:  100.0*(price-last)/last,
+                    percent:  percentify(last,price),
                     market:   hm.get_char("market")?,
                     hours:    hm.get_i64("hours")?,
                     exchange: hm.get_str("exchange")?,
@@ -631,66 +636,59 @@ impl Quote {
     } // Quote::get_market_quote
 }
 
+fn fmt_decode_to (c: &str, s: &mut String) {
+    match c {
+        "%" => s.push_str("%"),
+        "b" => s.push_str("*"),
+        "i" => s.push_str("_"),
+        "u" => s.push_str("__"),
+        "s" => s.push_str("~"),
+        "q" => s.push_str("`"),
+        "n" => s.push_str("\n"),
+        c => { s.push_str("%"); s.push_str(c) }
+    }
+}
+
+fn amt_as_glyph (amt: f64) -> (&'static str, &'static str) {
+    if 0.0 < amt {
+        (from_utf8(b"\xF0\x9F\x9F\xA2").unwrap(), from_utf8(b"\xE2\x86\x91").unwrap()) // Green circle, Arrow up
+    } else if 0.0 == amt {
+        (from_utf8(b"\xF0\x9F\x94\xB7").unwrap(), " ") // Blue diamond, nothing
+    } else {
+        (from_utf8(b"\xF0\x9F\x9F\xA5").unwrap(), from_utf8(b"\xE2\x86\x93").unwrap()) // Red square, Arrow down
+    }
+}
+
 impl Quote {
     // Formats a ticker given a format string.
     // Used to generate: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
     // Called by:  get_quote_pretty
     fn format_quote (self: &Self, fmt: &str) -> Bresult<String> {
 
-        let gain_glyphs = if 0.0 < self.amount {
-                (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
-            } else if 0.0 == self.amount {
-                (from_utf8(b"\xF0\x9F\x94\xB7")?, "") // Blue diamond, nothing
-            } else {
-                (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
-            };
-
-        // Create the new formatted string
+        let gain_glyphs = amt_as_glyph(self.amount);
 
         Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
             .captures_iter(fmt)
             .fold(String::new(), |mut s, cap| {
-                match cap.get(2) {
-                    None => { // Regular character
-                        s.push_str(&cap[1])
-                    }
-                    m => { // Aliased character which needs expanding
-                        match m.unwrap().as_str() {
-                            "A" => s.push_str(gain_glyphs.1), // Arrow
-                            "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
-                            "C" => s.push_str( &percent_squish(self.percent.abs()) ), // inter-day percent
-                            "D" => s.push_str(gain_glyphs.0), // red/green light
-                            "E" => s.push_str(&reference_ticker(&self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
-                            "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
-                            "G" => s.push_str(&self.title),  // ticker company title
-                            "H" => s.push_str( // Market regular, pre, after
-                                if self.hours == 24 { "∞" }
-                                else { match self.market { 'r'=>"", 'p'=>"ρ", 'a'=>"α", _=>"?" } },
-                            ),
-                            "I" => s.push_str( if self.updated { "·" } else { "" } ),
-                            "%" => s.push_str("%"),
-                            "b" => s.push_str("*"),
-                            "i" => s.push_str("_"),
-                            "u" => s.push_str("__"),
-                            "s" => s.push_str("~"),
-                            "q" => s.push_str("`"),
-                            "n" => s.push_str("\n"),
-                            c => { s.push_str("%"); s.push_str(c) }
-                        }
-                    }
-                };
+                if let Some(m) = cap.get(2) { match m.as_str() {
+                    "A" => s.push_str(gain_glyphs.1), // Arrow
+                    "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
+                    "C" => s.push_str(&percent_squish(self.percent.abs())), // inter-day percent
+                    "D" => s.push_str(gain_glyphs.0), // red/green light
+                    "E" => s.push_str(&reference_ticker(&self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
+                    "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
+                    "G" => s.push_str(&self.title),  // ticker company title
+                    "H" => s.push_str( // Market regular, pre, after
+                        if self.hours == 24 { "∞" }
+                        else { match self.market { 'r'=>"", 'p'=>"ρ", 'a'=>"α", _=>"?" } },
+                    ),
+                    "I" => s.push_str( if self.updated { "·" } else { "" } ),
+                    c => fmt_decode_to(c, &mut s) }
+                } else {
+                    s.push_str(&cap[1])
+                }
                 s
-            }))
-        /* Ok(format!("`{:>6}` `{:>4}%``{}{} @{}` `{}``{}`{}",
-            format!("{}{}", gain_glyphs.1, money_pretty(self.amount.abs())),
-            percent_squish(self.percent.abs()),
-            gain_glyphs.0,
-            ticker_pretty,
-            money_pretty(self.price),
-            self.title,
-            if self.hours == 24 { "∞" } else { match self.market { 'r'=>"", 'p'=>"ρ", 'a'=>"α", _=>"?" } }, // regular, pre, after hours
-            if self.updated { "·" } else { "" },
-        )) */
+            } ) )
     } // Quote.format_quote
 }
 
@@ -768,6 +766,53 @@ impl Position {
             };
         hm.update_quote(cmd).await?;
         Ok(hm)
+    }
+}
+
+impl Position {
+    // Used by: do_trade_buy/sell -> execute_buy/sell, do_portfolio
+    fn format_position (&mut self, fmt :&str) -> Bresult<String> {
+        let qty = self.qty;
+        let cost = self.price;
+        let price = self.quote.as_ref().unwrap().price;
+        let last = self.quote.as_ref().unwrap().last;
+
+        let basis = qty*cost;
+        let value = qty*price;
+        let last_value = qty*last;
+
+        let gain = value - basis;
+        let day_gain = value - last_value;
+
+        let gain_percent = percentify(cost, price).abs();
+        let day_gain_percent = percentify(last, price).abs();
+
+        let gain_glyphs = amt_as_glyph(price-cost);
+        let day_gain_glyphs = amt_as_glyph(price-last);
+
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
+        .captures_iter(fmt)
+        .fold( String::new(), |mut s, cap| {
+            if let Some(m) = cap.get(2) { match m.as_str() {
+                "A" => s.push_str( &format!("{:.2}", roundcents(value)) ), // value
+                "B" => s.push_str( &round(gain.abs())), // gain
+                "C" => s.push_str( gain_glyphs.1), // Arrow
+                "D" => s.push_str( &percent_squish(gain_percent)), // gain%
+                "E" => s.push_str( gain_glyphs.0 ), // Color
+                "F" => s.push_str( &reference_ticker(&self.ticker).replacen("_", "\\_", 10000) ), // Ticker
+                "G" => s.push_str( &money_pretty(price) ), // latet stonks value
+                "H" => s.push_str( &if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string()} ), // qty
+                "I" => s.push_str( &roundkilofy(cost) ), // cost
+                "J" => s.push_str( day_gain_glyphs.0 ), // day color
+                "K" => s.push_str( &money_pretty(day_gain) ), // inter-day delta
+                "L" => s.push_str( day_gain_glyphs.1 ), // day arrow
+                "M" => s.push_str( &percent_squish(day_gain_percent) ), // inter-day percent
+                c => fmt_decode_to(c, &mut s) }
+            } else {
+                s.push_str(&cap[1]);
+            }
+            s
+        } ) )
     }
 }
 
@@ -857,82 +902,6 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
             bidask) )
 } // get_quote_pretty
 
-// Used by: do_trade_buy/sell -> execute_buy/sell, do_portfolio
-impl Position {
-    fn format_position (&mut self, fmt :&str) -> Bresult<String> {
-        let qty = self.qty;
-        let cost = self.price;
-        let price = self.quote.as_ref().unwrap().price;
-        let last = self.quote.as_ref().unwrap().last;
-
-        let basis = qty*cost;
-        let value = qty*price;
-        let last_value = qty*last;
-
-        let gain = value - basis;
-        let day_gain = value - last_value;
-
-        let gain_percent = (100.0 * (price-cost)/cost).abs();
-        let day_gain_percent = (100.0 * (price-last)/last).abs();
-
-        let gain_glyphs = if cost < price {
-                (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
-            } else if cost == price {
-                (from_utf8(b"\xF0\x9F\x94\xB7")?, "") // Blue diamond, nothing
-            } else {
-                (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
-            };
-        let day_gain_glyphs = if last < price {
-                (from_utf8(b"\xF0\x9F\x9F\xA2")?, from_utf8(b"\xE2\x86\x91")?) // Green circle, Arrow up
-            } else if last == price {
-                (from_utf8(b"\xF0\x9F\x94\xB7")?, "") // Blue diamond, nothing
-            } else {
-                (from_utf8(b"\xF0\x9F\x9F\xA5")?, from_utf8(b"\xE2\x86\x93")?) // Red square, Arrow down
-            };
-
-        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
-            .captures_iter(fmt)
-            .fold(String::new(), |mut s, cap|
-                match cap.get(2) {
-                    None => { // Regular character
-                        s.push_str(&cap[1]); s
-                    }
-                    m => { // Aliased character which needs expanding
-                        match m.unwrap().as_str() {
-                            "A" => s.push_str( &format!("{:.2}", roundcents(value)) ), // value
-                            "B" => s.push_str( &round(gain.abs())), // gain
-                            "C" => s.push_str( gain_glyphs.1), // Arrow
-                            "D" => s.push_str( &percent_squish(gain_percent)), // gain%
-                            "E" => s.push_str( gain_glyphs.0 ), // Color
-                            "F" => s.push_str( &reference_ticker(&self.ticker).replacen("_", "\\_", 10000) ), // Ticker
-                            "G" => s.push_str( &money_pretty(price) ), // latet stonks value
-                            "H" => s.push_str( &if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string() } ), // qty
-                            "I" => s.push_str( &roundkilofy(cost) ), // cost
-                            "J" => s.push_str( day_gain_glyphs.0 ), // day color
-                            "K" => s.push_str( &money_pretty(day_gain) ), // inter-day delta
-                            "L" => s.push_str( day_gain_glyphs.1 ), // day arrow
-                            "M" => s.push_str( &percent_squish(day_gain_percent) ), // inter-day percent
-            //"*Total %%* %A%C\n*Quote* %F"; // @fuzzie_wuzzie
-                            "%" => s.push_str("%"),
-                            "b" => s.push_str("*"),
-                            "i" => s.push_str("_"),
-                            "u" => s.push_str("__"),
-                            "s" => s.push_str("~"),
-                            "q" => s.push_str("`"),
-                            "n" => s.push_str("\n"),
-                            c => { s.push_str("%"); s.push_str(c) }
-                        }; s
-                    } } ) )
-        /*let pretty = format!("\n`{:>7.2}` `{:>6} {:>4}% {}{} @{}` `{}@{}`",
-            roundcents(value),
-            gainstr, percent_squish(gain_percent),
-            gain_glyphs.0, ticker, round(price),
-            // quantity goes here,
-            roundkilofy(cost)
-        );*/
-    }
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
@@ -993,14 +962,40 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn _do_curse (cmd:&Cmd) -> Bresult<&'static str> {
+async fn do_curse (cmd:&Cmd) -> Bresult<&'static str> {
     if Regex::new(r"/curse").unwrap().find(&cmd.msg).is_none() { return Ok("SKIP") }
+
     send_msg_markdown(cmd.into(), 
         ["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7]
     ).await?;
+
     Ok("COMPLETED.")
 }
 
+
+// Trying to delay an action
+async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
+    let caps =
+        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmd.msg) {
+            None => return Ok("SKIP".into()),
+            Some(caps) => caps
+        };
+
+    let delay = caps[1].parse::<u64>()?;
+    //let msg = caps[2].to_string();
+    //let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
+
+    let msgcmd :MsgCmd = cmd.into();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(delay));
+        error!("*************{:?}", msgcmd);
+        //let res = futures::executor::block_on(send_msg(msgcmd, &format!("{} {}", delay, msg)));
+        //info!("send_msg => {:?}", res)
+    });
+
+    //println!("join = {:?}", ::futures::join!(delay, sendmsg));
+    Ok("COMPLETED.")
+}
 async fn do_like (cmd:&Cmd) -> Bresult<String> {
 
     let amt =
@@ -1155,7 +1150,7 @@ async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
     if msg.is_empty() { send_msg(cmd.into(), "empty results").await?; }
     else { send_msg(cmd.into(), &msg).await?; }
 
-    Ok("Ok do_sql")
+    Ok("COMPLETED.")
 }
 
 async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
@@ -1932,25 +1927,6 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-/*
-// Trying to delay an action
-async fn do_repeat (env :&Env, cmd :&Cmd) -> Bresult<String> {
-    let caps =
-        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmd.msg) {
-            None => return Ok("SKIP".into()),
-            Some(caps) => caps
-        };
-
-    let id2 = cmd.id;
-    let delay = caps[1].parse::<u64>().unwrap();
-    let msg = caps[2].to_string();
-    let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
-    let sendmsg = send_msg(env, id2, &msg);
-    println!("join = {:?}", ::futures::join!(delay, sendmsg));
-    Ok("do_repeat done?".into())
-}
-*/
-
 async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
     let cap = Regex::new(r"^/fmt( ([qp?])[ ]?(.*)?)?$").unwrap().captures(&cmd.msg);
     if cap.is_none() { return Ok("SKIP"); }
@@ -2040,6 +2016,8 @@ async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
 
     glogd!("do_echo =>",      do_echo(&cmd).await);
     glogd!("do_help =>",      do_help(&cmd).await);
+    glogd!("do_curse =>",     do_curse(&cmd).await);
+    glogd!("do_repeat =>",    do_repeat(&cmd).await);
     glogd!("do_like =>",      do_like(&cmd).await);
     glogd!("do_like_info =>", do_like_info(&cmd).await);
     glogd!("do_def =>",       do_def(&cmd).await);
@@ -2213,8 +2191,8 @@ pub async fn launch() -> Bresult<()> {
             message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
             message_id_write:    0,
             message_buff_write:  String::new(),
-            fmt_quote:           "%q%B%A%C%% %D %E@%F %G %H%I%q".to_string(),
-            fmt_position:        "%n%q%A%q %q%C%B %D%%%E%F@%G%q %q%H@%I%q".to_string(),
+            fmt_quote:           "%q%B%A%C%% %D%E@%F %G%H%I%q".to_string(),
+            fmt_position:        "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q".to_string(),
         } ) );
 
     Ok( HttpServer::new(
@@ -2249,22 +2227,13 @@ fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fun () -> Bresult<()> {
-    let fmt = "%q%A%q %q%B%%%q %q%C%D@%E%q %q%F%q";
-    Ok(info!("{:?}", Regex::new("(%([A-Z])|.)").unwrap().captures_iter(fmt)
-        .fold(String::new(), |mut s, cap| {
-            match cap.get(2) {
-                None => { // Regular character
-                    s.push_str(&cap[1])
-                }
-                m => { // Aliased character which needs expanding
-                    match m.unwrap().as_str() {
-                        "A" => s.push_str("AA"),
-                        c => s.push_str(c)
-                    }
-                }
-            };
-            s
-        })))
+    println!("{} {} {} {} {}",
+        money_pretty(0.1000),
+        money_pretty(1.0990),
+        money_pretty(1.1190),
+        money_pretty(1.1220),
+        money_pretty(1.1230));
+     Ok(())
 }
    
 /*

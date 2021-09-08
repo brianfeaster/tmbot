@@ -27,6 +27,10 @@ fn _logger_init () {
     //log::error!("error"); log::warn!("warn"); log::info!("info"); log::debug!("debug"); log::trace!("trace"); 
 }
 
+fn _wat (s:&str) {
+    println!("{}", s);
+}
+
 #[actix_web::main]
 async fn main() {
     _logger_init();
