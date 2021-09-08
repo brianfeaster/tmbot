@@ -15,8 +15,8 @@ pub fn get_sql ( cmd :&str ) -> Bresult<Vec<HashMap<String, String>>> {
                 ary_of_tuples.iter()
                 .map( |(col,val)| (col.to_string(), val.unwrap_or("NULL").to_string()) )
                 .collect())
-            .map_err( |e| error!("get_sql_ snd.send => {:?}", e) )
-            .is_ok() // Function need to return a bool
+            .map_err( |e| error!("get_sql snd.send => {:?}", e) )
+            .is_ok() // Function needs to return a bool
         )?; // Must be used
 
     let sql = rcv.iter().collect();
