@@ -503,8 +503,8 @@ impl Quote {
         info!("{}", details);
 
         let title_raw =
-            &getin_str(&details, &["longName"])
-            .or_else( |_e| getin_str(&details, &["shortName"]) )?
+            &getin_str(&details, &["shortName"])
+            .or_else( |_e| getin_str(&details, &["longName"]) )?
             .replacen("'","",10000);
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
