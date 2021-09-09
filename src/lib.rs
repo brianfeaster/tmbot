@@ -2,7 +2,7 @@
 mod util;  pub use crate::util::*;
 mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
-mod db;    use crate::db::*;
+mod db;    //use crate::db::*;
 use ::std::{env,
     error::Error,
     mem::transmute,
@@ -298,7 +298,7 @@ fn deref_ticker (s :&str) -> Option<String> {
     // Expects:  @shrewm   Returns: Some(308188500)
     if &s[0..1] == "@" {
         // Quote is ID of whomever this nick matches
-        get_sql(&format!("SELECT id FROM entitys WHERE name={:?}", &s[1..]))
+        getsql!("SELECT id FROM entitys WHERE name=?", &s[1..])
             .ok()
             .filter( |v| 1 == v.len() )
             .map( |v| v[0].get("id").unwrap().to_string() )
@@ -308,7 +308,7 @@ fn deref_ticker (s :&str) -> Option<String> {
 // Transforms {USER_ID} to @user_nickname
 fn reference_ticker (t :&str) -> String {
     if is_self_stonk(t) {
-        get_sql(&format!("SELECT name FROM entitys WHERE id={}", t)) // Result<Vec, Err>
+        getsql!("SELECT name FROM entitys WHERE id=?", t) // Result<Vec, Err>
         .map_err( |e| error!("{:?}", e) )
         .ok()
         .filter( |v| 1 == v.len() )
@@ -327,10 +327,10 @@ fn is_self_stonk (s: &str) -> bool {
 /// Helpers on complex types
 
 fn get_bank_balance (id :i64) -> Bresult<f64> {
-    let res = get_sql(&format!("SELECT * FROM accounts WHERE id={}", id))?;
+    let res = getsql!("SELECT * FROM accounts WHERE id=?", id)?;
     Ok(
         if res.is_empty() {
-            let sql = get_sql(&format!("INSERT INTO accounts VALUES ({}, {})", id, 1000.0))?;
+            let sql = getsql!("INSERT INTO accounts VALUES (?, ?)", id, 1000.0)?;
             info!("{:?}", sql);
             1000.0
         } else {
@@ -344,7 +344,7 @@ fn get_bank_balance (id :i64) -> Bresult<f64> {
 }
 
 pub fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<Vec<HashMap<String, String>>> {
-    get_sql(&format!("INSERT INTO orders VALUES ({}, {:?}, {}, {}, {} )", id, ticker, qty, price, time))
+    getsql!("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", id, ticker, qty, price, time)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -444,7 +444,7 @@ impl Cmd {
             } else { Err("Nothing to do.")? };
 
         // Create hash map id -> echoLevel
-        let getsqlres = get_sql(&format!("SELECT id, echo FROM entitys NATURAL JOIN modes"))?;
+        let getsqlres = getsql!("SELECT id, echo FROM entitys NATURAL JOIN modes")?;
         let echo_levels =
             getsqlres.iter()
             .map( |hm| // tuple -> hashmap
@@ -452,7 +452,7 @@ impl Cmd {
                    hm.get_i64("echo").unwrap() ) )
             .collect::<HashMap<i64,i64>>();
 
-        let res = get_sql(&format!(r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id={:?}"#, id))?;
+        let res = getsql!(r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#, id)?;
 
         let (mut fmt_quote, mut fmt_position) =
             if res.is_empty() {
@@ -486,7 +486,7 @@ pub struct Quote {
     pub last: f64,  // Previous day's closing regular market price
     pub amount: f64, // Delta change since last
     pub percent: f64, // Delta % change since last
-    pub market: char, // 'p're 'r'egular 'p'ost
+    pub market: String, // 'p're 'r'egular 'p'ost
     pub hours: i64, // 16 or 24 (hours per day market trades)
     pub exchange: String,// Keep track of this to filter "PNK" exchanged securities.
     pub title: String, // Full title/name of security
@@ -503,9 +503,8 @@ impl Quote {
         info!("{}", details);
 
         let title_raw =
-            &getin_str(&details, &["shortName"])
-            .or_else( |_e| getin_str(&details, &["longName"]) )?
-            .replacen("'","",10000);
+            &getin_str(&details, &["longName"])
+            .or_else( |_e| getin_str(&details, &["shortName"]) )?;
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
             let title_new = title
@@ -540,9 +539,9 @@ impl Quote {
         // closing price for next day deltas.  Non-regular markets are basically forgotten
         // after the fact.
         let mut details = [
-            (pre_market_price, reg_market_price, 'p', getin_i64(&details, &["preMarketTime"]).unwrap_or(0)),
-            (reg_market_price, previous_close,   'r', getin_i64(&details, &["regularMarketTime"]).unwrap_or(0)),
-            (pst_market_price, previous_close,   'a', getin_i64(&details, &["postMarketTime"]).unwrap_or(0))];
+            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["preMarketTime"]).unwrap_or(0)),
+            (reg_market_price, previous_close,   "r", getin_i64(&details, &["regularMarketTime"]).unwrap_or(0)),
+            (pst_market_price, previous_close,   "a", getin_i64(&details, &["postMarketTime"]).unwrap_or(0))];
 
         /* // Log all prices for sysadmin requires "use ::datetime::ISO"
         use ::datetime::ISO;
@@ -561,7 +560,7 @@ impl Quote {
             price, last,
             amount:  roundqty(price-last),
             percent: percentify(last,price),
-            market:  details[0].2,
+            market:  details[0].2.to_string(),
             hours, exchange, title,
             updated: true})
     } // Quote::new_market_quote 
@@ -575,7 +574,7 @@ impl Quote {
         let now :i64 = Instant::now().seconds();
         let is_self_stonk = is_self_stonk(ticker);
 
-        let res = get_sql(&format!("SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker={:?}", ticker))?;
+        let res = getsql!("SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?", ticker)?;
         let is_in_table = !res.is_empty();
 
         let is_cache_valid = 
@@ -600,7 +599,7 @@ impl Quote {
                     price, last,
                     amount:   roundqty(price-last),
                     percent:  percentify(last,price),
-                    market:   hm.get_char("market")?,
+                    market:   hm.get_str("market")?,
                     hours:    hm.get_i64("hours")?,
                     exchange: hm.get_str("exchange")?,
                     title:    hm.get_str("title")?,
@@ -612,7 +611,7 @@ impl Quote {
                     last:    0.0,
                     amount:  0.0,
                     percent: 0.0,
-                    market:  'r',
+                    market:  "r".to_string(),
                     hours:   24,
                     exchange:"™BOT".to_string(),
                     title:   "FNFT".to_string(),
@@ -624,11 +623,11 @@ impl Quote {
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             if is_in_table {
-                get_sql(&format!("UPDATE stonks SET price={},last={},market={:?},time={} WHERE ticker={:?}",
-                    ticker.price, ticker.last, ticker.market, now, ticker.ticker))?
+                getsql!("UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
+                    ticker.price, ticker.last, ticker.market.as_str(), now, ticker.ticker.as_str())?
             } else {
-                get_sql(&format!("INSERT INTO stonks VALUES({:?},{},{},{:?},{},{:?},{},{:?})",
-                    ticker.ticker, ticker.price, ticker.last, ticker.market, ticker.hours, ticker.exchange, now, ticker.title))?
+                getsql!("INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
+                    ticker.ticker.as_str(), ticker.price, ticker.last, ticker.market.as_str(), ticker.hours, ticker.exchange.as_str(), now, ticker.title.as_str())?
             };
         }
 
@@ -680,7 +679,7 @@ impl Quote {
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
                         if self.hours == 24 { "∞" }
-                        else { match self.market { 'r'=>"", 'p'=>"ρ", 'a'=>"α", _=>"?" } },
+                        else { match self.market.as_str() { "r"=>"", "p"=>"ρ", "a"=>"α", _=>"?" } },
                     ),
                     "I" => s.push_str( if self.updated { "·" } else { "" } ),
                     c => fmt_decode_to(c, &mut s) }
@@ -713,7 +712,7 @@ impl Position {
 impl Position {
     // Return vector instead of option in case of box/short positions.
     fn get_position (id: i64, ticker: &str) -> Bresult<Vec<Position>> {
-        let positions = get_sql(&format!("SELECT qty,price FROM positions WHERE id={} AND ticker={:?}", id, ticker ))?;
+        let positions = getsql!("SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?;
         let mut res = Vec::new();
         for pos in positions {
             res.push(Position {
@@ -730,7 +729,7 @@ impl Position {
 
 impl Position {
     fn get_users_positions (id:i64) -> Bresult<Vec<Position>> {
-        let positions = get_sql(&format!("SELECT ticker,qty,price FROM positions WHERE id={}", id))?;
+        let positions = getsql!("SELECT ticker,qty,price FROM positions WHERE id=?", id)?;
         let mut res = Vec::new();
         for pos in positions {
             res.push(Position {
@@ -877,14 +876,14 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
     let bidask =
         if is_self_stonk(&ticker) {
             let mut asks = "*Asks:*".to_string();
-            for ask in get_sql(&format!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker={:?} order by price;", ticker))? {
+            for ask in getsql!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", ticker.as_str())? {
                 asks.push_str(&format!(" `{}@{}`",
                     num_simp(ask.get("qty").unwrap()),
                     ask.get_f64("price")?,
                 ));
             }
             let mut bids = "*Bids:*".to_string();
-            for bid in get_sql(&format!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker={:?} order by price desc;", ticker))? {
+            for bid in getsql!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", ticker.as_str())? {
                 bids.push_str(&format!(" `{}@{}`",
                     num_simp(bid.get("qty").unwrap()),
                     bid.get_f64("price")?,
@@ -918,14 +917,14 @@ async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
                 send_msg_markdown_id(cmd.into(), &msg).await?;
                 Err(msg)?
             }
-            get_sql(&format!("UPDATE modes set echo={} WHERE id={}", echo, cmd.at))?;
+            getsql!("UPDATE modes set echo=? WHERE id=?", echo, cmd.at)?;
             send_msg_markdown(cmd.level(0), &format!("`echo {} set verbosity {:.0}%`", echo, echo as f64/0.02)).await?;
         }
         Err(_) => { // Create or return existing echo level
-            let rows = get_sql(&format!("SELECT echo FROM modes WHERE id={}", cmd.at))?;
+            let rows = getsql!("SELECT echo FROM modes WHERE id=?", cmd.at)?;
             let mut echo = 2;
             if rows.len() == 0 { // Create/set echo level for this channel
-                get_sql(&format!("INSERT INTO modes values({}, {})", cmd.at, echo))?;
+                getsql!("INSERT INTO modes values(?, ?)", cmd.at, echo)?;
             } else {
                 echo = rows[0].get_i64("echo")?;
             }
@@ -1126,10 +1125,10 @@ async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
 
     if cmd.id != 308188500 { return Ok("do_sql invalid user"); }
     let rev = regex_to_vec("^(.*)ß$", &cmd.msg)?;
-    let expr = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
+    let expr :&str = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
 
     let results =
-        match get_sql(expr) {
+        match getsql!(expr) {
             Err(e)  => {
                 send_msg(cmd.into(), &format!("{:?}", e)).await?;
                 return Err(e)
@@ -1226,7 +1225,7 @@ async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
     let message_id = send_msg(cmd.level(1), &working_message).await?;
 
     // Update all user-positioned tickers
-    for row in get_sql("\
+    for row in getsql!("\
         SELECT ticker \
         FROM positions \
         WHERE positions.ticker NOT LIKE '0%' \
@@ -1282,7 +1281,7 @@ async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
                NATURAL JOIN accounts \
                NATURAL JOIN entitys \
                ORDER BY yolo DESC";
-    let results = get_sql(&sql)?;
+    let results = getsql!(&sql)?;
 
     // Build and send response string
 
@@ -1389,17 +1388,17 @@ impl ExecuteBuy {
         let mut msg = format!("*Bought:*");
 
         if obj.new_position_p {
-            get_sql(&format!("INSERT INTO positions VALUES ({}, {:?}, {}, {})", id, ticker, obj.new_qty, obj.new_basis))?;
+            getsql!("INSERT INTO positions VALUES (?, ?, ?, ?)", id, ticker.as_str(), obj.new_qty, obj.new_basis)?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
             info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.position.qty, obj.position.quote.as_ref().unwrap().price, obj.new_qty, obj.new_basis);
-            get_sql(&format!("UPDATE positions SET qty={}, price={} WHERE id={:?} AND ticker={:?}", obj.new_qty, obj.new_basis, id, ticker))?;
+            getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", obj.new_qty, obj.new_basis, id, ticker.as_str())?;
         }
         obj.position.qty = obj.new_qty;
         obj.position.price = obj.new_basis;
         msg += &obj.position.format_position(&cmd.env.fmt_position)?;
 
-        get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
+        getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
 
         Ok(Self{msg, tradebuycalc:obj})
     }
@@ -1509,15 +1508,15 @@ impl ExecuteSell {
         sql_table_order_insert(id, ticker, -qty, price, now)?;
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
-            get_sql(&format!("DELETE FROM positions WHERE id={} AND ticker={:?}", id, ticker))?;
+            getsql!("DELETE FROM positions WHERE id=? AND ticker=?", id, ticker.as_str())?;
             msg += &obj.position.format_position(&cmd.fmt_position)?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                 qty*price, ticker, qty, price,
                 &obj.position.format_position(&cmd.fmt_position)?);
-            get_sql(&format!("UPDATE positions SET qty={} WHERE id={:?} AND ticker={:?}", new_qty, id, ticker))?;
+            getsql!("UPDATE positions SET qty={} WHERE id=? AND ticker=?", new_qty, id, ticker.as_str())?;
         }
-        get_sql(&format!("UPDATE accounts SET balance={} WHERE id={}", obj.new_balance, id))?;
+        getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
         Ok(Self{msg, tradesell:obj})
     }
 }
@@ -1590,22 +1589,22 @@ impl QuoteCancelMine {
         let price = exquote.price;
         let mut msg = String::new();
 
-        let mut myasks = get_sql( &format!("SELECT * FROM exchange WHERE id={} AND ticker={:?} AND qty<0.0 ORDER BY price", id, ticker) )?;
+        let mut myasks = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND qty<0.0 ORDER BY price", id, ticker.as_str())?;
         let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get_f64("qty").unwrap() ).sum::<f64>());
-        let mut mybids = get_sql( &format!("SELECT * FROM exchange WHERE id={} AND ticker={:?} AND 0.0<=qty ORDER BY price DESC", id, ticker) )?;
+        let mut mybids = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND 0.0<=qty ORDER BY price DESC", id, ticker.as_str())?;
 
         if qty < 0.0 { // This is an ask exquote
             // Remove/decrement a matching bid in the current settled market
             if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
                 let bidqty = roundqty(mybid.get_f64("qty")?);
                 if bidqty <= -qty {
-                    get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", id, ticker, bidqty, price) )?;
+                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, ticker.as_str(), bidqty, price)?;
                     mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
                     qty = roundqty(qty + bidqty);
                     msg += &format!("\n*Removed bid:* `{}+{}@{}`", exquote.thing, bidqty, price);
                 } else {
                     let newbidqty = roundqty(bidqty+qty);
-                    get_sql( &format!("UPDATE exchange SET qty={} WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", newbidqty, id, ticker, bidqty, price) )?;
+                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, ticker.as_str(), bidqty, price)?;
                     mybid.insert("*UPDATED*".into(), format!("*QTY={:.}*", newbidqty));
                     qty = 0.0;
                     msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", exquote.thing, bidqty, price, newbidqty, price);
@@ -1616,13 +1615,13 @@ impl QuoteCancelMine {
             if let Some(myask) = myasks.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
                 let askqty = roundqty(myask.get_f64("qty")?);
                 if -askqty <= qty {
-                    get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", id, ticker, askqty, price) )?;
+                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, ticker.as_str(), askqty, price)?;
                     myask.insert("*UPDATED*".into(), "*REMOVED*".into());
                     qty = roundqty(qty + askqty);
                     msg += &format!("\n*Removed ask:* `{}{}@{}`", exquote.thing, askqty, price);
                 } else {
                     let newaskqty = roundqty(askqty+qty);
-                    get_sql( &format!("UPDATE exchange SET qty={} WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", newaskqty, id, ticker, askqty, price) )?;
+                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, ticker.as_str(), askqty, price)?;
                     myask.insert("*UPDATED*".into(), format!("*QTY={:.}*", newaskqty));
                     qty = 0.0;
                     msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", exquote.thing, askqty, price, newaskqty, price);
@@ -1655,8 +1654,8 @@ impl QuoteExecute {
         let asksqty = obj.myasksqty;
 
         // Other bids / asks (not mine) global since it's being updated and returned for logging
-        let mut bids = get_sql( &format!("SELECT * FROM exchange WHERE id!={} AND ticker={:?} AND 0.0<qty ORDER BY price DESC", id, ticker) )?;
-        let mut asks = get_sql( &format!("SELECT * FROM exchange WHERE id!={} AND ticker={:?} AND qty<0.0 ORDER BY price", id, ticker) )?;
+        let mut bids = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND 0.0<qty ORDER BY price DESC", id, ticker.as_str())?;
+        let mut asks = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND qty<0.0 ORDER BY price", id, ticker.as_str())?;
         let mut msg = obj.msg.to_string();
         let position = Position::query(id, ticker, cmd).await?;
         let posqty = position.qty;
@@ -1673,10 +1672,10 @@ impl QuoteExecute {
                     let xqty = aqty.min(-qty); // quantity exchanged is the smaller of the two (could be equal)
 
                     if xqty == aqty { // bid to be entirely settled
-                        get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", aid, ticker, aqty, aprice) )?;
+                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, ticker.as_str(), aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), "*REMOVED*".into());
                     } else {
-                        get_sql( &format!("UPDATE exchange set qty={} WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", aqty-xqty, aid, ticker, aqty, aprice) )?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, ticker.as_str(), aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), format!("*qty={}*", aqty-xqty));
                     }
 
@@ -1686,8 +1685,8 @@ impl QuoteExecute {
 
                     // Update each user's account
                     let value = xqty * aprice;
-                    get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}",  value, id) )?;
-                    get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}", -value, aid) )?;
+                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?",  value, id)?;
+                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?", -value, aid)?;
 
                     msg += &format!("\n*Settled:*\n{} `{}{:+}@{}` <-> `${}` {}",
                             reference_ticker(&id.to_string()), obj.exquote.thing, xqty, aprice,
@@ -1696,9 +1695,9 @@ impl QuoteExecute {
                     // Update my position
                     let newposqty = roundqty(posqty - xqty);
                     if 0.0 == newposqty {
-                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker={:?} AND qty = {}", id, ticker, posqty) )?;
+                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, ticker.as_str(), posqty)?;
                     } else {
-                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker={:?} AND qty = {}", newposqty, id, ticker, posqty) )?;
+                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newposqty, id, ticker.as_str(), posqty)?;
                     }
 
                     // Update buyer's position
@@ -1707,16 +1706,16 @@ impl QuoteExecute {
                     let aposprice = aposition.price;
 
                     if 0.0 == aposqty {
-                        get_sql( &format!("INSERT INTO positions values({}, {:?}, {}, {})", aid, ticker, xqty, value) )?;
+                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", aid, ticker.as_str(), xqty, value)?;
                     } else {
                         let newaposqty = roundqty(aposqty+aqty);
                         let newaposcost = (aposprice + value) / (aposqty + xqty);
-                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker={:?} AND qty = {}", newaposqty, newaposcost, aid, ticker, aposqty) )?;
+                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newaposqty, newaposcost, aid, ticker.as_str(), aposqty)?;
                     }
 
                     // Update stonk exquote value
                     let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    get_sql( &format!("UPDATE stonks SET price={}, last={}, time={:?} WHERE ticker={}", aprice, last_price, now, ticker) )?;
+                    getsql!("UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, ticker.as_str())?;
 
                     qty = roundqty(qty+xqty);
                     if 0.0 <= qty { break }
@@ -1728,11 +1727,11 @@ impl QuoteExecute {
                         let oldqty = myask.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty); // both negative, so "increased" ask qty
                         let mytime = myask.get_i64("time").unwrap();
-                        get_sql(&format!("UPDATE exchange set qty={} WHERE id={} AND ticker={:?} AND price = {} AND time={}", newqty, id, ticker, price, mytime))?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, ticker.as_str(), price, mytime)?;
                         myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        get_sql(&format!("INSERT INTO exchange VALUES ({}, {:?}, {:.4}, {:.4}, {})", id, ticker, qty, price, now))?;
+                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, ticker.as_str(), format!("{:.4}", qty).as_str(), format!("{:.4}", price).as_str(), now)?;
                         // Add a fake entry to local myasks vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -1764,11 +1763,11 @@ impl QuoteExecute {
                     let xqty = roundqty(qty.min(-aqty)); // quantity exchanged is the smaller of the two (could be equal)
 
                     if xqty == -aqty { // ask to be entirely settled
-                        get_sql( &format!("DELETE FROM exchange WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", aid, ticker, aqty, aprice) )?;
+                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, ticker.as_str(), aqty, aprice)?;
                         aask.insert("*UPDATED*".into(), "*REMOVED*".into());
                     } else {
                         let newqty = aqty+xqty;
-                        get_sql( &format!("UPDATE exchange set qty={} WHERE id={} AND ticker={:?} AND qty = {} AND price = {}", newqty, aid, ticker, aqty, aprice) )?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, ticker.as_str(), aqty, aprice)?;
                         aask.insert("*UPDATED*".into(), format!("*qty={}*", newqty));
                     }
 
@@ -1779,8 +1778,8 @@ impl QuoteExecute {
 
                     // Update each user's account
                     let value = xqty * aprice;
-                    get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}", -value, id) )?;
-                    get_sql( &format!("UPDATE accounts SET balance=balance+{} WHERE id={}",  value, aid) )?;
+                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?", -value, id)?;
+                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?",  value, aid)?;
 
                     msg += &format!("\n*Settled:*\n{} `${}` <-> `{}{:+}@{}` {}",
                             reference_ticker(&id.to_string()), value,
@@ -1788,11 +1787,11 @@ impl QuoteExecute {
 
                     // Update my position
                     if 0.0 == posqty {
-                        get_sql( &format!("INSERT INTO positions values({}, {:?}, {}, {})", id, ticker, xqty, value) )?;
+                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", id, ticker.as_str(), xqty, value)?;
                     } else {
                         let newposqty = roundqty(posqty+xqty);
                         let newposcost = (posprice + value) / (posqty + xqty);
-                        get_sql( &format!("UPDATE positions SET qty={}, price={} WHERE id={} AND ticker={:?} AND qty = {}", newposqty, newposcost, id, ticker, posqty) )?;
+                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newposqty, newposcost, id, ticker.as_str(), posqty)?;
                     }
 
                     // Update their position
@@ -1800,14 +1799,14 @@ impl QuoteExecute {
                     let aposqty = aposition.qty;
                     let newaposqty = roundqty(aposqty - xqty);
                     if 0.0 == newaposqty {
-                        get_sql( &format!("DELETE FROM positions WHERE id={} AND ticker={:?} AND qty = {}", aid, ticker, aposqty) )?;
+                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", aid, ticker.as_str(), aposqty)?;
                     } else {
-                        get_sql( &format!("UPDATE positions SET qty={} WHERE id={} AND ticker={:?} AND qty = {}", newaposqty, aid, ticker, aposqty) )?;
+                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newaposqty, aid, ticker.as_str(), aposqty)?;
                     }
 
                     // Update self-stonk exquote value
                     let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    get_sql( &format!("UPDATE stonks SET price={}, last={}, time={}, WHERE ticker={}", aprice, last_price, now, ticker) )?;
+                    getsql!("UPDATE stonks SET price=?, last=?, time=?, WHERE ticker=?", aprice, last_price, now, ticker.as_str())?;
 
                     qty = roundqty(qty-xqty);
                     if qty <= 0.0 { break }
@@ -1819,11 +1818,11 @@ impl QuoteExecute {
                         let oldqty = mybid.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty);
                         let mytime = mybid.get_i64("time").unwrap();
-                        get_sql(&format!("UPDATE exchange set qty={} WHERE id={} AND ticker={:?} AND price = {} AND time={}", newqty, id, ticker, price, mytime))?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, ticker.as_str(), price, mytime)?;
                         mybid.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        get_sql(&format!("INSERT INTO exchange VALUES ({}, {:?}, {:.4}, {:.4}, {})", id, ticker, qty, price, now))?;
+                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, ticker.as_str(), format!("{:.4}",qty).as_str(), format!("{:.4}",price).as_str(), now)?;
                         // Add a fake entry to local mybids vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -1861,7 +1860,7 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
     let id = cmd.id;
     let mut asks = String::from("");
     let mut bids = String::from("");
-    for order in get_sql( &format!("SELECT * FROM exchange WHERE id={}", id) )? {
+    for order in getsql!("SELECT * FROM exchange WHERE id=?", id)? {
         let ticker = order.get("ticker").unwrap();
         let stonk = reference_ticker(ticker).replacen("_", "\\_", 10000);
         let qty = order.get_f64("qty")?;
@@ -1884,7 +1883,7 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
         AND id NOT IN (SELECT ticker FROM positions WHERE id={} GROUP BY ticker)
             UNION \
         SELECT * FROM positions WHERE id={} AND ticker IN (SELECT id FROM entitys WHERE 0<id)", id, id, id);
-    for pos in get_sql(&sql)? {
+    for pos in getsql!(sql)? {
         if is_self_stonk(pos.get("ticker").unwrap()) {
             let mut pos = Position {
                 quote: None,
@@ -1933,7 +1932,7 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
     let cap = cap.unwrap();
 
     if cap.get(1) == None {
-        let res = get_sql(&format!(r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id={}"#, cmd.id))?;
+        let res = getsql!(r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#, cmd.id)?;
         let fmt_quote =
             if res.is_empty() || res[0].get_str("quote")?.is_empty() {
                 format!("DEFAULT {:?}", cmd.fmt_quote.to_string())
@@ -1995,16 +1994,16 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
 
     info!("set format {} to {:?}", c, s);
 
-    let res = get_sql(&format!("SELECT id FROM formats WHERE id={}", cmd.id))?;
+    let res = getsql!("SELECT id FROM formats WHERE id=?", cmd.id)?;
     if res.is_empty() {
-        get_sql(&format!(r#"INSERT INTO formats VALUES ({}, "", "")"#, cmd.id))?;
+        getsql!(r#"INSERT INTO formats VALUES (?, "", "")"#, cmd.id)?;
     }
 
     // notify user the change
     send_msg(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
 
     // make change to DB
-    get_sql(&format!(r#"UPDATE formats SET {}="{}" WHERE id={}"#, c, s.replacen("\"", "\"\"", 10000), cmd.id))?;
+    getsql!(r#"UPDATE formats SET ?=? WHERE id=?"#, c, s.replacen("\"", "\"\"", 10000).as_str(), cmd.id)?;
 
     Ok("COMPLETED.")
 }
@@ -2227,7 +2226,7 @@ fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fun () -> Bresult<()> {
-    for a in get_sql("SELECT * FROM stonks")? {
+    for a in getsql!("SELECT * FROM stonks WHERE title like ?", "%'%")? {
       println!("{:?}", a);
     }
     Ok(())
@@ -2238,5 +2237,5 @@ fn fun () -> Bresult<()> {
   CREATE TABLE users (name TEXT, age INTEGER)
   INSERT INTO  users VALUES ('Alice', 42)
   DELETE FROM  users WHERE age=42 AND name="Oskafunoioi"
-  UPDATE       users SET a=1, b=2  WHERE c=3
+  UPDATE       ukjsers SET a=1, b=2  WHERE c=3
 */
