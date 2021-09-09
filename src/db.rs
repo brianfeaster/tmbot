@@ -8,8 +8,8 @@ macro_rules! getsql {
         info!("SQLite <= \x1b[1;36m{}", $cmd);
         let connection = ::sqlite::open( "tmbot.sqlite" )?;
         let statement = connection.prepare( $cmd )?;
-        let col_names = statement.column_names().iter().map( |e| e.to_string() ).collect::<Vec<String>>();
-        let mut cursor = statement.into_cursor();
+        let col_names = ::sqlite::Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
+        let mut cursor = ::sqlite::Statement::into_cursor(statement);
         let mut rows :Vec<HashMap<String,String>> = Vec::new();
         while let Some(vals) = cursor.next()? {
             rows.push(
@@ -39,8 +39,8 @@ macro_rules! getsql {
             info!("SQLite    \x1b[1;36m{} {}", placeholderidx, $x);
             statement.bind(placeholderidx, $x)?;
         )*
-        let col_names = statement.column_names().iter().map( |e| e.to_string() ).collect::<Vec<String>>();
-        let mut cursor = statement.into_cursor();
+        let col_names = ::sqlite::Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
+        let mut cursor = ::sqlite::Statement::into_cursor(statement);
         let mut rows :Vec<HashMap<String,String>> = Vec::new();
         while let Some(vals) = cursor.next()? {
             rows.push(
