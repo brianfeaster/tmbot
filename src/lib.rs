@@ -2227,13 +2227,10 @@ fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fun () -> Bresult<()> {
-    println!("{} {} {} {} {}",
-        money_pretty(0.1000),
-        money_pretty(1.0990),
-        money_pretty(1.1190),
-        money_pretty(1.1220),
-        money_pretty(1.1230));
-     Ok(())
+    for a in get_sql("SELECT * FROM stonks")? {
+      println!("{:?}", a);
+    }
+    Ok(())
 }
    
 /*
