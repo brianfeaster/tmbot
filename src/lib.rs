@@ -1514,7 +1514,7 @@ impl ExecuteSell {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                 qty*price, ticker, qty, price,
                 &obj.position.format_position(&cmd.fmt_position)?);
-            getsql!("UPDATE positions SET qty={} WHERE id=? AND ticker=?", new_qty, id, ticker.as_str())?;
+            getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, ticker.as_str())?;
         }
         getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
         Ok(Self{msg, tradesell:obj})
