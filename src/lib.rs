@@ -956,6 +956,8 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
 `gme-$.9` `Sell 90¢ worth`
 `@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
 `@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
+`/rebalance 9.99 AMC 40 QQQ 60`
+   `rebalances AMC/40% QQQ/60% + optional $9.99`
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`", delay)).await?;
     Ok("COMPLETED.")
@@ -2027,6 +2029,13 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         .collect::<HashMap<String, f64>>();
     //error!("{:?}", percents);
 
+    // Refresh stonk quotes
+    for ticker in percents.keys() {
+        if !is_self_stonk(&ticker) {
+            Quote::get_market_quote(cmd, &ticker).await?;
+        }
+    }
+
     let mut positions = getsql!(format!(
         r#"SELECT pos.ticker, ROUND(pos.qty*stonks.price,2) AS value
         FROM (SELECT ticker,qty FROM positions WHERE id={} AND ticker IN ("{}")) pos
@@ -2047,7 +2056,7 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
             info!("rebalance position {:?}", positions[i]);
             send_msg(
-                cmd.level(1),
+                cmd.into(),
                 &format!("Suggested trade: {}-${}",
                     &positions[i].get_str("ticker")?,
                     &positions[i].get_str("diff")?[1..])).await?;
@@ -2057,7 +2066,7 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
             info!("rebalance position {:?}", positions[i]);
             send_msg(
-                cmd.level(1),
+                cmd.into(),
                 &format!("Suggested trade: {}+${}",
                     &positions[i].get_str("ticker")?,
                     &positions[i].get_str("diff")?)).await?;
