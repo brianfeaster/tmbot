@@ -2013,9 +2013,11 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     let caps = regex_to_vec(
-        r"^/REBALANCE( ([0-9]+[.]?|([0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* [0-9]+)+)",
+        r"^/REBALANCE( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* [0-9]+)+)",
         &cmd.msg.to_uppercase() )?;
     if caps.is_empty() { return Ok("SKIP") }
+
+    let message_id = send_msg(cmd.into(), "...").await?;
 
     let mut total :f64 = caps.as_f64(2).unwrap_or(0.0);
 
@@ -2032,7 +2034,10 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     // Refresh stonk quotes
     for ticker in percents.keys() {
         if !is_self_stonk(&ticker) {
-            Quote::get_market_quote(cmd, &ticker).await?;
+            match Quote::get_market_quote(cmd, &ticker).await {
+                Err(e) => warn!("{:?}", e),
+                _ => ()
+            }
         }
     }
 
@@ -2046,30 +2051,37 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     total += positions.iter().map(|hm|hm.get_f64("value").unwrap()).sum::<f64>();
     info!("rebalance total {}", total);
 
+    if 0==positions.len() {
+        send_edit_msg(cmd.into(), message_id, "no valid tickers").await?;
+    }
+
     for i in 0..positions.len() {
         let ticker = positions[i].get_str("ticker")?;
         let value = positions[i].get_f64("value")?;
         let diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
         positions[i].insert("diff".to_string(), diff.to_string());
     }
+
+    let mut msg = "Suggested Trades".to_string();
     for i in 0..positions.len() {
         if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
             info!("rebalance position {:?}", positions[i]);
-            send_msg(
-                cmd.into(),
-                &format!("Suggested trade: {}-${}",
+            msg.push_str(
+                &format!("\n{}-${}",
                     &positions[i].get_str("ticker")?,
-                    &positions[i].get_str("diff")?[1..])).await?;
+                    &positions[i].get_str("diff")?[1..]));
+            send_edit_msg(cmd.into(), message_id, &msg).await?;
         }
     }
     for i in 0..positions.len() {
         if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
             info!("rebalance position {:?}", positions[i]);
-            send_msg(
-                cmd.into(),
-                &format!("Suggested trade: {}+${}",
+            msg.push_str(
+                &format!("\n{}+${}",
                     &positions[i].get_str("ticker")?,
-                    &positions[i].get_str("diff")?)).await?;
+                    &positions[i].get_str("diff")?));
+            send_edit_msg(cmd.into(), message_id, &msg).await?;
+
         }
     }
 

@@ -49,7 +49,7 @@ pub async fn send_msg_markdown(mc:MsgCmd, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, false, true, None, text).await
 }
 
-pub async fn _send_edit_msg(mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
+pub async fn send_edit_msg(mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, true, false, Some(edit_msg_id), text).await
 }
 
