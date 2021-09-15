@@ -2,7 +2,7 @@
 mod util;  pub use crate::util::*;
 mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
-mod db;    //use crate::db::*;
+mod db;
 use ::std::{env,
     error::Error,
     mem::transmute,
@@ -624,10 +624,10 @@ impl Quote {
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             if is_in_table {
                 getsql!("UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
-                    ticker.price, ticker.last, ticker.market.as_str(), now, ticker.ticker.as_str())?
+                    ticker.price, ticker.last, &*ticker.market, now, ticker.ticker.as_str())?
             } else {
                 getsql!("INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
-                    ticker.ticker.as_str(), ticker.price, ticker.last, ticker.market.as_str(), ticker.hours, ticker.exchange.as_str(), now, ticker.title.as_str())?
+                    &*ticker.ticker, ticker.price, ticker.last, &*ticker.market, ticker.hours, &*ticker.exchange, now, &*ticker.title)?
             };
         }
 
@@ -679,7 +679,7 @@ impl Quote {
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
                         if self.hours == 24 { "∞" }
-                        else { match self.market.as_str() { "r"=>"", "p"=>"ρ", "a"=>"α", _=>"?" } },
+                        else { match &*self.market { "r"=>"", "p"=>"ρ", "a"=>"α", _=>"?" } },
                     ),
                     "I" => s.push_str( if self.updated { "·" } else { "" } ),
                     c => fmt_decode_to(c, &mut s) }
@@ -876,14 +876,14 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
     let bidask =
         if is_self_stonk(&ticker) {
             let mut asks = "*Asks:*".to_string();
-            for ask in getsql!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", ticker.as_str())? {
+            for ask in getsql!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker)? {
                 asks.push_str(&format!(" `{}@{}`",
                     num_simp(ask.get("qty").unwrap()),
                     ask.get_f64("price")?,
                 ));
             }
             let mut bids = "*Bids:*".to_string();
-            for bid in getsql!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", ticker.as_str())? {
+            for bid in getsql!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker)? {
                 bids.push_str(&format!(" `{}@{}`",
                     num_simp(bid.get("qty").unwrap()),
                     bid.get_f64("price")?,
@@ -1388,11 +1388,11 @@ impl ExecuteBuy {
         let mut msg = format!("*Bought:*");
 
         if obj.new_position_p {
-            getsql!("INSERT INTO positions VALUES (?, ?, ?, ?)", id, ticker.as_str(), obj.new_qty, obj.new_basis)?;
+            getsql!("INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.new_basis)?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
             info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.position.qty, obj.position.quote.as_ref().unwrap().price, obj.new_qty, obj.new_basis);
-            getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", obj.new_qty, obj.new_basis, id, ticker.as_str())?;
+            getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", obj.new_qty, obj.new_basis, id, &**ticker)?;
         }
         obj.position.qty = obj.new_qty;
         obj.position.price = obj.new_basis;
@@ -1508,13 +1508,13 @@ impl ExecuteSell {
         sql_table_order_insert(id, ticker, -qty, price, now)?;
         let mut msg = format!("*Sold:*");
         if new_qty == 0.0 {
-            getsql!("DELETE FROM positions WHERE id=? AND ticker=?", id, ticker.as_str())?;
+            getsql!("DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
             msg += &obj.position.format_position(&cmd.fmt_position)?;
         } else {
             msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                 qty*price, ticker, qty, price,
                 &obj.position.format_position(&cmd.fmt_position)?);
-            getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, ticker.as_str())?;
+            getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
         }
         getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
         Ok(Self{msg, tradesell:obj})
@@ -1589,22 +1589,22 @@ impl QuoteCancelMine {
         let price = exquote.price;
         let mut msg = String::new();
 
-        let mut myasks = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND qty<0.0 ORDER BY price", id, ticker.as_str())?;
+        let mut myasks = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND qty<0.0 ORDER BY price", id, &**ticker)?;
         let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get_f64("qty").unwrap() ).sum::<f64>());
-        let mut mybids = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND 0.0<=qty ORDER BY price DESC", id, ticker.as_str())?;
+        let mut mybids = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND 0.0<=qty ORDER BY price DESC", id, &**ticker)?;
 
         if qty < 0.0 { // This is an ask exquote
             // Remove/decrement a matching bid in the current settled market
             if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
                 let bidqty = roundqty(mybid.get_f64("qty")?);
                 if bidqty <= -qty {
-                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, ticker.as_str(), bidqty, price)?;
+                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, bidqty, price)?;
                     mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
                     qty = roundqty(qty + bidqty);
                     msg += &format!("\n*Removed bid:* `{}+{}@{}`", exquote.thing, bidqty, price);
                 } else {
                     let newbidqty = roundqty(bidqty+qty);
-                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, ticker.as_str(), bidqty, price)?;
+                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, &**ticker, bidqty, price)?;
                     mybid.insert("*UPDATED*".into(), format!("*QTY={:.}*", newbidqty));
                     qty = 0.0;
                     msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", exquote.thing, bidqty, price, newbidqty, price);
@@ -1615,13 +1615,13 @@ impl QuoteCancelMine {
             if let Some(myask) = myasks.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
                 let askqty = roundqty(myask.get_f64("qty")?);
                 if -askqty <= qty {
-                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, ticker.as_str(), askqty, price)?;
+                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, askqty, price)?;
                     myask.insert("*UPDATED*".into(), "*REMOVED*".into());
                     qty = roundqty(qty + askqty);
                     msg += &format!("\n*Removed ask:* `{}{}@{}`", exquote.thing, askqty, price);
                 } else {
                     let newaskqty = roundqty(askqty+qty);
-                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, ticker.as_str(), askqty, price)?;
+                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, &**ticker, askqty, price)?;
                     myask.insert("*UPDATED*".into(), format!("*QTY={:.}*", newaskqty));
                     qty = 0.0;
                     msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", exquote.thing, askqty, price, newaskqty, price);
@@ -1654,8 +1654,8 @@ impl QuoteExecute {
         let asksqty = obj.myasksqty;
 
         // Other bids / asks (not mine) global since it's being updated and returned for logging
-        let mut bids = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND 0.0<qty ORDER BY price DESC", id, ticker.as_str())?;
-        let mut asks = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND qty<0.0 ORDER BY price", id, ticker.as_str())?;
+        let mut bids = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND 0.0<qty ORDER BY price DESC", id, &**ticker)?;
+        let mut asks = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND qty<0.0 ORDER BY price", id, &**ticker)?;
         let mut msg = obj.msg.to_string();
         let position = Position::query(id, ticker, cmd).await?;
         let posqty = position.qty;
@@ -1672,10 +1672,10 @@ impl QuoteExecute {
                     let xqty = aqty.min(-qty); // quantity exchanged is the smaller of the two (could be equal)
 
                     if xqty == aqty { // bid to be entirely settled
-                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, ticker.as_str(), aqty, aprice)?;
+                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), "*REMOVED*".into());
                     } else {
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, ticker.as_str(), aqty, aprice)?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, &**ticker, aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), format!("*qty={}*", aqty-xqty));
                     }
 
@@ -1695,9 +1695,9 @@ impl QuoteExecute {
                     // Update my position
                     let newposqty = roundqty(posqty - xqty);
                     if 0.0 == newposqty {
-                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, ticker.as_str(), posqty)?;
+                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, &**ticker, posqty)?;
                     } else {
-                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newposqty, id, ticker.as_str(), posqty)?;
+                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newposqty, id, &**ticker, posqty)?;
                     }
 
                     // Update buyer's position
@@ -1706,16 +1706,16 @@ impl QuoteExecute {
                     let aposprice = aposition.price;
 
                     if 0.0 == aposqty {
-                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", aid, ticker.as_str(), xqty, value)?;
+                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", aid, &**ticker, xqty, value)?;
                     } else {
                         let newaposqty = roundqty(aposqty+aqty);
                         let newaposcost = (aposprice + value) / (aposqty + xqty);
-                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newaposqty, newaposcost, aid, ticker.as_str(), aposqty)?;
+                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newaposqty, newaposcost, aid, &**ticker, aposqty)?;
                     }
 
                     // Update stonk exquote value
                     let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    getsql!("UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, ticker.as_str())?;
+                    getsql!("UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                     qty = roundqty(qty+xqty);
                     if 0.0 <= qty { break }
@@ -1727,11 +1727,11 @@ impl QuoteExecute {
                         let oldqty = myask.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty); // both negative, so "increased" ask qty
                         let mytime = myask.get_i64("time").unwrap();
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, ticker.as_str(), price, mytime)?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
                         myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, ticker.as_str(), format!("{:.4}", qty).as_str(), format!("{:.4}", price).as_str(), now)?;
+                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}", qty), &*format!("{:.4}", price), now)?;
                         // Add a fake entry to local myasks vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -1763,11 +1763,11 @@ impl QuoteExecute {
                     let xqty = roundqty(qty.min(-aqty)); // quantity exchanged is the smaller of the two (could be equal)
 
                     if xqty == -aqty { // ask to be entirely settled
-                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, ticker.as_str(), aqty, aprice)?;
+                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
                         aask.insert("*UPDATED*".into(), "*REMOVED*".into());
                     } else {
                         let newqty = aqty+xqty;
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, ticker.as_str(), aqty, aprice)?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, &**ticker, aqty, aprice)?;
                         aask.insert("*UPDATED*".into(), format!("*qty={}*", newqty));
                     }
 
@@ -1787,11 +1787,11 @@ impl QuoteExecute {
 
                     // Update my position
                     if 0.0 == posqty {
-                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", id, ticker.as_str(), xqty, value)?;
+                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
                     } else {
                         let newposqty = roundqty(posqty+xqty);
                         let newposcost = (posprice + value) / (posqty + xqty);
-                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newposqty, newposcost, id, ticker.as_str(), posqty)?;
+                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newposqty, newposcost, id, &**ticker, posqty)?;
                     }
 
                     // Update their position
@@ -1799,14 +1799,14 @@ impl QuoteExecute {
                     let aposqty = aposition.qty;
                     let newaposqty = roundqty(aposqty - xqty);
                     if 0.0 == newaposqty {
-                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", aid, ticker.as_str(), aposqty)?;
+                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", aid, &**ticker, aposqty)?;
                     } else {
-                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newaposqty, aid, ticker.as_str(), aposqty)?;
+                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newaposqty, aid, &**ticker, aposqty)?;
                     }
 
                     // Update self-stonk exquote value
                     let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    getsql!("UPDATE stonks SET price=?, last=?, time=?, WHERE ticker=?", aprice, last_price, now, ticker.as_str())?;
+                    getsql!("UPDATE stonks SET price=?, last=?, time=?, WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                     qty = roundqty(qty-xqty);
                     if qty <= 0.0 { break }
@@ -1818,11 +1818,11 @@ impl QuoteExecute {
                         let oldqty = mybid.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty);
                         let mytime = mybid.get_i64("time").unwrap();
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, ticker.as_str(), price, mytime)?;
+                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
                         mybid.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, ticker.as_str(), format!("{:.4}",qty).as_str(), format!("{:.4}",price).as_str(), now)?;
+                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}",qty), &*format!("{:.4}",price), now)?;
                         // Add a fake entry to local mybids vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -2003,7 +2003,66 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
     send_msg(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
 
     // make change to DB
-    getsql!(r#"UPDATE formats SET ?=? WHERE id=?"#, c, s.replacen("\"", "\"\"", 10000).as_str(), cmd.id)?;
+    getsql!(r#"UPDATE formats SET ?=? WHERE id=?"#, c, &*s.replacen("\"", "\"\"", 10000), cmd.id)?;
+
+    Ok("COMPLETED.")
+}
+
+
+async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
+    let caps = regex_to_vec(
+        r"^/REBALANCE( ([0-9]+[.]?|([0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* [0-9]+)+)",
+        &cmd.msg.to_uppercase() )?;
+    if caps.is_empty() { return Ok("SKIP") }
+
+    let mut total :f64 = caps.as_f64(2).unwrap_or(0.0);
+
+    let percents =
+        Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) ([0-9]+[.]?|([0-9]*[.][0-9]{1,2}))")?
+        .captures_iter(&caps.as_string(4)?)
+        .map(|cap| (
+            cap.get(1).unwrap().as_str().to_string(),
+            cap.get(2).unwrap().as_str().parse::<f64>().unwrap() / 100.0
+        ))
+        .collect::<HashMap<String, f64>>();
+    //error!("{:?}", percents);
+
+    let mut positions = getsql!(format!(
+        r#"SELECT pos.ticker, ROUND(pos.qty*stonks.price,2) AS value
+        FROM (SELECT ticker,qty FROM positions WHERE id={} AND ticker IN ("{}")) pos
+        LEFT JOIN stonks ON pos.ticker=stonks.ticker"#,
+        cmd.id,
+        percents.keys().map(|e|e.to_string()).collect::<Vec<String>>().join("\",\"")))?;
+
+    total += positions.iter().map(|hm|hm.get_f64("value").unwrap()).sum::<f64>();
+    info!("rebalance total {}", total);
+
+    for i in 0..positions.len() {
+        let ticker = positions[i].get_str("ticker")?;
+        let value = positions[i].get_f64("value")?;
+        let diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
+        positions[i].insert("diff".to_string(), diff.to_string());
+    }
+    for i in 0..positions.len() {
+        if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
+            info!("rebalance position {:?}", positions[i]);
+            send_msg(
+                cmd.level(1),
+                &format!("Suggested trade: {}-${}",
+                    &positions[i].get_str("ticker")?,
+                    &positions[i].get_str("diff")?[1..])).await?;
+        }
+    }
+    for i in 0..positions.len() {
+        if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
+            info!("rebalance position {:?}", positions[i]);
+            send_msg(
+                cmd.level(1),
+                &format!("Suggested trade: {}+${}",
+                    &positions[i].get_str("ticker")?,
+                    &positions[i].get_str("diff")?)).await?;
+        }
+    }
 
     Ok("COMPLETED.")
 }
@@ -2029,6 +2088,7 @@ async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_exchange_bidask =>", do_exchange_bidask(&cmd).await);
     glogd!("do_orders =>", do_orders(&cmd).await);
     glogd!("do_fmt =>",       do_fmt(&cmd).await);
+    glogd!("do_rebalance =>", do_rebalance(&cmd).await);
 
     // Copy back important altered state for next time.
     env.message_id_read = cmd.env.message_id_read;

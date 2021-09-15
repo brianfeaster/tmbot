@@ -1,10 +1,9 @@
 //use crate::*;
-//use ::sqlite::*;
+//pub use sqlite::*;
 
 #[macro_export]
 macro_rules! getsql {
-    ( $cmd:expr ) => 
-    {(|| -> Bresult<Vec<HashMap<String, String>>> {
+    ( $cmd:expr ) => {(|| -> Bresult<Vec<HashMap<String, String>>> {
         info!("SQLite <= \x1b[1;36m{}", $cmd);
         let connection = ::sqlite::open( "tmbot.sqlite" )?;
         let statement = connection.prepare( $cmd )?;
@@ -28,8 +27,7 @@ macro_rules! getsql {
         Bresult::Ok(rows)
     })()};
 
-    ( $cmd:expr, $( $x:expr ),* ) =>
-    {(|| -> Bresult<Vec<HashMap<String, String>>> {
+    ( $cmd:expr, $( $x:expr ),* ) => {(|| -> Bresult<Vec<HashMap<String, String>>> {
         info!("SQLite <= \x1b[1;36m{}", $cmd);
         let connection = ::sqlite::open( "tmbot.sqlite" )?;
         let mut statement = connection.prepare( $cmd )?;
