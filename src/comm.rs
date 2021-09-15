@@ -90,7 +90,7 @@ async fn _send_msg (
             cmd.env.chat_id_default // Message sysadmin
         }.to_string();
     let text = if is_markdown {
-        text // Poor person's uni/url decode
+        text // Quick and dirty uni/url decode
         .replacen("%20", " ", 10000)
         .replacen("%27", "'", 10000)
         .replacen("%28", "(", 10000)
@@ -135,7 +135,7 @@ async fn _send_msg (
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
     builder.set_certificate_chain_file("cert.pem")?;
 
-    let send_client_request =
+    let mut send_client_request =
         Client::builder()
             .connector(Connector::new()
                         .ssl( builder.build() )
@@ -149,16 +149,14 @@ async fn _send_msg (
             .unwrap()
             .send().await?;
 
-    match send_client_request {
-        mut result => {
-            ginfod!("Telegram => ", &result);
-            let body = result.body().await;
-            ginfod!("Telegram => \x1b[36m", body);
-            Ok( getin_i64(
-                    &bytes2json(&body?)?,
-                    &["result", "message_id"]
-                )?
-            )
-        } 
-    } // match
+    ginfod!("Telegram => ", &send_client_request);
+    let body = send_client_request.body().await;
+    ginfod!("Telegram => \x1b[36m", body);
+
+    // Return the message id so it may be edited/updated
+    Ok( getin_i64(
+            &bytes2json(&body?)?,
+            &["result", "message_id"]
+        )?
+    )
 }
