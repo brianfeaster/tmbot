@@ -2,14 +2,16 @@
 mod util;  pub use crate::util::*;
 mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
-mod db;
+mod db;    use crate::db::*;
 use ::std::{env,
     error::Error,
     mem::transmute,
     collections::{HashMap, HashSet},
     str::{from_utf8},
     fs::{read_to_string, write},
-    sync::{Arc, Mutex} };
+    sync::{Arc, Mutex},
+ };
+use ::std::boxed::Box;
 use ::log::*;
 use ::regex::{Regex};
 use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece,
@@ -20,10 +22,10 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const QUOTE_DELAY_MINUTES :i64 = 1;
+const QUOTE_DELAY_SECS :i64 = 60;
 
-////////////////////////////////////////////////////////////////////////////////
-/// Rust primitives enahancements
+//////////////////////////////////////////////////////////////////////////////
+// Rust primitives enahancements
 
 trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
 impl AsI64 for Vec<Option<String>> {
@@ -126,11 +128,11 @@ impl AsStr for Vec<Option<String>> {
 ///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
 ///  Duration   5.5h        6.5h     4h               8h
 fn most_recent_trading_hours (
-    env: &Env,
+    dst_hours_adjust: i8,
     now: LocalDateTime,
 ) -> Bresult<(LocalDateTime, LocalDateTime)> {
     // Absolute time (UTC) when US pre-markets open 1AMPT / 0900Z|0800Z
-    let start_time = LocalTime::hm(9-env.dst_hours_adjust, 0)?; 
+    let start_time = LocalTime::hm(9 - dst_hours_adjust, 0)?;  // TODO create function describing the hour maths
     let start_duration = Duration::of(start_time.to_seconds());
     let market_hours_duration = Duration::of( LocalTime::hm(16, 30)?.to_seconds() ); // Add 30 minutes for delayed orders
 
@@ -155,24 +157,29 @@ fn most_recent_trading_hours (
     Ok((time_open, time_close))
 }
 
-fn trading_hours_p (env:&Env, now:i64) -> Bresult<bool>{
+fn trading_hours_p (dst_hours_adjust:i8, now:i64) -> Bresult<bool>{
     let now = LocalDateTime::at(now);
-    let (time_open, time_close) = most_recent_trading_hours(env, now)?;
+    let (time_open, time_close) = most_recent_trading_hours(dst_hours_adjust, now)?;
     Ok(time_open <= now && now <= time_close)
 }
 
-fn update_ticker_p (env:&Env, cached:i64, now:i64, traded_all_day:bool) -> Bresult<bool> {
+fn update_ticker_p (
+    envstruct: &EnvStruct,
+    cached: i64,
+    now:    i64,
+    traded_all_day: bool
+) -> Bresult<bool> {
     info!("update_ticker_p  cached:{}  now:{}  traded_all_day:{}", cached, now, traded_all_day);
 
-    if traded_all_day { return Ok(cached+(env.quote_delay_minutes*60) < now) }
+    if traded_all_day { return Ok(cached+(envstruct.quote_delay_secs) < now) }
 
-    let lookup_throttle_duration = Duration::of( 60 * env.quote_delay_minutes ); // Lookup tickers every 2 minutes
+    let lookup_throttle_duration = Duration::of( 60 * envstruct.quote_delay_secs ); // Lookup tickers every 2 minutes
 
     // Do everything in DateTime
     let cached = LocalDateTime::at(cached);
     let now = LocalDateTime::at(now);
 
-    let (time_open, time_close) = most_recent_trading_hours(env, now)?;
+    let (time_open, time_close) = most_recent_trading_hours(envstruct.dst_hours_adjust, now)?;
 
     info!("update_ticker_p  cached:{:?}  now:{:?}  time_open:{:?}  time_close:{:?}",
         cached, now, time_open, time_close);
@@ -294,11 +301,11 @@ fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
 }
 
 // Transforms @user_nickname to {USER_ID}
-fn deref_ticker (s :&str) -> Option<String> {
+fn deref_ticker (dbconn:&Connection, s:&str) -> Option<String> {
     // Expects:  @shrewm   Returns: Some(308188500)
     if &s[0..1] == "@" {
         // Quote is ID of whomever this nick matches
-        getsql!("SELECT id FROM entitys WHERE name=?", &s[1..])
+        getsql!(dbconn, "SELECT id FROM entitys WHERE name=?", &s[1..])
             .ok()
             .filter( |v| 1 == v.len() )
             .map( |v| v[0].get("id").unwrap().to_string() )
@@ -306,9 +313,9 @@ fn deref_ticker (s :&str) -> Option<String> {
 }
 
 // Transforms {USER_ID} to @user_nickname
-fn reference_ticker (t :&str) -> String {
+fn reference_ticker (dbconn:&Connection, t :&str) -> String {
     if is_self_stonk(t) {
-        getsql!("SELECT name FROM entitys WHERE id=?", t) // Result<Vec, Err>
+        getsql!(dbconn, "SELECT name FROM entitys WHERE id=?", t) // Result<Vec, Err>
         .map_err( |e| error!("{:?}", e) )
         .ok()
         .filter( |v| 1 == v.len() )
@@ -326,11 +333,13 @@ fn is_self_stonk (s: &str) -> bool {
 ////////////////////////////////////////////////////////////////////////////////
 /// Helpers on complex types
 
-fn get_bank_balance (id :i64) -> Bresult<f64> {
-    let res = getsql!("SELECT * FROM accounts WHERE id=?", id)?;
+fn get_bank_balance (cmdstruct:&CmdStruct) -> Bresult<f64> {
+    let dbconn = &cmdstruct.dbconn;
+    let id = cmdstruct.id;
+    let res = getsql!(dbconn, "SELECT * FROM accounts WHERE id=?", id)?;
     Ok(
         if res.is_empty() {
-            let sql = getsql!("INSERT INTO accounts VALUES (?, ?)", id, 1000.0)?;
+            let sql = getsql!(dbconn, "INSERT INTO accounts VALUES (?, ?)", id, 1000.0)?;
             info!("{:?}", sql);
             1000.0
         } else {
@@ -343,50 +352,35 @@ fn get_bank_balance (id :i64) -> Bresult<f64> {
     )
 }
 
-pub fn sql_table_order_insert (id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<Vec<HashMap<String, String>>> {
-    getsql!("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", id, ticker, qty, price, time)
+pub fn sql_table_order_insert (dbconn:&Connection, id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<Vec<HashMap<String, String>>> {
+    getsql!(dbconn, "INSERT INTO orders VALUES (?, ?, ?, ?, ?)", id, ticker, qty, price, time)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Blobs
 
-#[derive(Clone, Debug)]
-pub struct Env {
-    url_api: String,
-    chat_id_default: i64,
-    quote_delay_minutes: i64,
+#[derive(Debug)]
+pub struct EnvStruct {
+    url_api:          String,
+    sqlite_filename:  String,
+    chat_id_default:  i64,
+    quote_delay_secs: i64,
     dst_hours_adjust: i8,
-    // Previous message editing
-    message_id_read: i64,
-    message_id_write: i64,
+    // Muteables Previous message editing
+    message_id_read:    i64,
+    message_id_write:   i64,
     message_buff_write: String,
-    fmt_quote: String,
-    fmt_position: String,
+    fmt_quote:          String,
+    fmt_position:       String,
 }
 
-impl Env {
-    fn copy (&self) -> Self {
-        Self{
-            url_api: self.url_api.to_string(),
-            chat_id_default: self.chat_id_default,
-            quote_delay_minutes: self.quote_delay_minutes,
-            dst_hours_adjust: self.dst_hours_adjust,
-            message_id_read: self.message_id_read,
-            message_id_write: self.message_id_write,
-            message_buff_write: self.message_buff_write.to_string(),
-            fmt_quote: self.fmt_quote.to_string(),
-            fmt_position: self.fmt_position.to_string(),
-        }
-    }
-}
-
-type AMEnv = Arc<Mutex<Env>>;
+type Env = Arc<Mutex<EnvStruct>>;
 
 ////////////////////////////////////////
-
 #[derive(Debug)]
-pub struct Cmd {
+pub struct CmdStruct {
     env: Env,
+    dbconn: Connection,
     id: i64, // Entity that sent the message message.from.id
     at: i64, // Group (or entity/DM) that the message was sent in message.chat.id
     to: i64, // To whom the message is addressed (contains a message.reply_to_message.from.id) defaults to id
@@ -399,27 +393,17 @@ pub struct Cmd {
     msg: String
 }
 
-impl Cmd {
-    fn copy (&self) -> Self {
-        Self{
-            env: self.env.copy(),
-            id:  self.id,
-            at:  self.at,
-            to:  self.to,
-            id_level:  self.id_level,
-            at_level:  self.at_level,
-            to_level:  self.to_level,
-            message_id: self.message_id,
-            fmt_quote: self.fmt_quote.to_string(),
-            fmt_position: self.fmt_position.to_string(),
-            msg: self.msg.to_string()
-        }
-    }
-    fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
-    fn _to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
-    /// Creates a Cmd object from the useful details of a Telegram message.
-    fn parse_cmd(env :&Env, body: &web::Bytes) -> Bresult<Self> {
+type Cmd = Arc<Mutex<CmdStruct>>;
 
+impl CmdStruct {
+    fn _level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
+    fn _to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
+    // Creates a Cmd object from Env and Telegram message body.
+    // It is passed to a bunch of async functions so must exist
+    // for as long as there are async waiting.
+    fn parse_cmd(env:Env, body: &web::Bytes) -> Bresult<Cmd> {
+        let envstruct = env.lock().unwrap();
+        let dbconn = Connection::new(&envstruct.sqlite_filename)?;
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
 
@@ -444,7 +428,7 @@ impl Cmd {
             } else { Err("Nothing to do.")? };
 
         // Create hash map id -> echoLevel
-        let getsqlres = getsql!("SELECT id, echo FROM entitys NATURAL JOIN modes")?;
+        let getsqlres = getsql!(dbconn, "SELECT id, echo FROM entitys NATURAL JOIN modes")?;
         let echo_levels =
             getsqlres.iter()
             .map( |hm| // tuple -> hashmap
@@ -452,7 +436,7 @@ impl Cmd {
                    hm.get_i64("echo").unwrap() ) )
             .collect::<HashMap<i64,i64>>();
 
-        let res = getsql!(r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#, id)?;
+        let res = getsql!(dbconn, r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#, id)?;
 
         let (mut fmt_quote, mut fmt_position) =
             if res.is_empty() {
@@ -460,20 +444,18 @@ impl Cmd {
             } else {
                 (res[0].get_str("quote")?, res[0].get_str("position")? )
             };
-        if fmt_quote.is_empty() { fmt_quote = env.fmt_quote.to_string() }
-        if fmt_position.is_empty() { fmt_position = env.fmt_position.to_string() }
+        if fmt_quote.is_empty() { fmt_quote = envstruct.fmt_quote.to_string() }
+        if fmt_position.is_empty() { fmt_position = envstruct.fmt_position.to_string() }
         info!("fmt_quote {:?}  fmt_position {:?}", fmt_quote, fmt_position);
 
-        Ok(Self {
-            env:env.copy(),
-            id, at, to,
+        Ok(Cmd::new(Mutex::new(CmdStruct{
+            env: env.clone(),
+            dbconn, id, at, to,
             id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
             at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
             to_level: echo_levels.get(&to).map(|v|*v).unwrap_or(2_i64),
-            message_id,
-            fmt_quote, fmt_position,
-            msg
-        })
+            message_id, fmt_quote, fmt_position, msg
+        })))
     }
 } // Cmd
 
@@ -482,6 +464,7 @@ impl Cmd {
 #[derive(Debug)]
 pub struct Quote {
     pub ticker: String,
+    pub format_quote: String,
     pub price: f64, // Current known price
     pub last: f64,  // Previous day's closing regular market price
     pub amount: f64, // Delta change since last
@@ -495,7 +478,7 @@ pub struct Quote {
 
 impl Quote {
     // Used by:  Quote::get_market_quote
-    async fn new_market_quote (ticker: &str) -> Bresult<Self> {
+    async fn new_market_quote (format_quote:String, ticker: &str) -> Bresult<Self> {
         let json = srvs::get_ticker_raw(ticker).await?;
 
         let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
@@ -557,6 +540,7 @@ impl Quote {
         let last = details[0].1;
         Ok(Quote{
             ticker:  ticker.to_string(),
+            format_quote,
             price, last,
             amount:  roundqty(price-last),
             percent: percentify(last,price),
@@ -565,73 +549,90 @@ impl Quote {
             updated: true})
     } // Quote::new_market_quote 
 }
-
 impl Quote {
     async fn get_market_quote (cmd:&Cmd, ticker:&str) -> Bresult<Self> {
         // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
         if &ticker[0..1] == "@" { Err("Illegal ticker")? }
-
-        let now :i64 = Instant::now().seconds();
         let is_self_stonk = is_self_stonk(ticker);
+        let now :i64 = Instant::now().seconds();
 
-        let res = getsql!("SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?", ticker)?;
-        let is_in_table = !res.is_empty();
+        let (quote, format_quote, is_in_table) = {
+            let cmdstruct = cmd.lock().unwrap();
+            let envstruct = cmdstruct.env.lock().unwrap();
 
-        let is_cache_valid = 
-            is_in_table && (is_self_stonk || { 
-                let hm = &res[0];
-                let timesecs       = hm.get_i64("time")?;
-                let traded_all_day = 24 == hm.get_i64("hours")?;
-                !update_ticker_p(&cmd.env, timesecs, now, traded_all_day)?
-            });
+            let res = getsql!(
+                cmdstruct.dbconn,
+                "SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?",
+                ticker)?;
+            let is_in_table = !res.is_empty();
 
-        //info!("is_self_stonk {:?}", is_self_stonk);
-        //info!("is_in_table {:?}", is_in_table);
-        //info!("is_cache_valid {:?}", is_cache_valid);
-        //if is_in_table { info!("{:?}", &res[0]) }
-        let ticker =
-            if is_cache_valid { // Is in cache so use it
-                let hm = &res[0];
-                let price = hm.get_f64("price")?;
-                let last = hm.get_f64("last")?;
-                Quote{
-                    ticker:   hm.get_str("ticker")?,
-                    price, last,
-                    amount:   roundqty(price-last),
-                    percent:  percentify(last,price),
-                    market:   hm.get_str("market")?,
-                    hours:    hm.get_i64("hours")?,
-                    exchange: hm.get_str("exchange")?,
-                    title:    hm.get_str("title")?,
-                    updated:  false}
-            } else if is_self_stonk { // FNFT is not in cache so create
-                Quote {
-                    ticker:  ticker.to_string(),
-                    price:   0.0,
-                    last:    0.0,
-                    amount:  0.0,
-                    percent: 0.0,
-                    market:  "r".to_string(),
-                    hours:   24,
-                    exchange:"™BOT".to_string(),
-                    title:   "FNFT".to_string(),
-                    updated: true
-                }
-            } else { // Quote not in cache so query internet
-                Quote::new_market_quote(ticker).await?
-            };
+            let is_cache_valid = 
+                is_in_table && (is_self_stonk || { 
+                    let hm = &res[0];
+                    let timesecs       = hm.get_i64("time")?;
+                    let traded_all_day = 24 == hm.get_i64("hours")?;
+                    !update_ticker_p(&envstruct, timesecs, now, traded_all_day)?
+                });
+
+            //info!("is_self_stonk {:?}", is_self_stonk);
+            //info!("is_in_table {:?}", is_in_table);
+            //info!("is_cache_valid {:?}", is_cache_valid);
+            //if is_in_table { info!("{:?}", &res[0]) }
+
+            let quote =
+                if is_cache_valid { // Is in cache so use it
+                    let hm = &res[0];
+                    let price = hm.get_f64("price")?;
+                    let last = hm.get_f64("last")?;
+                    Some(Quote{
+                        ticker:   hm.get_str("ticker")?,
+                        format_quote: envstruct.fmt_quote.to_string(),
+                        price, last,
+                        amount:   roundqty(price-last),
+                        percent:  percentify(last,price),
+                        market:   hm.get_str("market")?,
+                        hours:    hm.get_i64("hours")?,
+                        exchange: hm.get_str("exchange")?,
+                        title:    hm.get_str("title")?,
+                        updated:  false})
+                } else if is_self_stonk { // FNFT is not in cache so create
+                    Some(Quote {
+                        ticker:  ticker.to_string(),
+                        format_quote: envstruct.fmt_quote.to_string(),
+                        price:   0.0,
+                        last:    0.0,
+                        amount:  0.0,
+                        percent: 0.0,
+                        market:  "r".to_string(),
+                        hours:   24,
+                        exchange:"™BOT".to_string(),
+                        title:   "FNFT".to_string(),
+                        updated: true
+                    })
+                } else { // Quote not in cache so query internet
+                    None
+                };
+            (quote, envstruct.fmt_quote.to_string(), is_in_table)
+        };
+
+        let quote = match quote {
+          Some(quote) => quote,
+                 None => Quote::new_market_quote(format_quote, ticker).await?
+        };
+
+        let cmdstruct = cmd.lock().unwrap();
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             if is_in_table {
-                getsql!("UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
-                    ticker.price, ticker.last, &*ticker.market, now, ticker.ticker.as_str())?
+                getsql!(cmdstruct.dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
+                    quote.price, quote.last, &*quote.market, now, quote.ticker.as_str())?
             } else {
-                getsql!("INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
-                    &*ticker.ticker, ticker.price, ticker.last, &*ticker.market, ticker.hours, &*ticker.exchange, now, &*ticker.title)?
+                getsql!(cmdstruct.dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
+                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, now, &*quote.title)?
             };
         }
 
-        Ok(ticker)
+        Ok(quote)
     } // Quote::get_market_quote
 }
 
@@ -662,8 +663,11 @@ impl Quote {
     // Formats a ticker given a format string.
     // Used to generate: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
     // Called by:  get_quote_pretty
-    fn format_quote (self: &Self, fmt: &str) -> Bresult<String> {
-
+    fn format_quote (
+        self:   &Self,
+        dbconn: &Connection
+    ) -> Bresult<String> {
+        let fmt = &self.format_quote;
         let gain_glyphs = amt_as_glyph(self.amount);
 
         Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
@@ -674,7 +678,7 @@ impl Quote {
                     "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
                     "C" => s.push_str(&percent_squish(self.percent.abs())), // inter-day percent
                     "D" => s.push_str(gain_glyphs.0), // red/green light
-                    "E" => s.push_str(&reference_ticker(&self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
+                    "E" => s.push_str(&reference_ticker(dbconn, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
                     "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
@@ -703,7 +707,7 @@ struct Position {
 }
 
 impl Position {
-    async fn update_quote(&mut self, cmd: &Cmd) -> Bresult<&Self> {
+    async fn update_quote(&mut self, cmd: &Cmd) -> Bresult<&Position> {
         self.quote = Some(Quote::get_market_quote(cmd, &self.ticker).await?);
         Ok(self)
     }
@@ -711,11 +715,14 @@ impl Position {
 
 impl Position {
     // Return vector instead of option in case of box/short positions.
-    fn get_position (id: i64, ticker: &str) -> Bresult<Vec<Position>> {
-        let positions = getsql!("SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?;
+    fn get_position (cmd:&Cmd, id: i64, ticker: &str) -> Bresult<Vec<Position>> {
+        let cmdstruct = cmd.lock().unwrap();
+        let positions = getsql!(cmdstruct.dbconn, "SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?;
+
         let mut res = Vec::new();
         for pos in positions {
             res.push(Position {
+                //cmd,
                 quote:  None,
                 id,
                 ticker: ticker.to_string(),
@@ -728,8 +735,9 @@ impl Position {
 }
 
 impl Position {
-    fn get_users_positions (id:i64) -> Bresult<Vec<Position>> {
-        let positions = getsql!("SELECT ticker,qty,price FROM positions WHERE id=?", id)?;
+    fn get_users_positions (cmdstruct:&CmdStruct) -> Bresult<Vec<Position>> {
+        let id = cmdstruct.id;
+        let positions = getsql!(cmdstruct.dbconn, "SELECT ticker,qty,price FROM positions WHERE id=?", id)?;
         let mut res = Vec::new();
         for pos in positions {
             res.push(Position {
@@ -745,8 +753,8 @@ impl Position {
 }
 
 impl Position {
-    async fn query (id:i64, ticker:&str, cmd: &Cmd) -> Bresult<Position> {
-        let mut hm = Position::get_position(id, ticker)?;
+    async fn query(cmd:&Cmd, id:i64, ticker:&str) -> Bresult<Position> {
+        let mut hm = Position::get_position(cmd, id, ticker)?;
 
         if 2 <= hm.len() {
             Err(format!("For {} ticker {} has {} positions, expect 0 or 1", id, ticker, hm.len()))?
@@ -754,7 +762,7 @@ impl Position {
 
         let mut hm = // Consider the quote or a 0 quantity quote
             if 0 == hm.len() {
-                Self {
+                Position {
                     quote: None,
                     id,
                     ticker: ticker.to_string(),
@@ -770,7 +778,7 @@ impl Position {
 
 impl Position {
     // Used by: do_trade_buy/sell -> execute_buy/sell, do_portfolio
-    fn format_position (&mut self, fmt :&str) -> Bresult<String> {
+    fn format_position (&mut self, dbconn:&Connection, fmt :&str) -> Bresult<String> {
         let qty = self.qty;
         let cost = self.price;
         let price = self.quote.as_ref().unwrap().price;
@@ -798,7 +806,7 @@ impl Position {
                 "C" => s.push_str( gain_glyphs.1), // Arrow
                 "D" => s.push_str( &percent_squish(gain_percent)), // gain%
                 "E" => s.push_str( gain_glyphs.0 ), // Color
-                "F" => s.push_str( &reference_ticker(&self.ticker).replacen("_", "\\_", 10000) ), // Ticker
+                "F" => s.push_str( &reference_ticker(dbconn, &self.ticker).replacen("_", "\\_", 10000) ), // Ticker
                 "G" => s.push_str( &money_pretty(price) ), // latet stonks value
                 "H" => s.push_str( &if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string()} ), // qty
                 "I" => s.push_str( &roundkilofy(cost) ), // cost
@@ -819,6 +827,7 @@ impl Position {
 
 #[derive(Debug)]
 struct Trade {
+    cmd: Cmd,
     id: i64,
     ticker: String,
     action: char, // '+' buy or '-' sell
@@ -827,12 +836,14 @@ struct Trade {
 }
 
 impl Trade {
-    fn new (id:i64, msg:&str) -> Option<Self> {
+    fn new (cmd:&Cmd) -> Option<Self> {
+        let cmdstruct = cmd.lock().unwrap();
         //                         _____ticker____  _+-_  _$_   ____________amt_______________
-        match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", msg) {
+        match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmdstruct.msg) {
             Some(caps) => 
                 Some(Self {
-                    id,
+                    cmd: cmd.clone(),
+                    id: cmdstruct.id,
                     ticker:     caps.get("1").unwrap().to_uppercase(),
                     action:     caps.get("2").unwrap().chars().nth(0).unwrap(),
                     is_dollars: caps.get("3").is_some(),
@@ -870,35 +881,43 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
 } // extract_tickers
 
 // for do_quotes
-async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
-// Expects:  GME 308188500 @shrewm.   Includes local level 2 quotes as well.  Used by do_quotes only
-    let ticker = deref_ticker(ticker).unwrap_or(ticker.to_string());
-    let bidask =
-        if is_self_stonk(&ticker) {
-            let mut asks = "*Asks:*".to_string();
-            for ask in getsql!("SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker)? {
-                asks.push_str(&format!(" `{}@{}`",
-                    num_simp(ask.get("qty").unwrap()),
-                    ask.get_f64("price")?,
-                ));
-            }
-            let mut bids = "*Bids:*".to_string();
-            for bid in getsql!("SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker)? {
-                bids.push_str(&format!(" `{}@{}`",
-                    num_simp(bid.get("qty").unwrap()),
-                    bid.get_f64("price")?,
-                ));
-            }
-            format!("\n{}\n{}", asks, bids).to_string()
-        } else {
-            "".to_string()
-        };
+// Valid "ticker" strings:  GME, 308188500, @shrewm, local level 2 quotes.  Used by do_quotes only
+async fn get_quote_pretty (cmd:&Cmd, ticker :&str) -> Bresult<String> {
+    let (ticker, bidask) = { // Sub block so the Cmd lock is released/dropped before .await
+        let cmdstruct = cmd.lock().unwrap();
 
-    Ok(
-        format!("{}{}",
-            Quote::get_market_quote(cmd, &ticker).await?
-                .format_quote(&cmd.fmt_quote)?,
-            bidask) )
+        let ticker =
+            deref_ticker(&cmdstruct.dbconn, ticker)
+            .unwrap_or(ticker.to_string());
+
+        let bidask =
+            if is_self_stonk(&ticker) {
+                let mut asks = "*Asks:*".to_string();
+                for ask in getsql!(&cmdstruct.dbconn, "SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker)? {
+                    asks.push_str(&format!(" `{}@{}`",
+                        num_simp(ask.get("qty").unwrap()),
+                        ask.get_f64("price")?,
+                    ));
+                }
+                let mut bids = "*Bids:*".to_string();
+                for bid in getsql!(&cmdstruct.dbconn, "SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker)? {
+                    bids.push_str(&format!(" `{}@{}`",
+                        num_simp(bid.get("qty").unwrap()),
+                        bid.get_f64("price")?,
+                    ));
+                }
+                format!("\n{}\n{}", asks, bids)
+            } else {
+                "".to_string()
+            };
+        (ticker, bidask)
+    };
+
+    let quote = Quote::get_market_quote(cmd, &ticker).await?;
+
+    Ok(format!("{}{}",
+        quote.format_quote(&cmd.lock().unwrap().dbconn)?,
+        bidask))
 } // get_quote_pretty
 
 
@@ -906,29 +925,39 @@ async fn get_quote_pretty (cmd :&Cmd, ticker :&str) -> Bresult<String> {
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
 
+async fn do_echo (cmd:&Cmd) -> Bresult<&'static str> {
 
-async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
-    let caps :Vec<Option<String>> = regex_to_vec("^/echo ?([0-9]+)?", &cmd.msg)?;
-    if caps.is_empty() { return Ok("SKIP") }
+    let (caps, at) = {
+        let cmdstruct = cmd.lock().unwrap();
+        let caps :Vec<Option<String>> = regex_to_vec("^/echo ?([0-9]+)?", &cmdstruct.msg)?;
+        if caps.is_empty() { return Ok("SKIP") }
+        (caps, cmdstruct.at)
+    };
+
     match caps.as_i64(1) {
         Ok(echo) => { // Update existing echo level
             if 2 < echo {
                 let msg = "*echo level must be 0…2*";
-                send_msg_markdown_id(cmd.into(), &msg).await?;
+                send_msg_markdown_id(cmd.clone().into(), &msg).await?;
                 Err(msg)?
             }
-            getsql!("UPDATE modes set echo=? WHERE id=?", echo, cmd.at)?;
-            send_msg_markdown(cmd.level(0), &format!("`echo {} set verbosity {:.0}%`", echo, echo as f64/0.02)).await?;
+            send_msg_markdown( MsgCmd::from(cmd.clone()).level(0), &format!("`echo {} set verbosity {:.0}%`",
+                echo, echo as f64/0.02)).await?;
+            let cmdstruct = cmd.lock().unwrap();
+            getsql!( &cmdstruct.dbconn, "UPDATE modes set echo=? WHERE id=?", echo, at)?;
         }
         Err(_) => { // Create or return existing echo level
-            let rows = getsql!("SELECT echo FROM modes WHERE id=?", cmd.at)?;
             let mut echo = 2;
+            let cmdstruct = cmd.lock().unwrap();
+            let rows = getsql!(cmdstruct.dbconn, "SELECT echo FROM modes WHERE id=?", at)?;
             if rows.len() == 0 { // Create/set echo level for this channel
-                getsql!("INSERT INTO modes values(?, ?)", cmd.at, echo)?;
+                getsql!(cmdstruct.dbconn, "INSERT INTO modes values(?, ?)", at, echo)?;
             } else {
                 echo = rows[0].get_i64("echo")?;
             }
-            send_msg_markdown(cmd.level(0), &format!("`echo {} verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
+            send_msg_markdown(
+                MsgCmd::from(cmd.clone()).level(0),
+                &format!("`echo {} verbosity at {:.0}%`", echo, echo as f64/0.02)).await?;
         }
     }
 
@@ -936,9 +965,13 @@ async fn do_echo (cmd :&Cmd) -> Bresult<&'static str> {
 }
 
 pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/help").unwrap().find(&cmd.msg).is_none() { return Ok("SKIP") }
-    let delay = cmd.env.quote_delay_minutes;
-    send_msg_markdown(cmd.into(), &format!(
+    let delay = {
+        let cmdstruct = cmd.lock().unwrap();
+        if Regex::new(r"/help").unwrap().find(&cmdstruct.msg).is_none() { return Ok("SKIP") }
+        let envstruct = cmdstruct.env.lock().unwrap();
+        envstruct.quote_delay_secs
+    };
+    send_msg_markdown(cmd.clone().into(), &format!(
 "`          ™Bot Commands          `
 `/echo 2` `Echo level (verbose 2…0 quiet)`
 `word: ` `Definition lookup`
@@ -956,127 +989,133 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
 `gme-$.9` `Sell 90¢ worth`
 `@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
 `@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
-`/rebalance 9.99 AMC 40 QQQ 60`
-   `rebalances AMC/40% QQQ/60% + optional $9.99`
+`/rebalance -9.99 AMC 40 QQQ 60 ...`
+   `rebalances AMC/40% QQQ/60%, offset -$9.99`
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`", delay)).await?;
     Ok("COMPLETED.")
 }
 
 async fn do_curse (cmd:&Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/curse").unwrap().find(&cmd.msg).is_none() { return Ok("SKIP") }
-
-    send_msg_markdown(cmd.into(), 
+    {
+        let cmdstruct = cmd.lock().unwrap();
+        if Regex::new(r"/curse").unwrap().find(&cmdstruct.msg).is_none() { return Ok("SKIP") }
+    }
+    send_msg_markdown(
+        cmd.clone().into(),
         ["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7]
     ).await?;
-
     Ok("COMPLETED.")
 }
 
+//
+//// Trying to delay an action
+///*
+//async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
+//    let caps =
+//        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmd.msg) {
+//            None => return Ok("SKIP".into()),
+//            Some(caps) => caps
+//        };
+//
+//    let delay = caps[1].parse::<u64>()?;
+//    //let msg = caps[2].to_string();
+//    //let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
+//
+//    let msgcmd :MsgCmd = cmd.into();
+//    std::thread::spawn(move || {
+//        std::thread::sleep(std::time::Duration::from_secs(delay));
+//        error!("*************{:?}", msgcmd);
+//        //let res = futures::executor::block_on(send_msg(msgcmd, &format!("{} {}", delay, msg)));
+//        //info!("send_msg => {:?}", res)
+//    });
+//
+//    //println!("join = {:?}", ::futures::join!(delay, sendmsg));
+//    Ok("COMPLETED.")
+//}
+//*/
 
-// Trying to delay an action
-async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
-    let caps =
-        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmd.msg) {
-            None => return Ok("SKIP".into()),
-            Some(caps) => caps
-        };
-
-    let delay = caps[1].parse::<u64>()?;
-    //let msg = caps[2].to_string();
-    //let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
-
-    let msgcmd :MsgCmd = cmd.into();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(delay));
-        error!("*************{:?}", msgcmd);
-        //let res = futures::executor::block_on(send_msg(msgcmd, &format!("{} {}", delay, msg)));
-        //info!("send_msg => {:?}", res)
-    });
-
-    //println!("join = {:?}", ::futures::join!(delay, sendmsg));
-    Ok("COMPLETED.")
-}
 async fn do_like (cmd:&Cmd) -> Bresult<String> {
+    let text = {
+        let cmdstruct = cmd.lock().unwrap();
+        let amt =
+            match Regex::new(r"^([+-])1")?.captures(&cmdstruct.msg) {
+                None => return Ok("SKIP".into()),
+                Some(cap) =>
+                    if cmdstruct.id == cmdstruct.to { return Ok("SKIP self plussed".into()); }
+                    else if &cap[1] == "+" { 1 } else { -1 }
+        };
+        // Load database of users
+        let mut people :HashMap<i64, String> = HashMap::new();
+        for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+            let mut v = l.split(" ");
+            let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
+            let name = v.next().ok_or("User DB malformed.")?.to_string();
+            people.insert(id, name);
+        }
+        info!("{:?}", people);
 
-    let amt =
-        match Regex::new(r"^([+-])1")?.captures(&cmd.msg) {
-            None => return Ok("SKIP".into()),
-            Some(cap) =>
-                if cmd.id == cmd.to { return Ok("SKIP self plussed".into()); }
-                else if &cap[1] == "+" { 1 } else { -1 }
+        // Load/update/save likes
+        let likes = read_to_string( format!("tmbot/{}", cmdstruct.to) )
+            .unwrap_or("0".to_string())
+            .lines()
+            .nth(0).unwrap()
+            .parse::<i32>()
+            .unwrap() + amt;
+
+        info!("update likes in filesystem {:?} by {} to {:?}  write => {:?}",
+            cmdstruct.to, amt, likes,
+            write( format!("tmbot/{}", cmdstruct.to), likes.to_string()));
+
+        let sfrom = cmdstruct.id.to_string();
+        let sto = cmdstruct.to.to_string();
+        let fromname = people.get(&cmdstruct.id).unwrap_or(&sfrom);
+        let toname   = people.get(&cmdstruct.to).unwrap_or(&sto);
+        format!("{}{}{}", fromname, num2heart(likes), toname)
     };
 
-    // Load database of users
-
-    let mut people :HashMap<i64, String> = HashMap::new();
-
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        people.insert(id, name);
-    }
-    info!("{:?}", people);
-
-    // Load/update/save likes
-
-    let likes = read_to_string( format!("tmbot/{}", cmd.to) )
-        .unwrap_or("0".to_string())
-        .lines()
-        .nth(0).unwrap()
-        .parse::<i32>()
-        .unwrap() + amt;
-
-    info!("update likes in filesystem {:?} by {} to {:?}  write => {:?}",
-        cmd.to, amt, likes,
-        write( format!("tmbot/{}", cmd.to), likes.to_string()));
-
-    let sfrom = cmd.id.to_string();
-    let sto = cmd.to.to_string();
-    let fromname = people.get(&cmd.id).unwrap_or(&sfrom);
-    let toname   = people.get(&cmd.to).unwrap_or(&sto);
-    let text = format!("{}{}{}", fromname, num2heart(likes), toname);
-    send_msg(cmd.into(), &text).await?;
+    send_msg(cmd.clone().into(), &text).await?;
 
     Ok("COMPLETED.".into())
 }
 
-async fn do_like_info (cmd :&Cmd) -> Bresult<&'static str> {
-
-    if cmd.msg != "+?" { return Ok("SKIP"); }
-
-    let mut likes = Vec::new();
-    // Over each user in file
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?;
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        // Read the user's count file
-        let count =
-            read_to_string( "tmbot/".to_string() + &id )
-            .unwrap_or("0".to_string())
-            .trim()
-            .parse::<i32>().or(Err("user like count parse i32 error"))?;
-        likes.push((count, name));
-    }
-
-    let mut text = String::new();
-    likes.sort_by(|a,b| b.0.cmp(&a.0) );
-    // %3c %2f b %3e </b>
-    for (likes,nom) in likes {
-        text.push_str(&format!("{}{} ", nom, num2heart(likes)));
-    }
+async fn do_like_info (cmd:&Cmd) -> Bresult<&'static str> {
+    let text = {
+        let cmdstruct = cmd.lock().unwrap();
+        if cmdstruct.msg != "+?" { return Ok("SKIP"); }
+        let mut likes = Vec::new();
+        // Over each user in file
+        for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+            let mut v = l.split(" ");
+            let id = v.next().ok_or("User DB malformed.")?;
+            let name = v.next().ok_or("User DB malformed.")?.to_string();
+            // Read the user's count file
+            let count =
+                read_to_string( "tmbot/".to_string() + &id )
+                .unwrap_or("0".to_string())
+                .trim()
+                .parse::<i32>().or(Err("user like count parse i32 error"))?;
+            likes.push((count, name));
+        }
+        likes.sort_by(|a,b| b.0.cmp(&a.0));
+        likes.iter()
+            .map( |(likecount, username)|
+                format!("{}{} ", username, num2heart(*likecount)) )
+            .collect::<Vec<String>>().join("")
+    };
     //info!("HEARTS -> msg tmbot {:?}", send_msg(env, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
-    send_msg(cmd.level(1), &text).await?;
+    send_msg(MsgCmd::from(cmd.clone()).level(1), &text).await?;
     Ok("COMPLETED.")
 }
 
-async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_def (cmd:&Cmd) -> Bresult<&'static str> {
 
-    let cap = Regex::new(r"^([A-Za-z-]+):$").unwrap().captures(&cmd.msg);
-    if cap.is_none() { return Ok("SKIP"); }
-    let word = &cap.unwrap()[1];
+    let word = {
+        let cmdstruct = cmd.lock().unwrap();
+        let cap = Regex::new(r"^([A-Za-z-]+):$").unwrap().captures(&cmdstruct.msg);
+        if cap.is_none() { return Ok("SKIP"); }
+        cap.unwrap()[1].to_string()
+    };
 
     info!("looking up {:?}", word);
 
@@ -1084,12 +1123,12 @@ async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 
     // Definitions
 
-    let defs = get_definition(word).await?;
+    let defs = get_definition(&word).await?;
 
     if defs.is_empty() {
-        send_msg_markdown_id(cmd.into(), &format!("*{}* def is empty", word)).await?;
+        send_msg_markdown_id(cmd.clone().into(), &format!("*{}* def is empty", &word)).await?;
     } else {
-        msg.push_str( &format!("*{}", word) );
+        msg.push_str( &format!("*{}", &word) );
         if 1 == defs.len() { // If multiple definitions, leave off the colon
             msg.push_str( &format!(":* {}", defs[0].to_string().replacen("`", "\\`", 10000)));
         } else {
@@ -1102,13 +1141,13 @@ async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
 
     // Synonym
 
-    let mut syns = get_syns(word).await?;
+    let mut syns = get_syns(&word).await?;
 
     if syns.is_empty() {
-        send_msg_markdown(cmd.into(), &format!("*{}* synonyms is empty", word)).await?;
+        send_msg_markdown(cmd.clone().into(), &format!("*{}* synonyms is empty", &word)).await?;
     } else {
         if msg.is_empty() {
-            msg.push_str( &format!("*{}:* _", word) );
+            msg.push_str( &format!("*{}:* _", &word) );
         } else {
             msg.push_str("\n_");
         }
@@ -1118,21 +1157,25 @@ async fn do_def (cmd :&Cmd) -> Bresult<&'static str> {
     }
 
     if !msg.is_empty() {
-        send_msg_markdown(cmd.level(1), &msg).await?;
+        send_msg_markdown( MsgCmd::from(cmd.clone()).level(1), &msg).await?;
     }
     Ok("COMPLETED.")
 }
 
-async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_sql (cmd:&Cmd) -> Bresult<&'static str> {
 
-    if cmd.id != 308188500 { return Ok("do_sql invalid user"); }
-    let rev = regex_to_vec("^(.*)ß$", &cmd.msg)?;
-    let expr :&str = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
+    let rows = {
+        let cmdstruct = cmd.lock().unwrap();
+        if cmdstruct.id != 308188500 { return Ok("do_sql invalid user"); }
+        let rev = regex_to_vec("^(.*)ß$", &cmdstruct.msg)?;
+        let expr :&str = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
+        getsql!(cmdstruct.dbconn, expr)
+    };
 
     let results =
-        match getsql!(expr) {
+        match rows {
             Err(e)  => {
-                send_msg(cmd.into(), &format!("{:?}", e)).await?;
+                send_msg( MsgCmd::from(cmd.clone()), &format!("{:?}", e)).await?;
                 return Err(e)
             }
             Ok(r) => r
@@ -1148,21 +1191,30 @@ async fn do_sql (cmd :&Cmd) -> Bresult<&'static str> {
                 b
             } );
 
-    if msg.is_empty() { send_msg(cmd.into(), "empty results").await?; }
-    else { send_msg(cmd.into(), &msg).await?; }
+    if msg.is_empty() { send_msg(cmd.clone().into(), "empty results").await?; }
+    else { send_msg(cmd.clone().into(), &msg).await?; }
 
     Ok("COMPLETED.")
 }
 
-async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
+async fn do_quotes (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let tickers = extract_tickers(&cmd.msg);
+    let (tickers, msg_id_changed) = {
+        let cmdstruct = cmd.lock().unwrap();
+        let envstruct = cmdstruct.env.lock().unwrap();
+        (extract_tickers(&cmdstruct.msg),
+         envstruct.message_id_read != cmdstruct.message_id)
+    };
+
     if tickers.is_empty() { return Ok("SKIP") }
 
-    if cmd.env.message_id_read != cmd.message_id {
-        cmd.env.message_id_read = cmd.message_id;
-        cmd.env.message_id_write = send_msg(cmd.level(1), "…").await?;
-        cmd.env.message_buff_write.clear();
+    if msg_id_changed {
+        let id = send_msg(MsgCmd::from(cmd.clone()).level(1), "…").await?;
+        let cmdstruct = cmd.lock().unwrap();
+        let mut envstruct = cmdstruct.env.lock().unwrap();
+        envstruct.message_id_read = cmdstruct.message_id;
+        envstruct.message_id_write = id;
+        envstruct.message_buff_write.clear();
     }
 
     let mut didwork = false;
@@ -1172,76 +1224,110 @@ async fn do_quotes (cmd :&mut Cmd) -> Bresult<&'static str> {
             Ok(res) => {
                 info!("get_quote_pretty {:?}", res);
                 didwork = true;
-                cmd.env.message_buff_write.push_str(&res);
-                cmd.env.message_buff_write.push('\n');
-                send_edit_msg_markdown(cmd.level(1), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
-            }
+                let (msg_id_write, msg_buff_write, msgcmd) = {
+                    let msgcmd = MsgCmd::from(cmd.clone()).level(1);
+                    let cmdstruct = cmd.lock().unwrap();
+                    let mut envstruct = cmdstruct.env.lock().unwrap();
+                    envstruct.message_buff_write.push_str(&res);
+                    envstruct.message_buff_write.push('\n');
+                    ( envstruct.message_id_write,
+                      envstruct.message_buff_write.to_string(),
+                      msgcmd )
+                };
+                send_edit_msg_markdown(msgcmd, msg_id_write, &msg_buff_write).await?;
+            },
             e => { glogd!("get_quote_pretty => ", e); }
         }
     }
 
     // Notify if no results (message not saved)
     if !didwork {
+        let msgcmd = MsgCmd::from(cmd.clone()).level(1);
+        let cmdstruct = cmd.lock().unwrap();
+        let envstruct = cmdstruct.env.lock().unwrap();
         send_edit_msg_markdown(
-            cmd.level(1),
-            cmd.env.message_id_write,
-            &format!("{}\nno results", &cmd.env.message_buff_write)
+            msgcmd,
+            envstruct.message_id_write,
+            &format!("{}\nno results", &envstruct.message_buff_write)
         ).await?;
     }
     Ok("COMPLETED.")
 }
 
-async fn do_portfolio (cmd :&mut Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/STONKS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+async fn do_portfolio (cmd:&Cmd) -> Bresult<&'static str> {
+    let (is_new_id, positions) = {
+        let cmdstruct = cmd.lock().unwrap();
+        if Regex::new(r"/STONKS").unwrap().find(&cmdstruct.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+        let envstruct = cmdstruct.env.lock().unwrap();
+        (
+            envstruct.message_id_read != cmdstruct.message_id,
+            Position::get_users_positions(&cmdstruct)? 
+        )
+    };
 
-    if cmd.env.message_id_read != cmd.message_id {
-        cmd.env.message_id_read = cmd.message_id;
-        cmd.env.message_id_write = send_msg(cmd.level(1), "…").await?;
-        cmd.env.message_buff_write.clear();
+    if is_new_id {
+        let new_write_id = send_msg( MsgCmd::from(cmd.clone()).level(1), "…").await?;
+        let cmdstruct = cmd.lock().unwrap();
+        let mut envstruct = cmdstruct.env.lock().unwrap();
+        envstruct.message_id_read = cmdstruct.message_id;
+        envstruct.message_id_write = new_write_id;
+        envstruct.message_buff_write.clear();
     }
 
     let mut total = 0.0;
-    for mut pos in Position::get_users_positions(cmd.id)? { 
+    for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
-            pos.update_quote(cmd).await?;
-            info!("{} position {:?}", cmd.id, pos);
-            cmd.env.message_buff_write.push_str(&pos.format_position(&cmd.fmt_position)?);
-            send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
-            total += pos.qty * pos.quote.unwrap().price;
+            let (msg_id_write, msg_buff_write) = {
+                pos.update_quote(cmd).await?;
+                let cmdstruct = cmd.lock().unwrap();
+                let mut envstruct = cmdstruct.env.lock().unwrap();
+                info!("{} position {:?}", cmdstruct.id, &pos);
+                envstruct.message_buff_write.push_str(&pos.format_position(&cmdstruct.dbconn, &cmdstruct.fmt_position)?);
+                total += pos.qty * pos.quote.unwrap().price;
+                ( envstruct.message_id_write, envstruct.message_buff_write.to_string() )
+            };
+            send_edit_msg_markdown( MsgCmd::from(cmd.clone()), msg_id_write, &msg_buff_write).await?;
         }
     }
 
-    let cash = get_bank_balance(cmd.id)?;
-    cmd.env.message_buff_write.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`\n", roundcents(cash), roundcents(total+cash)));
+    let (msg_id_write, msg_buff_write) = {
+        let cmdstruct = cmd.lock().unwrap();
+        let mut envstruct = cmdstruct.env.lock().unwrap();
+        let cash = get_bank_balance(&cmdstruct)?;
+        envstruct.message_buff_write.push_str(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`\n", roundcents(cash), roundcents(total+cash)));
+        ( envstruct.message_id_write, envstruct.message_buff_write.to_string() )
+    };
 
-    send_edit_msg_markdown(cmd.into(), cmd.env.message_id_write, &cmd.env.message_buff_write).await?;
+    send_edit_msg_markdown( MsgCmd::from(cmd.clone()), msg_id_write, &msg_buff_write).await?;
     Ok("COMPLETED.")
 }
 
-async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
+// Handle: /yolo
+async fn do_yolo (cmd:&Cmd) -> Bresult<&'static str> {
+    let rows = {
+        let cmdstruct = cmd.lock().unwrap();
+        if Regex::new(r"/YOLO").unwrap().find(&cmdstruct.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+        getsql!(cmdstruct.dbconn, "\
+            SELECT ticker \
+            FROM positions \
+            WHERE positions.ticker NOT LIKE '0%' \
+            AND positions.ticker NOT LIKE '1%' \
+            AND positions.ticker NOT LIKE '2%' \
+            AND positions.ticker NOT LIKE '3%' \
+            AND positions.ticker NOT LIKE '4%' \
+            AND positions.ticker NOT LIKE '5%' \
+            AND positions.ticker NOT LIKE '6%' \
+            AND positions.ticker NOT LIKE '7%' \
+            AND positions.ticker NOT LIKE '8%' \
+            AND positions.ticker NOT LIKE '9%' \
+            AND positions.ticker NOT LIKE '@%' \
+            GROUP BY ticker")?
+    };
 
-    // Handle: /yolo
-    if Regex::new(r"/YOLO").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
-
-    let working_message = "working...".to_string();
-    let message_id = send_msg(cmd.level(1), &working_message).await?;
+    let message_id = send_msg( MsgCmd::from(cmd.clone()).level(1), &"working...").await?;
 
     // Update all user-positioned tickers
-    for row in getsql!("\
-        SELECT ticker \
-        FROM positions \
-        WHERE positions.ticker NOT LIKE '0%' \
-          AND positions.ticker NOT LIKE '1%' \
-          AND positions.ticker NOT LIKE '2%' \
-          AND positions.ticker NOT LIKE '3%' \
-          AND positions.ticker NOT LIKE '4%' \
-          AND positions.ticker NOT LIKE '5%' \
-          AND positions.ticker NOT LIKE '6%' \
-          AND positions.ticker NOT LIKE '7%' \
-          AND positions.ticker NOT LIKE '8%' \
-          AND positions.ticker NOT LIKE '9%' \
-          AND positions.ticker NOT LIKE '@%' \
-        GROUP BY ticker")? {
+    for row in rows {
         let ticker = row.get("ticker").unwrap();
         //working_message.push_str(ticker);
         //working_message.push_str("...");
@@ -1283,17 +1369,21 @@ async fn do_yolo (cmd :&Cmd) -> Bresult<&'static str> {
                NATURAL JOIN accounts \
                NATURAL JOIN entitys \
                ORDER BY yolo DESC";
-    let results = getsql!(&sql)?;
+
+    let sql_results = {
+        let cmdstruct = cmd.lock().unwrap();
+        getsql!(cmdstruct.dbconn, &sql)?
+    };
 
     // Build and send response string
 
     let mut msg = "*YOLOlians*".to_string();
-    for row in results {
+    for row in sql_results {
         msg.push_str( &format!(" `{:.2}@{}`",
             row.get_f64("yolo")?,
             row.get("name").unwrap()) );
     }
-    send_edit_msg_markdown(cmd.level(1), message_id, &msg).await?;
+    send_edit_msg_markdown( MsgCmd::from(cmd.clone()).level(1), message_id, &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -1315,15 +1405,15 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
 struct TradeBuy { qty:f64, price:f64, bank_balance: f64, hours: i64, trade: Trade }
 
 impl TradeBuy {
-    async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
-        let quote = Quote::get_market_quote(cmd, &trade.ticker).await?;
+    async fn new (trade:Trade) -> Bresult<Self> {
+        let quote = Quote::get_market_quote(&trade.cmd, &trade.ticker).await?;
 
         if quote.exchange == "PNK" {
-            send_msg_markdown(cmd.into(), "`OTC / PinkSheet Verboten Stonken`").await?;
+            send_msg_markdown( MsgCmd::from(trade.cmd.clone()), "`OTC / PinkSheet Verboten Stonken`").await?;
             Err("OTC / PinkSheet Verboten Stonken")?
         }
         let price = quote.price;
-        let bank_balance = get_bank_balance(trade.id)?;
+        let bank_balance = get_bank_balance( &trade.cmd.lock().unwrap() )?;
         let hours = quote.hours;
         let qty = match trade.amt {
             Some(amt) => if trade.is_dollars { amt/price } else { amt },
@@ -1337,7 +1427,7 @@ impl TradeBuy {
 struct TradeBuyCalc { qty:f64, new_balance:f64, new_qty:f64, new_basis:f64, position:Position, new_position_p:bool, tradebuy:TradeBuy }
 
 impl TradeBuyCalc {
-    async fn compute_position (obj:TradeBuy, cmd:&Cmd) -> Bresult<Self> {
+    async fn compute_position (obj:TradeBuy) -> Bresult<Self> {
         let (qty, new_balance) =
             match
                 verify_qty(obj.qty, obj.price, obj.bank_balance)
@@ -1347,13 +1437,12 @@ impl TradeBuyCalc {
                 .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, obj.bank_balance) )
                 .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, obj.bank_balance) ) {
                 Err(e) => {  // Message user problem and log
-                    send_msg_id(cmd.into(), &e).await?;
+                    send_msg_id( MsgCmd::from(obj.trade.cmd.clone()), &e).await?;
                     return Err(e.into())
                 },
                 Ok(r) => r
             };
-        //let position = Position::query(obj.trade.id, &obj.trade.ticker, cmd).await?;
-        let position = Position::query(obj.trade.id, &obj.trade.ticker, cmd).await?;
+        let position = Position::query( &obj.trade.cmd, obj.trade.id, &obj.trade.ticker).await?;
         let new_position_p = position.qty == 0.0;
 
         let qty_old = position.qty;
@@ -1374,49 +1463,54 @@ impl TradeBuyCalc {
 struct ExecuteBuy { msg:String, tradebuycalc:TradeBuyCalc }
 
 impl ExecuteBuy {
-    async fn execute (mut obj:TradeBuyCalc, cmd:&Cmd) -> Bresult<Self> {
+    fn execute (mut obj:TradeBuyCalc) -> Bresult<Self> {
 
-        let now = Instant::now().seconds();
+        let msg = {
+            let now = Instant::now().seconds();
 
-        if obj.tradebuy.hours!=24 && !trading_hours_p(&cmd.env, now)? {
-            return Ok(Self{msg:"Unable to trade after hours".into(), tradebuycalc:obj});
-        }
+            if obj.tradebuy.hours!=24 && !trading_hours_p( obj.tradebuy.trade.cmd.lock().unwrap().env.lock().unwrap().dst_hours_adjust, now)? {
+                return Ok(Self{msg:"Unable to trade after hours".into(), tradebuycalc:obj});
+            }
 
-        let id = obj.tradebuy.trade.id;
-        let ticker = &obj.tradebuy.trade.ticker;
-        let price = obj.tradebuy.price;
+            let id = obj.tradebuy.trade.id;
+            let ticker = &obj.tradebuy.trade.ticker;
+            let price = obj.tradebuy.price;
 
-        sql_table_order_insert(id, ticker, obj.qty, price, now)?;
-        let mut msg = format!("*Bought:*");
+            sql_table_order_insert(&obj.tradebuy.trade.cmd.lock().unwrap().dbconn, id, ticker, obj.qty, price, now)?;
+            let cmdstruct = obj.tradebuy.trade.cmd.lock().unwrap();
+            let mut msg = format!("*Bought:*");
 
-        if obj.new_position_p {
-            getsql!("INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.new_basis)?;
-        } else {
-            msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
-            info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.position.qty, obj.position.quote.as_ref().unwrap().price, obj.new_qty, obj.new_basis);
-            getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", obj.new_qty, obj.new_basis, id, &**ticker)?;
-        }
-        obj.position.qty = obj.new_qty;
-        obj.position.price = obj.new_basis;
-        msg += &obj.position.format_position(&cmd.env.fmt_position)?;
+            if obj.new_position_p {
+                getsql!( &cmdstruct.dbconn, "INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.new_basis)?;
+            } else {
+                msg += &format!("  `{:.2}``{}` *{}*_@{}_", obj.qty*price, ticker, obj.qty, price);
+                info!("\x1b[1madd to existing position:  {} @ {}  ->  {} @ {}", obj.position.qty, obj.position.quote.as_ref().unwrap().price, obj.new_qty, obj.new_basis);
+                getsql!( &cmdstruct.dbconn, "UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", obj.new_qty, obj.new_basis, id, &**ticker)?;
+            }
+            obj.position.qty = obj.new_qty;
+            obj.position.price = obj.new_basis;
+            let envstruct = cmdstruct.env.lock().unwrap();
+            msg += &obj.position.format_position( &cmdstruct.dbconn, &envstruct.fmt_position)?; // TODO this should probalby be cmd.fmt_pos?
 
-        getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
+            getsql!( &cmdstruct.dbconn, "UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
+            msg
+        };
 
-        Ok(Self{msg, tradebuycalc:obj})
+        Ok(Self{msg, tradebuycalc: obj})
     }
 }
 
-async fn do_trade_buy (cmd :&Cmd) -> Bresult<&'static str> {
-    let trade = Trade::new(cmd.id, &cmd.msg);
+async fn do_trade_buy (cmd:&Cmd) -> Bresult<&'static str> {
+    let trade = Trade::new(cmd);
     if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
 
     let res =
-        TradeBuy::new(trade.unwrap(), cmd).await
-        .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy, cmd))?.await
-        .map(|tradebuycalc| ExecuteBuy::execute(tradebuycalc, cmd))?.await
+        TradeBuy::new(trade.unwrap()).await
+        .map(|tradebuy| TradeBuyCalc::compute_position(tradebuy))?.await
+        .map(|tradebuycalc| ExecuteBuy::execute(tradebuycalc))?
         .map(|res| { info!("\x1b[1;31mResult {:#?}", &res); res })?;
 
-    send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
+    send_msg_markdown( MsgCmd::from(cmd.clone()), &res.msg).await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -1436,17 +1530,17 @@ struct TradeSell {
 }
 
 impl TradeSell {
-    async fn new (trade:Trade, cmd:&Cmd) -> Bresult<Self> {
+    async fn new (trade:Trade) -> Bresult<Self> {
         let id = trade.id;
         let ticker = &trade.ticker;
 
-        let mut positions = Position::get_position(id, ticker)?;
+        let mut positions = Position::get_position( &trade.cmd, id, ticker)?;
         if positions.is_empty() {
-            send_msg_id(cmd.into(), "You lack a valid position.").await?;
+            send_msg_id( MsgCmd::from(trade.cmd.clone()), "You lack a valid position.").await?;
             Err("expect 1 position in table")?
         }
         let mut position = positions.pop().unwrap();
-        position.update_quote(cmd).await?;
+        position.update_quote(&trade.cmd).await?;
 
         let pos_qty = position.qty;
         let quote = &position.quote.as_ref().unwrap();
@@ -1459,11 +1553,11 @@ impl TradeSell {
                 None => pos_qty // no amount set, so set to entire qty
             });
         if qty <= 0.0 {
-            send_msg_id(cmd.into(), "Quantity too low.").await?;
+            send_msg_id( MsgCmd::from(trade.cmd.clone()), "Quantity too low.").await?;
             Err("sell qty too low")?
         }
 
-        let bank_balance = get_bank_balance(id)?;
+        let bank_balance = get_bank_balance( &trade.cmd.lock().unwrap() )?;
         let mut gain = qty*price;
         let mut new_balance = bank_balance+gain;
 
@@ -1478,7 +1572,7 @@ impl TradeSell {
         }
 
         if pos_qty < qty {
-            send_msg_id(cmd.into(), "You can't sell more than you own.").await?;
+            send_msg_id( MsgCmd::from(trade.cmd.clone()), "You can't sell more than you own.").await?;
             return Err("not enough shares to sell".into());
         }
 
@@ -1495,44 +1589,48 @@ struct ExecuteSell {
 }
 
 impl ExecuteSell {
-    async fn execute (mut obj:TradeSell, cmd:&Cmd) -> Bresult<Self> {
-        let now = Instant::now().seconds();
+    fn execute (mut obj:TradeSell) -> Bresult<Self> {
+        let msg = {
+            let now = Instant::now().seconds();
 
-        if obj.hours!=24 && !trading_hours_p(&cmd.env, now)? {
-            return Ok(Self{msg:"Unable to trade after hours".into(), tradesell:obj});
-        }
+            if obj.hours!=24 && !trading_hours_p(obj.trade.cmd.lock().unwrap().env.lock().unwrap().dst_hours_adjust, now)? {
+                return Ok(Self{msg:"Unable to trade after hours".into(), tradesell:obj});
+            }
 
-        let id = obj.trade.id;
-        let ticker = &obj.trade.ticker;
-        let qty = obj.qty;
-        let price = obj.price;
-        let new_qty = obj.new_qty;
-        sql_table_order_insert(id, ticker, -qty, price, now)?;
-        let mut msg = format!("*Sold:*");
-        if new_qty == 0.0 {
-            getsql!("DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
-            msg += &obj.position.format_position(&cmd.fmt_position)?;
-        } else {
-            msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
-                qty*price, ticker, qty, price,
-                &obj.position.format_position(&cmd.fmt_position)?);
-            getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
-        }
-        getsql!("UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
+            let id = obj.trade.id;
+            let ticker = &obj.trade.ticker;
+            let qty = obj.qty;
+            let price = obj.price;
+            let new_qty = obj.new_qty;
+            sql_table_order_insert(&obj.trade.cmd.lock().unwrap().dbconn, id, ticker, -qty, price, now)?;
+            let mut msg = format!("*Sold:*");
+            let cmdstruct = obj.trade.cmd.lock().unwrap();
+            if new_qty == 0.0 {
+                getsql!( &cmdstruct.dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
+                msg += &obj.position.format_position( &cmdstruct.dbconn, &cmdstruct.fmt_position)?;
+            } else {
+                msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
+                    qty*price, ticker, qty, price,
+                    &obj.position.format_position( &cmdstruct.dbconn, &cmdstruct.fmt_position)?);
+                getsql!( &cmdstruct.dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
+            }
+            getsql!( &cmdstruct.dbconn, "UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
+            msg
+        };
         Ok(Self{msg, tradesell:obj})
     }
 }
 
 async fn do_trade_sell (cmd :&Cmd) -> Bresult<&'static str> {
-    let trade = Trade::new(cmd.id, &cmd.msg);
+    let trade = Trade::new(cmd);
     if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
 
     let res =
-        TradeSell::new(trade.unwrap(), cmd).await
-        .map(|tradesell| ExecuteSell::execute(tradesell, cmd))?.await?;
+        TradeSell::new(trade.unwrap()).await
+        .map(|tradesell| ExecuteSell::execute(tradesell))??;
 
     info!("\x1b[1;31mResult {:#?}", res);
-    send_msg_markdown(cmd.into(), &res.msg).await?; // Report to group
+    send_msg_markdown( MsgCmd::from(cmd.clone()), &res.msg).await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -1547,30 +1645,34 @@ async fn do_trade_sell (cmd :&Cmd) -> Bresult<&'static str> {
 */ 
 
 #[derive(Debug)]
-struct ExQuote {
+struct ExQuote { // Local Exchange Quote Structure
     id: i64,
     thing: String,
     qty: f64,
     price: f64,
     ticker: String,
-    now: i64
+    now: i64,
+    cmd: Cmd
 }
 
 impl ExQuote {
-    fn scan (id:i64, msg:&str) -> Bresult<Option<Self>> {
+    fn scan (cmd:&Cmd) -> Bresult<Option<Self>> {
+        let cmdstruct = cmd.lock().unwrap();
          //                         ____ticker____  _____________qty____________________  $@  ___________price______________
-        let caps = regex_to_vec(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$", msg)?;
+        let caps = regex_to_vec(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$", &cmdstruct.msg)?;
         if caps.is_empty() { return Ok(None) }
 
         let thing = caps.as_string(1)?;
-        let qty = roundqty(caps.as_f64(2)?);
+        let qty   = roundqty(caps.as_f64(2)?);
         let price = caps.as_f64(4)?;
-        let now = Instant::now().seconds();
-        deref_ticker(&thing) // Option<String>
-        .map_or(
-             Ok(None),
-            |ticker| // String
-                Ok(Some(Self{id, thing, qty, price, ticker, now})) ) // Result<Option<ExQuote>, Err>
+        let now   = Instant::now().seconds();
+        deref_ticker(&cmdstruct.dbconn, &thing) // -> Option<String>
+        .map_or( Ok(None), |ticker| // String
+            Ok(Some(
+                ExQuote {
+                    id: cmdstruct.id,
+                    thing, qty, price, ticker, now,
+                    cmd: cmd.clone()} )))
     }
 }
 
@@ -1591,46 +1693,50 @@ impl QuoteCancelMine {
         let price = exquote.price;
         let mut msg = String::new();
 
-        let mut myasks = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND qty<0.0 ORDER BY price", id, &**ticker)?;
-        let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get_f64("qty").unwrap() ).sum::<f64>());
-        let mut mybids = getsql!("SELECT * FROM exchange WHERE id=? AND ticker=? AND 0.0<=qty ORDER BY price DESC", id, &**ticker)?;
+        let (myasks, myasksqty, mybids) = {
+            let dbconn = &exquote.cmd.lock().unwrap().dbconn;
 
-        if qty < 0.0 { // This is an ask exquote
-            // Remove/decrement a matching bid in the current settled market
-            if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
-                let bidqty = roundqty(mybid.get_f64("qty")?);
-                if bidqty <= -qty {
-                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, bidqty, price)?;
-                    mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
-                    qty = roundqty(qty + bidqty);
-                    msg += &format!("\n*Removed bid:* `{}+{}@{}`", exquote.thing, bidqty, price);
-                } else {
-                    let newbidqty = roundqty(bidqty+qty);
-                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, &**ticker, bidqty, price)?;
-                    mybid.insert("*UPDATED*".into(), format!("*QTY={:.}*", newbidqty));
-                    qty = 0.0;
-                    msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", exquote.thing, bidqty, price, newbidqty, price);
+            let mut myasks = getsql!(dbconn, "SELECT * FROM exchange WHERE id=? AND ticker=? AND qty<0.0 ORDER BY price", id, &**ticker)?;
+            let myasksqty = -roundqty(myasks.iter().map( |ask| ask.get_f64("qty").unwrap() ).sum::<f64>());
+            let mut mybids = getsql!(dbconn, "SELECT * FROM exchange WHERE id=? AND ticker=? AND 0.0<=qty ORDER BY price DESC", id, &**ticker)?;
+
+            if qty < 0.0 { // This is an ask exquote
+                // Remove/decrement a matching bid in the current settled market
+                if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
+                    let bidqty = roundqty(mybid.get_f64("qty")?);
+                    if bidqty <= -qty {
+                        getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, bidqty, price)?;
+                        mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
+                        qty = roundqty(qty + bidqty);
+                        msg += &format!("\n*Removed bid:* `{}+{}@{}`", exquote.thing, bidqty, price);
+                    } else {
+                        let newbidqty = roundqty(bidqty+qty);
+                        getsql!(dbconn, "UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, &**ticker, bidqty, price)?;
+                        mybid.insert("*UPDATED*".into(), format!("*QTY={:.}*", newbidqty));
+                        qty = 0.0;
+                        msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", exquote.thing, bidqty, price, newbidqty, price);
+                    }
+                }
+            } else if 0.0 < qty { // This is a bid exquote
+                // Remove/decrement a matching ask in the current settled market
+                if let Some(myask) = myasks.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
+                    let askqty = roundqty(myask.get_f64("qty")?);
+                    if -askqty <= qty {
+                        getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, askqty, price)?;
+                        myask.insert("*UPDATED*".into(), "*REMOVED*".into());
+                        qty = roundqty(qty + askqty);
+                        msg += &format!("\n*Removed ask:* `{}{}@{}`", exquote.thing, askqty, price);
+                    } else {
+                        let newaskqty = roundqty(askqty+qty);
+                        getsql!(dbconn, "UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, &**ticker, askqty, price)?;
+                        myask.insert("*UPDATED*".into(), format!("*QTY={:.}*", newaskqty));
+                        qty = 0.0;
+                        msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", exquote.thing, askqty, price, newaskqty, price);
+                    }
                 }
             }
-        } else if 0.0 < qty { // This is a bid exquote
-            // Remove/decrement a matching ask in the current settled market
-            if let Some(myask) = myasks.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
-                let askqty = roundqty(myask.get_f64("qty")?);
-                if -askqty <= qty {
-                    getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, askqty, price)?;
-                    myask.insert("*UPDATED*".into(), "*REMOVED*".into());
-                    qty = roundqty(qty + askqty);
-                    msg += &format!("\n*Removed ask:* `{}{}@{}`", exquote.thing, askqty, price);
-                } else {
-                    let newaskqty = roundqty(askqty+qty);
-                    getsql!("UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, &**ticker, askqty, price)?;
-                    myask.insert("*UPDATED*".into(), format!("*QTY={:.}*", newaskqty));
-                    qty = 0.0;
-                    msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", exquote.thing, askqty, price, newaskqty, price);
-                }
-            }
-
-        }
+            (myasks, myasksqty, mybids)
+        };
 
         Ok(Self{qty, myasks, myasksqty, mybids, exquote, msg})
     }
@@ -1645,7 +1751,7 @@ struct QuoteExecute {
 }
 
 impl QuoteExecute {
-    async fn doit(mut obj :QuoteCancelMine, cmd:&Cmd) -> Bresult<Self> {
+    async fn doit (mut obj :QuoteCancelMine) -> Bresult<Self> {
         let id = obj.exquote.id;
         let ticker = &obj.exquote.ticker;
         let price = obj.exquote.price;
@@ -1655,11 +1761,21 @@ impl QuoteExecute {
         let mybids = &mut obj.mybids;
         let asksqty = obj.myasksqty;
 
-        // Other bids / asks (not mine) global since it's being updated and returned for logging
-        let mut bids = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND 0.0<qty ORDER BY price DESC", id, &**ticker)?;
-        let mut asks = getsql!("SELECT * FROM exchange WHERE id!=? AND ticker=? AND qty<0.0 ORDER BY price", id, &**ticker)?;
+        let (mut bids, mut asks) = {
+            let cmdstruct = obj.exquote.cmd.lock().unwrap();
+            // Other bids / asks (not mine) global since it's being updated and returned for logging
+            (
+                getsql!( &cmdstruct.dbconn,
+                    "SELECT * FROM exchange WHERE id!=? AND ticker=? AND 0.0<qty ORDER BY price DESC",
+                    id, &**ticker)?,
+                getsql!( &cmdstruct.dbconn,
+                    "SELECT * FROM exchange WHERE id!=? AND ticker=? AND qty<0.0 ORDER BY price",
+                    id, &**ticker)?
+            )
+        };
+
         let mut msg = obj.msg.to_string();
-        let position = Position::query(id, ticker, cmd).await?;
+        let position = Position::query( &obj.exquote.cmd, id, ticker).await?;
         let posqty = position.qty;
         let posprice = position.price;
 
@@ -1673,67 +1789,70 @@ impl QuoteExecute {
                     let aprice = abid.get_f64("price")?;
                     let xqty = aqty.min(-qty); // quantity exchanged is the smaller of the two (could be equal)
 
+                    let dbconn = &obj.exquote.cmd.lock().unwrap().dbconn;
+
                     if xqty == aqty { // bid to be entirely settled
-                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
+                        getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), "*REMOVED*".into());
                     } else {
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, &**ticker, aqty, aprice)?;
+                        getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, &**ticker, aqty, aprice)?;
                         abid.insert("*UPDATED*".into(), format!("*qty={}*", aqty-xqty));
                     }
 
                     // Update order table with the purchase and buy info
-                    sql_table_order_insert(id, ticker, -xqty, aprice, now)?;
-                    sql_table_order_insert(aid, ticker, xqty, aprice, now)?;
+                    sql_table_order_insert(dbconn, id, ticker, -xqty, aprice, now)?;
+                    sql_table_order_insert(dbconn, aid, ticker, xqty, aprice, now)?;
 
                     // Update each user's account
                     let value = xqty * aprice;
-                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?",  value, id)?;
-                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?", -value, aid)?;
+                    getsql!(dbconn, "UPDATE accounts SET balance=balance+? WHERE id=?",  value, id)?;
+                    getsql!(dbconn, "UPDATE accounts SET balance=balance+? WHERE id=?", -value, aid)?;
 
                     msg += &format!("\n*Settled:*\n{} `{}{:+}@{}` <-> `${}` {}",
-                            reference_ticker(&id.to_string()), obj.exquote.thing, xqty, aprice,
-                            value, reference_ticker(&aid.to_string()));
+                            reference_ticker(dbconn, &id.to_string()), obj.exquote.thing, xqty, aprice,
+                            value, reference_ticker(dbconn, &aid.to_string()));
 
                     // Update my position
                     let newposqty = roundqty(posqty - xqty);
                     if 0.0 == newposqty {
-                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, &**ticker, posqty)?;
+                        getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, &**ticker, posqty)?;
                     } else {
-                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newposqty, id, &**ticker, posqty)?;
+                        getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newposqty, id, &**ticker, posqty)?;
                     }
 
                     // Update buyer's position
-                    let aposition = Position::query(aid, ticker, cmd).await?;
+/**/                let aposition = Position::query( &obj.exquote.cmd, aid, ticker).await?;
                     let aposqty = aposition.qty;
                     let aposprice = aposition.price;
 
                     if 0.0 == aposqty {
-                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", aid, &**ticker, xqty, value)?;
+                        getsql!(dbconn, "INSERT INTO positions values(?, ?, ?, ?)", aid, &**ticker, xqty, value)?;
                     } else {
                         let newaposqty = roundqty(aposqty+aqty);
                         let newaposcost = (aposprice + value) / (aposqty + xqty);
-                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newaposqty, newaposcost, aid, &**ticker, aposqty)?;
+                        getsql!(dbconn, "UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newaposqty, newaposcost, aid, &**ticker, aposqty)?;
                     }
 
                     // Update stonk exquote value
-                    let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    getsql!("UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, &**ticker)?;
+/**/                let last_price = Quote::get_market_quote( &obj.exquote.cmd, ticker).await?.price;
+                    getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                     qty = roundqty(qty+xqty);
                     if 0.0 <= qty { break }
-                }
+                } // for
 
                 // create or increment in exchange table my ask.  This could also be the case if no bids were executed.
                 if qty < 0.0 {
+                    let dbconn = &obj.exquote.cmd.lock().unwrap().dbconn;
                     if let Some(myask) = myasks.iter_mut().find( |a| price == a.get_f64("price").unwrap() ) {
                         let oldqty = myask.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty); // both negative, so "increased" ask qty
                         let mytime = myask.get_i64("time").unwrap();
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
+                        getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
                         myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}", qty), &*format!("{:.4}", price), now)?;
+                        getsql!(dbconn, "INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}", qty), &*format!("{:.4}", price), now)?;
                         // Add a fake entry to local myasks vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -1745,7 +1864,7 @@ impl QuoteExecute {
         } else if 0.0 < qty { // This is a bid exquote (want to buy someone)
             // Limited by available cash but that's up to the current best ask price and sum of ask costs.
             let basis = qty * price;
-            let bank_balance = get_bank_balance(id)?;
+            let bank_balance = get_bank_balance( &obj.exquote.cmd.lock().unwrap() )?;
             let mybidsprice =
                 mybids.iter().map( |bid|
                     bid.get_f64("qty").unwrap()
@@ -1762,69 +1881,80 @@ impl QuoteExecute {
                     let aprice = aask.get_f64("price")?;
                     //error!("my ask qty {}  asksqty sum {}  bid qty {}", qty, asksqty, aqty);
 
+
                     let xqty = roundqty(qty.min(-aqty)); // quantity exchanged is the smaller of the two (could be equal)
 
-                    if xqty == -aqty { // ask to be entirely settled
-                        getsql!("DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
-                        aask.insert("*UPDATED*".into(), "*REMOVED*".into());
-                    } else {
-                        let newqty = aqty+xqty;
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, &**ticker, aqty, aprice)?;
-                        aask.insert("*UPDATED*".into(), format!("*qty={}*", newqty));
+                    {
+                        let cmdstruct = obj.exquote.cmd.lock().unwrap();
+
+                        if xqty == -aqty { // ask to be entirely settled
+                            getsql!( &cmdstruct.dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
+                            aask.insert("*UPDATED*".into(), "*REMOVED*".into());
+                        } else {
+                            let newqty = aqty+xqty;
+                            getsql!( &cmdstruct.dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, &**ticker, aqty, aprice)?;
+                            aask.insert("*UPDATED*".into(), format!("*qty={}*", newqty));
+                        }
+
+                        //error!("new order {} {} {} {} {}", id, ticker, aqty, price, now);
+                        // Update order table with the purchase and buy info
+                        sql_table_order_insert(&cmdstruct.dbconn, id, ticker, xqty, aprice, now)?;
+                        sql_table_order_insert(&cmdstruct.dbconn, aid, ticker, -xqty, aprice, now)?;
+
+                        // Update each user's account
+                        let value = xqty * aprice;
+                        getsql!( &cmdstruct.dbconn, "UPDATE accounts SET balance=balance+? WHERE id=?", -value, id)?;
+                        getsql!( &cmdstruct.dbconn, "UPDATE accounts SET balance=balance+? WHERE id=?",  value, aid)?;
+
+                        msg += &format!("\n*Settled:*\n{} `${}` <-> `{}{:+}@{}` {}",
+                                reference_ticker( &cmdstruct.dbconn, &id.to_string()), value,
+                                obj.exquote.thing, xqty, aprice, reference_ticker(&cmdstruct.dbconn, &aid.to_string()));
+
+                        // Update my position
+                        if 0.0 == posqty {
+                            getsql!( &cmdstruct.dbconn, "INSERT INTO positions values(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
+                        } else {
+                            let newposqty = roundqty(posqty+xqty);
+                            let newposcost = (posprice + value) / (posqty + xqty);
+                            getsql!( &cmdstruct.dbconn, "UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?",
+                                newposqty, newposcost, id, &**ticker, posqty)?;
+                        }
                     }
 
-                    //error!("new order {} {} {} {} {}", id, ticker, aqty, price, now);
-                    // Update order table with the purchase and buy info
-                    sql_table_order_insert(id, ticker, xqty, aprice, now)?;
-                    sql_table_order_insert(aid, ticker, -xqty, aprice, now)?;
-
-                    // Update each user's account
-                    let value = xqty * aprice;
-                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?", -value, id)?;
-                    getsql!("UPDATE accounts SET balance=balance+? WHERE id=?",  value, aid)?;
-
-                    msg += &format!("\n*Settled:*\n{} `${}` <-> `{}{:+}@{}` {}",
-                            reference_ticker(&id.to_string()), value,
-                            obj.exquote.thing, xqty, aprice, reference_ticker(&aid.to_string()));
-
-                    // Update my position
-                    if 0.0 == posqty {
-                        getsql!("INSERT INTO positions values(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
-                    } else {
-                        let newposqty = roundqty(posqty+xqty);
-                        let newposcost = (posprice + value) / (posqty + xqty);
-                        getsql!("UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=? AND qty=?", newposqty, newposcost, id, &**ticker, posqty)?;
-                    }
-
-                    // Update their position
-                    let aposition = Position::query(aid, ticker, cmd).await?;
-                    let aposqty = aposition.qty;
-                    let newaposqty = roundqty(aposqty - xqty);
-                    if 0.0 == newaposqty {
-                        getsql!("DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", aid, &**ticker, aposqty)?;
-                    } else {
-                        getsql!("UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newaposqty, aid, &**ticker, aposqty)?;
+                    {
+                        // Update their position
+    /**/                let aposition = Position::query( &obj.exquote.cmd, aid, ticker).await?;
+                        let aposqty = aposition.qty;
+                        let newaposqty = roundqty(aposqty - xqty);
+                        let dbconn = &obj.exquote.cmd.lock().unwrap().dbconn;
+                        if 0.0 == newaposqty {
+                            getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", aid, &**ticker, aposqty)?;
+                        } else {
+                            getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=? AND qty=?", newaposqty, aid, &**ticker, aposqty)?;
+                        }
                     }
 
                     // Update self-stonk exquote value
-                    let last_price = Quote::get_market_quote(cmd, ticker).await?.price;
-                    getsql!("UPDATE stonks SET price=?, last=?, time=?, WHERE ticker=?", aprice, last_price, now, &**ticker)?;
+                    let last_price = Quote::get_market_quote( &obj.exquote.cmd, ticker).await?.price;
+                    let dbconn = &obj.exquote.cmd.lock().unwrap().dbconn;
+                    getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=?, WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                     qty = roundqty(qty-xqty);
                     if qty <= 0.0 { break }
-                }
+                } // for
 
                 // create or increment in exchange table my bid.  This could also be the case if no asks were executed.
                 if 0.0 < qty{
+                    let dbconn = &obj.exquote.cmd.lock().unwrap().dbconn;
                     if let Some(mybid) = mybids.iter_mut().find( |b| price == b.get_f64("price").unwrap() ) {
                         let oldqty = mybid.get_f64("qty").unwrap();
                         let newqty = roundqty(oldqty + qty);
                         let mytime = mybid.get_i64("time").unwrap();
-                        getsql!("UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
+                        getsql!( dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
                         mybid.insert("*UPDATED*".into(), format!("qty={}", newqty));
                         msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                     } else {
-                        getsql!("INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}",qty), &*format!("{:.4}",price), now)?;
+                        getsql!( dbconn, "INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}",qty), &*format!("{:.4}",price), now)?;
                         // Add a fake entry to local mybids vector for logging's sake
                         let mut hm = HashMap::<String,String>::new();
                         hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
@@ -1832,23 +1962,23 @@ impl QuoteExecute {
                         msg += &format!("\n*Created bid:* `{}+{}@{}`", obj.exquote.thing, qty, price);
                     }
                 }
-            }
-        }
+            } // else
+        } // if
         Ok(Self{qty, bids, quotecancelmine: obj, msg})
     }
 }
 
 async fn do_exchange_bidask (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let exquote = ExQuote::scan(cmd.id, &cmd.msg)?;
+    let exquote = ExQuote::scan(cmd)?;
     let exquote = if exquote.is_none() { return Ok("SKIP") } else { exquote.unwrap() };
 
     let ret =
         QuoteCancelMine::doit(exquote)
-        .map(|obj| QuoteExecute::doit(obj, cmd) )?.await?;
+        .map(|obj| QuoteExecute::doit(obj) )?.await?;
     info!("\x1b[1;31mResult {:#?}", ret);
     if 0!=ret.msg.len() {
-        send_msg_markdown(cmd.into(),
+        send_msg_markdown( MsgCmd::from(cmd.clone()),
             &ret.msg
             .replacen("_", "\\_", 1000)
             .replacen(">", "\\>", 1000)
@@ -1857,35 +1987,39 @@ async fn do_exchange_bidask (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
-    if Regex::new(r"/ORDERS").unwrap().find(&cmd.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
-    let id = cmd.id;
+async fn do_orders (cmd:&Cmd) -> Bresult<&'static str> {
     let mut asks = String::from("");
     let mut bids = String::from("");
-    for order in getsql!("SELECT * FROM exchange WHERE id=?", id)? {
-        let ticker = order.get("ticker").unwrap();
-        let stonk = reference_ticker(ticker).replacen("_", "\\_", 10000);
-        let qty = order.get_f64("qty")?;
-        let price = order.get("price").unwrap();
-        if qty < 0.0 {
-            asks += &format!("\n{}{:+}@{}", stonk, qty, price);
-        } else {
-            bids += &format!("\n{}{:+}@{}", stonk, qty, price);
+    let rows = {
+        let cmdstruct = cmd.lock().unwrap();
+        if Regex::new(r"/ORDERS").unwrap().find(&cmdstruct.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+        let id = cmdstruct.id;
+        for order in getsql!(&cmdstruct.dbconn, "SELECT * FROM exchange WHERE id=?", id)? {
+            let ticker = order.get("ticker").unwrap();
+            let stonk = reference_ticker(&cmdstruct.dbconn, ticker).replacen("_", "\\_", 10000);
+            let qty = order.get_f64("qty")?;
+            let price = order.get("price").unwrap();
+            if qty < 0.0 {
+                asks += &format!("\n{}{:+}@{}", stonk, qty, price);
+            } else {
+                bids += &format!("\n{}{:+}@{}", stonk, qty, price);
+            }
         }
-    }
+
+        // Include all self-stonks positions (mine and others)
+        let sql = format!("
+            SELECT {} AS id, id AS ticker, 0.0 AS qty, 0.0 AS price \
+            FROM entitys \
+            WHERE 0<id \
+            AND id NOT IN (SELECT ticker FROM positions WHERE id={} GROUP BY ticker)
+                UNION \
+            SELECT * FROM positions WHERE id={} AND ticker IN (SELECT id FROM entitys WHERE 0<id)", id, id, id);
+        getsql!(&cmdstruct.dbconn, sql)?
+    };
 
     let mut msg = String::new();
     let mut total = 0.0;
-
-    // Include all self-stonks positions (mine and others)
-    let sql = format!("
-        SELECT {} AS id, id AS ticker, 0.0 AS qty, 0.0 AS price \
-        FROM entitys \
-        WHERE 0<id \
-        AND id NOT IN (SELECT ticker FROM positions WHERE id={} GROUP BY ticker)
-            UNION \
-        SELECT * FROM positions WHERE id={} AND ticker IN (SELECT id FROM entitys WHERE 0<id)", id, id, id);
-    for pos in getsql!(sql)? {
+    for pos in rows {
         if is_self_stonk(pos.get("ticker").unwrap()) {
             let mut pos = Position {
                 quote: None,
@@ -1895,12 +2029,13 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
                 price: pos.get_f64("price")?
             };
             pos.update_quote(cmd).await?;
-            msg += &pos.format_position(&cmd.fmt_position)?;
+            let cmdstruct = cmd.lock().unwrap();
+            msg += &pos.format_position(&cmdstruct.dbconn, &cmdstruct.fmt_position)?;
             total += pos.qty * pos.quote.unwrap().price;
         }
     }
 
-    let cash = get_bank_balance(cmd.id)?;
+    let cash = get_bank_balance(&cmd.lock().unwrap())?;
     msg += &format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`",
         roundcents(cash),
         roundcents(total+cash));
@@ -1923,38 +2058,44 @@ async fn do_orders (cmd :&Cmd) -> Bresult<&'static str> {
             msg += "*BIDS* none";
         }
     }
+
     info!("{:?}", &msg);
-    send_msg_markdown(cmd.into(), &msg).await?;
+    send_msg_markdown( MsgCmd::from(cmd.clone()), &msg).await?;
     Ok("COMPLETED.")
 }
 
 async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
-    let cap = Regex::new(r"^/fmt( ([qp?])[ ]?(.*)?)?$").unwrap().captures(&cmd.msg);
+
+    let cmdstruct = cmd.lock().unwrap();
+
+    let cap = Regex::new(r"^/fmt( ([qp?])[ ]?(.*)?)?$").unwrap().captures(&cmdstruct.msg);
     if cap.is_none() { return Ok("SKIP"); }
     let cap = cap.unwrap();
 
     if cap.get(1) == None {
-        let res = getsql!(r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#, cmd.id)?;
+        let res = getsql!(&cmdstruct.dbconn, r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#,
+            cmdstruct.id)?;
+
         let fmt_quote =
             if res.is_empty() || res[0].get_str("quote")?.is_empty() {
-                format!("DEFAULT {:?}", cmd.fmt_quote.to_string())
+                format!("DEFAULT {:?}", cmdstruct.fmt_quote.to_string())
             } else {
                 res[0].get_str("quote")?
             };
         let fmt_position =
             if res.is_empty() || res[0].get_str("position")?.is_empty() {
-                format!("DEFAULT {:?}", cmd.fmt_position.to_string())
+                format!("DEFAULT {:?}", cmdstruct.fmt_position.to_string())
             } else {
                 res[0].get_str("position")?
             };
-        send_msg(cmd.into(), &format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).await?;
+        send_msg( MsgCmd::from(&*cmdstruct), &format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).await?;
         return Ok("COMPLETED.")
     }
 
     let c = match &cap[2] {
         "?" => {
             send_msg_markdown(
-                cmd.into(),
+                MsgCmd::from(&*cmdstruct),
 "` ™Bot Quote Formatting `
 `%A` `Gain Arrow`
 `%B` `Gain`
@@ -1968,8 +2109,9 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
 `%[%nbiusq]` `% newline bold italics underline strikeout quote`
 "
             ).await?;
+
             send_msg_markdown(
-                cmd.into(),
+                MsgCmd::from(&*cmdstruct),
 "` ™Bot Position Formatting `
 `%A` `Value`
 `%B` `Gain`
@@ -1996,28 +2138,35 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
 
     info!("set format {} to {:?}", c, s);
 
-    let res = getsql!("SELECT id FROM formats WHERE id=?", cmd.id)?;
+    let res = getsql!(&cmdstruct.dbconn, "SELECT id FROM formats WHERE id=?", cmdstruct.id)?;
     if res.is_empty() {
-        getsql!(r#"INSERT INTO formats VALUES (?, "", "")"#, cmd.id)?;
+        getsql!(&cmdstruct.dbconn, r#"INSERT INTO formats VALUES (?, "", "")"#, cmdstruct.id)?;
     }
 
     // notify user the change
-    send_msg(cmd.into(), &format!("fmt_{} {}", c, if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
+    send_msg(
+        MsgCmd::from(&*cmdstruct),
+        &format!("fmt_{} {}",
+            c,
+            if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) })).await?;
 
     // make change to DB
-    getsql!(r#"UPDATE formats SET ?=? WHERE id=?"#, c, &*s.replacen("\"", "\"\"", 10000), cmd.id)?;
+    getsql!(&cmdstruct.dbconn, format!("UPDATE formats SET {}=? WHERE id=?", c),
+        &*s.replacen("\"", "\"\"", 10000),
+        cmdstruct.id)?;
 
     Ok("COMPLETED.")
 }
 
 
 async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
+
     let caps = regex_to_vec(
         r"^/REBALANCE( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* [0-9]+)+)",
-        &cmd.msg.to_uppercase() )?;
+        &cmd.lock().unwrap().msg.to_uppercase() )?;
     if caps.is_empty() { return Ok("SKIP") }
 
-    let message_id = send_msg(cmd.into(), "...").await?;
+    let message_id = send_msg( MsgCmd::from(cmd.clone()), "...").await?;
 
     let mut total :f64 = caps.as_f64(2).unwrap_or(0.0);
 
@@ -2034,28 +2183,31 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     // Refresh stonk quotes
     for ticker in percents.keys() {
         if !is_self_stonk(&ticker) {
-            Quote::get_market_quote(cmd, &ticker).await.err().map_or(false, gwarn);
+            Quote::get_market_quote( cmd, &ticker).await.err().map_or(false, gwarn);
         }
     }
 
-    let mut positions = getsql!(format!("
-        SELECT
-            positions.ticker,
-            positions.qty,
-            stonks.price,
-            positions.qty*stonks.price AS value
-        FROM positions
-        LEFT JOIN stonks ON positions.ticker=stonks.ticker
-        WHERE id={} AND positions.ticker IN ('{}')",
-        cmd.id,
-        percents.keys().map(String::to_string).collect::<Vec<String>>().join("','")
-    ))?;
+    let mut positions = {
+        let cmdstruct = cmd.lock().unwrap();
+        getsql!( &cmdstruct.dbconn, format!("
+            SELECT
+                positions.ticker,
+                positions.qty,
+                stonks.price,
+                positions.qty*stonks.price AS value
+            FROM positions
+            LEFT JOIN stonks ON positions.ticker=stonks.ticker
+            WHERE id={} AND positions.ticker IN ('{}')",
+            cmdstruct.id,
+            percents.keys().map(String::to_string).collect::<Vec<String>>().join("','")
+        ))?
+    };
 
     total += positions.iter().map(|hm|hm.get_f64("value").unwrap()).sum::<f64>();
     info!("rebalance total {}", total);
 
     if 0==positions.len() {
-        send_edit_msg(cmd.into(), message_id, "no valid tickers").await?;
+        send_edit_msg( MsgCmd::from(cmd.clone()), message_id, "no valid tickers").await?;
     } else {
         for i in 0..positions.len() {
             let ticker = positions[i].get_str("ticker")?;
@@ -2072,7 +2224,7 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
                     &format!("\n{}-${}",
                         &positions[i].get_str("ticker")?,
                         &positions[i].get_str("diff")?[1..]));
-                send_edit_msg(cmd.into(), message_id, &msg).await?;
+                send_edit_msg( MsgCmd::from(cmd.clone()), message_id, &msg).await?;
             }
         }
         for i in 0..positions.len() {
@@ -2082,8 +2234,7 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
                     &format!("\n{}+${}",
                         &positions[i].get_str("ticker")?,
                         &positions[i].get_str("diff")?));
-                send_edit_msg(cmd.into(), message_id, &msg).await?;
-
+                send_edit_msg( MsgCmd::from(cmd.clone()), message_id, &msg).await?;
             }
         }
     }
@@ -2092,20 +2243,20 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
 }
 
 
-async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
-    let mut cmd = Cmd::parse_cmd(env, body)?;
+async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
+    let cmd :Cmd = CmdStruct::parse_cmd(env, body)?;
     info!("\x1b[33m{:?}", &cmd);
 
     glogd!("do_echo =>",      do_echo(&cmd).await);
     glogd!("do_help =>",      do_help(&cmd).await);
     glogd!("do_curse =>",     do_curse(&cmd).await);
-    glogd!("do_repeat =>",    do_repeat(&cmd).await);
+//    //glogd!("do_repeat =>",    do_repeat(&cmd).await);
     glogd!("do_like =>",      do_like(&cmd).await);
     glogd!("do_like_info =>", do_like_info(&cmd).await);
     glogd!("do_def =>",       do_def(&cmd).await);
     glogd!("do_sql =>",       do_sql(&cmd).await);
-    glogd!("do_quotes => ",   do_quotes(&mut cmd).await);
-    glogd!("do_portfolio =>", do_portfolio(&mut cmd).await);
+    glogd!("do_quotes => ",   do_quotes(&cmd).await);
+    glogd!("do_portfolio =>", do_portfolio(&cmd).await);
     glogd!("do_yolo =>",      do_yolo(&cmd).await);
     glogd!("do_trade_buy =>", do_trade_buy(&cmd).await);
     glogd!("do_trade_sell =>",do_trade_sell(&cmd).await);
@@ -2113,12 +2264,12 @@ async fn do_all(env:&mut Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_orders =>", do_orders(&cmd).await);
     glogd!("do_fmt =>",       do_fmt(&cmd).await);
     glogd!("do_rebalance =>", do_rebalance(&cmd).await);
-
-    // Copy back important altered state for next time.
-    env.message_id_read = cmd.env.message_id_read;
-    env.message_id_write = cmd.env.message_id_write;
-    env.message_buff_write.clear();
-    env.message_buff_write.push_str(&cmd.env.message_buff_write);
+//
+//    // Copy back important altered state for next time.
+//    env.message_id_read = cmd.env.message_id_read;
+//    env.message_id_write = cmd.env.message_id_write;
+//    env.message_buff_write.clear();
+//    env.message_buff_write.push_str(&cmd.env.message_buff_write);
     Ok(())
 }
 
@@ -2225,18 +2376,17 @@ fn log_header () {
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
 
-    let mut env = req.app_data::<web::Data<AMEnv>>().unwrap().lock().unwrap(); // TODO: want to edit this for state
+    let env :&Env = req.app_data::<web::Data<Env>>().unwrap();
 
-    info!("\x1b[1m{:?}", &env);
+    info!("\x1b[1m{:?}", env);
     info!("\x1b[35m{}", format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
     info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""));
     info!("body:\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
 
-    do_all(&mut env, &body)
-        .await
+    do_all(env.clone(), &body).await
         .unwrap_or_else(|r| error!("{:?}", r));
 
-    error!("{:#?}", env);
+    info!("{:#?}", env);
     info!("End.");
 
     HttpResponse::from("")
@@ -2252,45 +2402,39 @@ pub async fn launch() -> Bresult<()> {
     let dst_hours_adjust = env::args().nth(3).ok_or("args[3] missing")?.parse::<i8>()?;
 
     if !true { do_schema()? } // Create DB
-    if !true { // Hacks and other test code
-        let r = fun();
-        match r {
-            Ok(o) => Ok(o),
-            Err(e) => {
-                info!("{:?}", e);
-                //info!("{:?}", e.is::<std::fmt::Error>());
-                //info!("{:?}", e.is::<std::io::Error>());
-                Err(e.into())
-            }
-        }
-    } else {
 
-    let amenv =  // Shared between all calls.
-        Arc::new(Mutex::new( Env{
-            url_api:             "https://api.telegram.org/bot".to_string() + &botkey,
+    // Hacks and other test code
+    if !true { return fun().map_err( |e| {
+        info!("{:?}", e);
+        e
+    } ) }
+
+    let env :Env =  // Shared by requests handler threads.
+        Arc::new(Mutex::new(EnvStruct{
+            url_api:             format!("https://api.telegram.org/bot{}", &botkey),
+            sqlite_filename:     format!("tmbot.sqlite"),
             chat_id_default:     chat_id_default,
             dst_hours_adjust:    dst_hours_adjust,
-            quote_delay_minutes: QUOTE_DELAY_MINUTES,
+            quote_delay_secs:    QUOTE_DELAY_SECS,
             message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
             message_id_write:    0,
             message_buff_write:  String::new(),
-            fmt_quote:           "%q%B%A%C%% %D%E@%F %G%H%I%q".to_string(),
-            fmt_position:        "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q".to_string(),
-        } ) );
+            fmt_quote:           format!("%q%B%A%C%% %D%E@%F %G%H%I%q"),
+            fmt_position:        format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
+        }));
 
     Ok( HttpServer::new(
-        move ||
-        App::new()
-        .data(amenv.clone())
-        .service(
-            web::resource("*")
-            .route(
-                Route::new()
-                .to(main_dispatch) ) ) )
-    .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
-    .run().await? )
-
-} }
+            move || {
+            App::new()
+            .data(env.clone())
+            .service(
+                web::resource("*")
+                .route(
+                    Route::new()
+                    .to(main_dispatch) ) ) } )
+        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
+        .run().await? )
+} // launch
 
 ////////////////////////////////////////////////////////////////////////////////
 use macros::*;
@@ -2301,7 +2445,7 @@ struct Greetings {
     err:Box<dyn Error>
 }
 
-fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
+fn _fun_macros() -> Bresult<()> {
     let g = Greetings{z:42, err:"".into() };
     //Err("oh noe".into())
     //return Err(std::fmt::Error{});
@@ -2310,9 +2454,10 @@ fn _fun_macros() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn fun () -> Bresult<()> {
-    for a in getsql!("SELECT * FROM stonks WHERE title like ?", "%'%")? {
-      println!("{:?}", a);
-    }
+    let conn = Connection::new(&"tmbot.sqlite")?;
+    glog!(getsql!(&conn, "BEGIN TRANSACTION; INSERT INTO entitys VALUES (69, 'xxx')"));
+    glog!(getsql!(&conn, "BEGIN TRANSACTION; BEGIN TRANSACTION; INSERT INTO entitys VALUES (69, 'xxx'); COMMIT;  ROLLBACK;"));
+    glog!(getsql!(&conn, "ROLLBACK"));
     Ok(())
 }
    

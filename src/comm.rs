@@ -13,20 +13,44 @@ use ::log::*;
 
 #[derive(Debug)]
 pub struct MsgCmd {
-    cmd: Cmd,
+    chat_id_default: i64,
+    id: i64,
+    at: i64,
+    id_level: i64,
+    at_level: i64,
+    url_api: String,
+    //cmd: Cmd,
     chat_id: Option<i64>, // Unoverideable un-overridable destination chat_id
     level: i64,
 }
 
-impl From<&Cmd> for MsgCmd {
-    fn from (cmd :&Cmd) -> Self {
-        MsgCmd{cmd:cmd.copy(), chat_id:None, level:2}
+impl From<Cmd> for MsgCmd {
+    fn from (cmd:Cmd) -> Self {
+        let cmd = cmd.lock().unwrap();
+        let env = cmd.env.lock().unwrap();
+        MsgCmd{
+            chat_id_default: env.chat_id_default,
+            id: cmd.id,
+            at: cmd.at,
+            id_level: cmd.id_level,
+            at_level: cmd.at_level,
+            url_api: env.url_api.to_string(),
+            chat_id:None, level:2}
     }
 }
 
-impl From<&mut Cmd> for MsgCmd {
-    fn from (cmd :&mut Cmd) -> Self {
-        MsgCmd{cmd:cmd.copy(), chat_id:None, level:2}
+impl From<&CmdStruct> for MsgCmd {
+    fn from (cmdstruct:&CmdStruct) -> MsgCmd {
+        let env = cmdstruct.env.lock().unwrap();
+        MsgCmd{
+            chat_id_default: env.chat_id_default,
+            id:       cmdstruct.id,
+            at:       cmdstruct.at,
+            id_level: cmdstruct.id_level,
+            at_level: cmdstruct.at_level,
+            url_api:  env.url_api.to_string(),
+            chat_id:  None,
+            level:   2}
     }
 }
 
@@ -41,27 +65,27 @@ impl MsgCmd {
     }
 }
 
-pub async fn send_msg(mc:MsgCmd, text:&str) -> Bresult<i64> {
+pub async fn send_msg (mc:MsgCmd, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, false, false, None, text).await
 }
 
-pub async fn send_msg_markdown(mc:MsgCmd, text:&str) -> Bresult<i64> {
+pub async fn send_msg_markdown (mc:MsgCmd, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, false, true, None, text).await
 }
 
-pub async fn send_edit_msg(mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
+pub async fn send_edit_msg (mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, true, false, Some(edit_msg_id), text).await
 }
 
-pub async fn send_edit_msg_markdown(mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
+pub async fn send_edit_msg_markdown (mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
     _send_msg(mc, 1, true, true, Some(edit_msg_id), text).await
 }
 
-pub async fn send_msg_id(mc:MsgCmd, text:&str) -> Bresult<i64> {
+pub async fn send_msg_id (mc:MsgCmd, text:&str) -> Bresult<i64> {
     _send_msg(mc, 0, false, false, None, text).await
 }
 
-pub async fn send_msg_markdown_id(mc:MsgCmd, text:&str) -> Bresult<i64> {
+pub async fn send_msg_markdown_id (mc:MsgCmd, text:&str) -> Bresult<i64> {
     _send_msg(mc, 0, false, true,  None, text).await
 }
 
@@ -77,17 +101,15 @@ async fn _send_msg (
         mc, target, is_edit_message, is_markdown, edit_msg_id);
     for l in text.lines() { info!("Telegram <= \x1b[1;36m{}", l) }
 
-    let cmd = &mc.cmd;
-    let level = mc.level;
     let chat_id =
         if let Some(chat_id) = mc.chat_id {
             chat_id // Forced message
-        } else if 1 == target && level <= cmd.at_level {
-            cmd.at // Message channel-ish
-        } else if level <= cmd.id_level {
-            cmd.id // Message user-ish
+        } else if 1 == target && mc.level <= mc.at_level {
+            mc.at // Message channel-ish
+        } else if mc.level <= mc.id_level {
+            mc.id // Message user-ish
         } else {
-            cmd.env.chat_id_default // Message sysadmin
+            mc.chat_id_default // Message sysadmin
         }.to_string();
     let text = if is_markdown {
         text // Quick and dirty uni/url decode
@@ -114,7 +136,7 @@ async fn _send_msg (
 
     let theurl =
         format!("{}/{}",
-            cmd.env.url_api,
+            mc.url_api,
             if is_edit_message { "editmessagetext" } else { "sendmessage"} );
 
     let mut query = vec![
@@ -130,6 +152,8 @@ async fn _send_msg (
     }
 
     if is_markdown { query.push(["parse_mode", "MarkdownV2"]) }
+
+    warn!("outgoing query: {:?}", query);
 
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
