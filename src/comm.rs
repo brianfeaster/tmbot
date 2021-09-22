@@ -38,6 +38,20 @@ impl From<Cmd> for MsgCmd {
             chat_id:None, level:2}
     }
 }
+impl From<&Cmd> for MsgCmd {
+    fn from (cmd:&Cmd) -> Self {
+        let cmd = cmd.lock().unwrap();
+        let env = cmd.env.lock().unwrap();
+        MsgCmd{
+            chat_id_default: env.chat_id_default,
+            id: cmd.id,
+            at: cmd.at,
+            id_level: cmd.id_level,
+            at_level: cmd.at_level,
+            url_api: env.url_api.to_string(),
+            chat_id:None, level:2}
+    }
+}
 
 impl From<&CmdStruct> for MsgCmd {
     fn from (cmdstruct:&CmdStruct) -> MsgCmd {

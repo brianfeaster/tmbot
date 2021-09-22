@@ -2154,11 +2154,10 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         &cmd.lock().unwrap().msg.to_uppercase() )?;
     if caps.is_empty() { return Ok("SKIP") }
 
-    let message_id = send_msg( MsgCmd::from(cmd.clone()), "...").await?;
+    let mut msg_feedback = format!("WallStreetBets Rebalancing Engine Activated...");
+    let channel_id = send_msg(cmd.into(), &msg_feedback).await?;
 
-    let mut total :f64 = caps.as_f64(2).unwrap_or(0.0);
-
-    let percents =
+    let percents = // HashMap of Ticker->Percent
         Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) ([0-9]+[.]?|([0-9]*[.][0-9]{1,2}))")?
         .captures_iter(&caps.as_string(4)?)
         .map(|cap| (
@@ -2166,12 +2165,14 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
             cap.get(2).unwrap().as_str().parse::<f64>().unwrap() / 100.0
         ))
         .collect::<HashMap<String, f64>>();
-    //error!("{:?}", percents);
 
     // Refresh stonk quotes
     for ticker in percents.keys() {
         if !is_self_stonk(&ticker) {
             Quote::get_market_quote(cmd, &ticker).await.err().map_or(false, gwarn);
+            // Update feedback message with ticker symbol
+            msg_feedback.push_str(&format!("{} ", ticker));
+            send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
         }
     }
 
@@ -2191,42 +2192,46 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         ))?
     };
 
-    total += positions.iter().map(|hm|hm.get_f64("value").unwrap()).sum::<f64>();
+    // Sum the optional offset amount and stonk values
+    let mut total :f64 = caps.as_f64(2).unwrap_or(0.0);
+    positions.iter().for_each(|hm| total += hm.get_f64("value").unwrap());
     info!("rebalance total {}", total);
 
     if 0==positions.len() {
-        send_edit_msg( MsgCmd::from(cmd.clone()), message_id, "no valid tickers").await?;
+        send_edit_msg(cmd.into(), channel_id, "no valid tickers").await?;
     } else {
         for i in 0..positions.len() {
             let ticker = positions[i].get_str("ticker")?;
             let value = positions[i].get_f64("value")?;
             let diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
-            positions[i].insert("diff".to_string(), diff.to_string());
+            positions[i].insert("diff".to_string(), diff.to_string()); // Add new key/val to Position HashMap
         }
-
-        let mut msg = "Suggested Trades".to_string();
+        //let mut msg_feedback = format!("Suggested Trades");
         for i in 0..positions.len() {
             if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                msg.push_str(
-                    &format!("\n{}-${}",
-                        &positions[i].get_str("ticker")?,
-                        &positions[i].get_str("diff")?[1..]));
-                send_edit_msg( MsgCmd::from(cmd.clone()), message_id, &msg).await?;
+                let order = &format!("{}-${}", &positions[i].get_str("ticker")?, &positions[i].get_str("diff")?[1..]);
+                // Channel feedback
+                //msg_feedback.push_str(&format!("\n{}", order));
+                //send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
+                // Recurse tmbot action
+                { cmd.lock().unwrap().msg = order.to_string(); }
+                glogd!(" do_trade_sell =>", do_trade_sell(cmd).await);
             }
         }
         for i in 0..positions.len() {
             if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                msg.push_str(
-                    &format!("\n{}+${}",
-                        &positions[i].get_str("ticker")?,
-                        &positions[i].get_str("diff")?));
-                send_edit_msg( MsgCmd::from(cmd.clone()), message_id, &msg).await?;
+                let order = &format!("{}+${}", &positions[i].get_str("ticker")?, &positions[i].get_str("diff")?);
+                // Channel feedback
+                //msg_feedback.push_str(&format!("\n{}", order));
+                //send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
+                // Recurse tmbot action
+                { cmd.lock().unwrap().msg = order.to_string(); }
+                glogd!(" do_trade_sell =>", do_trade_buy(cmd).await);
             }
         }
     }
-
     Ok("COMPLETED.")
 }
 
