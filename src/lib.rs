@@ -563,23 +563,22 @@ impl Quote {// Query local cache or internet for ticker details
         let is_self_stonk = is_self_stonk(ticker);
         let now :i64 = Instant::now().seconds();
 
-        let cmdstruct = cmd.lock().unwrap();
-        let envstruct = cmdstruct.env.lock().unwrap();
-
-        let res = getsql!(
-            cmdstruct.dbconn,
-            "SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?",
-            ticker)?;
-
-        let is_in_table = !res.is_empty();
-
-        let is_cache_valid = 
-            is_in_table && (is_self_stonk || { 
-                let hm = &res[0];
-                let timesecs       = hm.get_i64("time")?;
-                let traded_all_day = 24 == hm.get_i64("hours")?;
-                !update_ticker_p(&envstruct, timesecs, now, traded_all_day)?
-            });
+        let (res, is_in_table, is_cache_valid) = {
+            let cmdstruct = cmd.lock().unwrap();
+            let res = getsql!(
+                cmdstruct.dbconn,
+                "SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?",
+                ticker)?;
+            let is_in_table = !res.is_empty();
+            let is_cache_valid = 
+                is_in_table && (is_self_stonk || { 
+                    let hm = &res[0];
+                    let timesecs       = hm.get_i64("time")?;
+                    let traded_all_day = 24 == hm.get_i64("hours")?;
+                    !update_ticker_p(&cmdstruct.env.lock().unwrap(), timesecs, now, traded_all_day)?
+                });
+            (res, is_in_table, is_cache_valid)
+        };
 
         let quote =
             if is_cache_valid { // Is in cache so use it
@@ -616,11 +615,12 @@ impl Quote {// Query local cache or internet for ticker details
             };
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
+            let dbconn = &cmd.lock().unwrap().dbconn;
             if is_in_table {
-                getsql!(cmdstruct.dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
+                getsql!(dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
                     quote.price, quote.last, &*quote.market, now, quote.ticker.as_str())?
             } else {
-                getsql!(cmdstruct.dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
+                getsql!(dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
                     &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, now, &*quote.title)?
             };
         }
@@ -818,7 +818,6 @@ impl Position { // Format the position using its format string.
 #[derive(Debug)]
 struct Trade {
     cmd: Cmd,
-    id: i64,
     ticker: String,
     action: char, // '+' buy or '-' sell
     is_dollars: bool, // amt represents dollars or fractional quantity
@@ -827,13 +826,11 @@ struct Trade {
 
 impl Trade {
     fn new (cmd:&Cmd) -> Option<Self> {
-        let cmdstruct = cmd.lock().unwrap();
         //                         _____ticker____  _+-_  _$_   ____________amt_______________
-        match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmdstruct.msg) {
+        match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmd.lock().unwrap().msg) {
             Some(caps) => 
                 Some(Self {
                     cmd: cmd.clone(),
-                    id: cmdstruct.id,
                     ticker:     caps.get("1").unwrap().to_uppercase(),
                     action:     caps.get("2").unwrap().chars().nth(0).unwrap(),
                     is_dollars: caps.get("3").is_some(),
@@ -1430,7 +1427,10 @@ impl TradeBuyCalc {
                 },
                 Ok(r) => r
             };
-        let position = Position::query( &obj.trade.cmd, obj.trade.id, &obj.trade.ticker).await?;
+        let id = {
+            obj.trade.cmd.lock().unwrap().id
+        };
+        let position = Position::query( &obj.trade.cmd, id, &obj.trade.ticker).await?;
         let new_position_p = position.qty == 0.0;
 
         let qty_old = position.qty;
@@ -1452,20 +1452,20 @@ struct ExecuteBuy { msg:String, tradebuycalc:TradeBuyCalc }
 
 impl ExecuteBuy {
     fn execute (mut obj:TradeBuyCalc) -> Bresult<Self> {
-
         let msg = {
             let now = Instant::now().seconds();
-
             if obj.tradebuy.hours!=24 && !trading_hours_p( obj.tradebuy.trade.cmd.lock().unwrap().env.lock().unwrap().dst_hours_adjust, now)? {
-                return Ok(Self{msg:"Unable to trade after hours".into(), tradebuycalc:obj});
+                return Ok( ExecuteBuy {
+                    msg:"Unable to trade after hours".into(),
+                    tradebuycalc:obj
+                } )
             }
-
-            let id = obj.tradebuy.trade.id;
+            let cmdstruct = obj.tradebuy.trade.cmd.lock().unwrap();
+            let id = cmdstruct.id;
             let ticker = &obj.tradebuy.trade.ticker;
             let price = obj.tradebuy.price;
 
-            sql_table_order_insert(&obj.tradebuy.trade.cmd.lock().unwrap().dbconn, id, ticker, obj.qty, price, now)?;
-            let cmdstruct = obj.tradebuy.trade.cmd.lock().unwrap();
+            sql_table_order_insert(&cmdstruct.dbconn, id, ticker, obj.qty, price, now)?;
             let mut msg = format!("*Bought:*");
 
             if obj.new_position_p {
@@ -1477,7 +1477,6 @@ impl ExecuteBuy {
             }
             obj.position.qty = obj.new_qty;
             obj.position.price = obj.new_basis;
-            //let envstruct = cmdstruct.env.lock().unwrap();
             msg += &obj.position.format_position(&cmdstruct)?;
 
             getsql!( &cmdstruct.dbconn, "UPDATE accounts SET balance=? WHERE id=?", obj.new_balance, id)?;
@@ -1519,7 +1518,7 @@ struct TradeSell {
 
 impl TradeSell {
     async fn new (trade:Trade) -> Bresult<Self> {
-        let id = trade.id;
+        let id = { trade.cmd.lock().unwrap().id };
         let ticker = &trade.ticker;
 
         let mut positions = Position::get_position( &trade.cmd, id, ticker)?;
@@ -1580,19 +1579,17 @@ impl ExecuteSell {
     fn execute (mut obj:TradeSell) -> Bresult<Self> {
         let msg = {
             let now = Instant::now().seconds();
-
             if obj.hours!=24 && !trading_hours_p(obj.trade.cmd.lock().unwrap().env.lock().unwrap().dst_hours_adjust, now)? {
                 return Ok(Self{msg:"Unable to trade after hours".into(), tradesell:obj});
             }
-
-            let id = obj.trade.id;
+            let cmdstruct = obj.trade.cmd.lock().unwrap();
+            let id = cmdstruct.id;
             let ticker = &obj.trade.ticker;
             let qty = obj.qty;
             let price = obj.price;
             let new_qty = obj.new_qty;
-            sql_table_order_insert(&obj.trade.cmd.lock().unwrap().dbconn, id, ticker, -qty, price, now)?;
+            sql_table_order_insert(&cmdstruct.dbconn, id, ticker, -qty, price, now)?;
             let mut msg = format!("*Sold:*");
-            let cmdstruct = obj.trade.cmd.lock().unwrap();
             if new_qty == 0.0 {
                 getsql!( &cmdstruct.dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
                 msg += &obj.position.format_position(&cmdstruct)?;
@@ -2203,32 +2200,49 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
         for i in 0..positions.len() {
             let ticker = positions[i].get_str("ticker")?;
             let value = positions[i].get_f64("value")?;
-            let diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
+            let mut diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
+            if -0.01 > diff || diff < 0.01 { diff = 0.0; } // under 1¢ diffs will be skipped
             positions[i].insert("diff".to_string(), diff.to_string()); // Add new key/val to Position HashMap
         }
-        //let mut msg_feedback = format!("Suggested Trades");
         for i in 0..positions.len() {
             if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                let order = &format!("{}-${}", &positions[i].get_str("ticker")?, &positions[i].get_str("diff")?[1..]);
-                // Channel feedback
-                //msg_feedback.push_str(&format!("\n{}", order));
-                //send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
-                // Recurse tmbot action
-                { cmd.lock().unwrap().msg = order.to_string(); }
-                glogd!(" do_trade_sell =>", do_trade_sell(cmd).await);
+                let ticker = &positions[i].get_str("ticker")?;
+                let diffstr = &positions[i].get_str("diff")?[1..];
+                if "0" == diffstr {
+                    msg_feedback.push_str(&format!("\n{} is balanced", ticker));
+                    send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
+                } else {
+                    let order = &format!("{}-${}", ticker, diffstr);
+                    { cmd.lock().unwrap().msg = order.to_string(); }
+                    glogd!(" do_trade_sell =>", do_trade_sell(cmd).await);
+                }
             }
         }
         for i in 0..positions.len() {
             if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                let order = &format!("{}+${}", &positions[i].get_str("ticker")?, &positions[i].get_str("diff")?);
-                // Channel feedback
-                //msg_feedback.push_str(&format!("\n{}", order));
-                //send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
-                // Recurse tmbot action
-                { cmd.lock().unwrap().msg = order.to_string(); }
-                glogd!(" do_trade_sell =>", do_trade_buy(cmd).await);
+                let ticker = &positions[i].get_str("ticker")?;
+                let mut diffstr = positions[i].get_str("diff")?;
+                let bank_balance = { get_bank_balance(&cmd.lock().unwrap())?  };
+                // The last buy might be so off, so skip or adjust to account value
+                if bank_balance < diffstr.parse::<f64>()? {
+                    if 0.01 <= bank_balance {
+                        diffstr = format!("{}", (bank_balance*100.0) as i64 as f64 / 100.0);
+                    } else {
+                        diffstr = format!("0");
+                    }
+                    warn!("updated diff position {} {}", ticker, diffstr);
+                }
+
+                if "0" == diffstr {
+                    msg_feedback.push_str(&format!("\n{} is balanced", ticker));
+                    send_edit_msg(cmd.into(), channel_id, &msg_feedback).await?;
+                } else {
+                    let order = &format!("{}+${}", ticker, &diffstr);
+                    { cmd.lock().unwrap().msg = order.to_string(); }
+                    glogd!(" do_trade_sell =>", do_trade_buy(cmd).await);
+                }
             }
         }
     }
