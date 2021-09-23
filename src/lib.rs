@@ -2147,7 +2147,8 @@ async fn do_fmt (cmd :&Cmd) -> Bresult<&'static str> {
 async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
 
     let caps = regex_to_vec(
-        r"^/REBALANCE( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* [0-9]+)+)",
+        //             _______float to 2 decimal places______                                    ____________float_____________
+        r"^/REBALANCE( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* (([0-9]*[.][0-9]+)|([0-9]+[.]?)))+)",
         &cmd.lock().unwrap().msg.to_uppercase() )?;
     if caps.is_empty() { return Ok("SKIP") }
 
@@ -2155,12 +2156,11 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     let channel_id = send_msg(cmd.into(), &msg_feedback).await?;
 
     let percents = // HashMap of Ticker->Percent
-        Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) ([0-9]+[.]?|([0-9]*[.][0-9]{1,2}))")?
+        Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) (([0-9]*[.][0-9]+)|([0-9]+[.]?))")?
         .captures_iter(&caps.as_string(4)?)
-        .map(|cap| (
-            cap.get(1).unwrap().as_str().to_string(),
-            cap.get(2).unwrap().as_str().parse::<f64>().unwrap() / 100.0
-        ))
+        .map(|cap|
+            ( cap.get(1).unwrap().as_str().to_string(),
+              cap.get(2).unwrap().as_str().parse::<f64>().unwrap() / 100.0 ) )
         .collect::<HashMap<String, f64>>();
 
     // Refresh stonk quotes
@@ -2418,7 +2418,7 @@ pub async fn launch() -> Bresult<()> {
             message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
             message_id_write:    0,
             message_buff_write:  String::new(),
-            fmt_quote:           format!("%q%B%A%C%% %D%E@%F %G%H%I%q"),
+            fmt_quote:           format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
             fmt_position:        format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
         }));
 
