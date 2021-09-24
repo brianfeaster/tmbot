@@ -994,30 +994,37 @@ async fn do_curse (cmd:&Cmd) -> Bresult<&'static str> {
 }
 
 // Trying to delay an action
-async fn _do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let cmdstruct = cmd.lock().unwrap();
-    let caps =
-        match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmdstruct.msg) {
-            Some(caps) => caps,
-            None => return Ok("SKIP".into())
-        };
+    let (delay, msg) = {
+        let cmdstruct = cmd.lock().unwrap();
+        let caps =
+            match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmdstruct.msg) {
+                Some(caps) => caps,
+                None => return Ok("SKIP".into())
+            };
+        let delay = caps[1].parse::<u64>()?;
+        let msg = caps[2].to_string();
+        (delay, msg)
+    };
 
-    let delay = caps[1].parse::<u64>()?;
-    let msg = caps[2].to_string();
-    //let delay = ::tokio::time::delay_for(Duration::from_millis(delay));
-
-    let msgcmd = MsgCmd::from(&*cmdstruct);
-
-    std::thread::spawn( move || {
-        //let _rt = ::tokio::runtime::Runtime::new().expect("Cannot create tokio runtime");
+    //let msgcmd = MsgCmd::from(&*cmdstruct);
+    //std::thread::spawn( move || {
+        //let rt = ::tokio::runtime::Runtime::new().expect("Cannot create tokio runtime");
         //std::thread::sleep(std::time::Duration::from_secs(delay));
-        error!("*************{:?}", msgcmd);
-        let res = futures::executor::block_on(send_msg(msgcmd, &format!("{} {}", delay, msg)));
-        info!("send_msg => {:?}", res)
-    });
+        //error!("{:?}", send_msg(cmd.into(), &format!("{} {}", delay, msg)).await);
 
-    //println!("join = {:?}", ::futures::join!(delay, sendmsg));
+    //});
+    //task::sleep(std::time::Duration::from_secs(delay)).await;
+    //println!("send_msg => {:?}", send_msg(cmd.into(), &format!("{}", msg)).await);
+
+    ::tokio::time::delay_for(::std::time::Duration::from_secs(delay)).await;
+    //::tokio::time::delay_until(tokio::time::Instant::now() + std::time::Duration::from_secs(delay)).await;
+    let msgcmd :MsgCmd = cmd.clone().into();
+    let res = send_msg(msgcmd, &format!("{} {}", delay, msg)).await;
+    println!("{:?}", res);
+    //::tokio::spawn(async move {
+    //});
     Ok("COMPLETED.")
 }
 
@@ -2255,7 +2262,7 @@ async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_echo =>",       do_echo(&cmd).await);
     glogd!("do_help =>",       do_help(&cmd).await);
     glogd!("do_curse =>",      do_curse(&cmd).await);
-  //glogd!("do_repeat =>",     do_repeat(&cmd).await);
+    glogd!("do_repeat =>",     do_repeat(&cmd).await);
     glogd!("do_like =>",       do_like(&cmd).await);
     glogd!("do_like_info =>",  do_like_info(&cmd).await);
     glogd!("do_def =>",        do_def(&cmd).await);
@@ -2375,23 +2382,27 @@ fn log_header () {
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
 
-    let env :&Env = req.app_data::<web::Data<Env>>().unwrap();
+    let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
 
     info!("\x1b[1m{:?}", env);
     info!("\x1b[35m{}", format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
     info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""));
     info!("body:\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
 
-    do_all(env.clone(), &body).await
-        .unwrap_or_else(|r| error!("{:?}", r));
+    std::thread::spawn( move || {
+        let env2 = env.clone();
+        actix_web::rt::System::new("tmbot").block_on(async move {
+            do_all(env2.clone(), &body).await.unwrap_or_else(|r| error!("{:?}", r));
+        });
 
-    info!("{:#?}", env);
-    info!("End.");
+        info!("{:#?}", env);
+        info!("End.");
+    });
 
     HttpResponse::from("")
 }
 
-pub async fn launch() -> Bresult<()> {
+pub fn launch() -> Bresult<()> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
@@ -2422,7 +2433,8 @@ pub async fn launch() -> Bresult<()> {
             fmt_position:        format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
         }));
 
-    Ok( HttpServer::new(
+    let srv =
+        HttpServer::new(
             move || {
             App::new()
             .data(env.clone())
@@ -2431,8 +2443,11 @@ pub async fn launch() -> Bresult<()> {
                 .route(
                     Route::new()
                     .to(main_dispatch) ) ) } )
-        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?
-        .run().await? )
+        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
+        
+    Ok(actix_web::rt::System::new("tmbot").block_on(async move {
+        println!("launch() => {:?}", srv.run().await)
+    }))
 } // launch
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -18,7 +18,7 @@ fn _logger_formatter (buf :&mut Formatter, rec :&Record) -> std::io::Result<()> 
 }
 
 /// Initialize logger
-fn _logger_init () {
+fn logger_init () {
     env_logger::builder()
     //.format_timestamp(None).init()
     //.filter_level(log::LevelFilter::max())
@@ -27,15 +27,18 @@ fn _logger_init () {
     //log::error!("error"); log::warn!("warn"); log::info!("info"); log::debug!("debug"); log::trace!("trace"); 
 }
 
-fn _wat (s:&str) {
-    println!("{}", s);
-}
-
+/*
 #[actix_web::main]
 async fn main() {
-    _logger_init();
+    logger_init();
     let res = ::tmbot::launch().await;
     tmbot::glogd!("main() => ", res);
+}
+*/
+
+fn main () {
+    logger_init();
+    println!("main() => {:?}", ::tmbot::launch());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

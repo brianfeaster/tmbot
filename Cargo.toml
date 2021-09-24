@@ -9,7 +9,8 @@ macros = { path = "macros" }
 log = "*"
 env_logger = "*"
 regex = "*"
-actix-web = { version = "3", features = ["openssl"] }
+tokio = { version = "*", features = ["full"] }
+actix-web = { version = "*", features = ["openssl"] }
 openssl = { version = "0.10" }
 serde_json = "*"
 serde_urlencoded = "*"
@@ -17,5 +18,4 @@ sqlite = "*"
 datetime = "*"
 awc = "*"
 rand = "*"
-tokio = "*"
 futures = "*"
