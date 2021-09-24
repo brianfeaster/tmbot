@@ -1018,8 +1018,7 @@ async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
     //task::sleep(std::time::Duration::from_secs(delay)).await;
     //println!("send_msg => {:?}", send_msg(cmd.into(), &format!("{}", msg)).await);
 
-    ::tokio::time::delay_for(::std::time::Duration::from_secs(delay)).await;
-    //::tokio::time::delay_until(tokio::time::Instant::now() + std::time::Duration::from_secs(delay)).await;
+    ::tokio::time::delay_until(tokio::time::Instant::now() + std::time::Duration::from_secs(delay)).await;
     let msgcmd :MsgCmd = cmd.clone().into();
     let res = send_msg(msgcmd, &format!("{} {}", delay, msg)).await;
     println!("{:?}", res);
