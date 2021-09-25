@@ -113,9 +113,8 @@ async fn _send_msg (
     edit_msg_id: Option<i64>,
     text: &str
 ) -> Bresult<i64> {
-    info!("Telegram \x1b[1;33m{:?}  target={}  edit_message?={}  markdown?={}  edit_msg_id={:?}",
-        mc, target, is_edit_message, is_markdown, edit_msg_id);
-    for l in text.lines() { info!("Telegram <= \x1b[1;36m{}", l) }
+    info!("Telegram \x1b[1;33m{:?}  target:{}  edit_message?:{}  markdown?:{}  edit_msg_id:{:?}  text:{:?}",
+        mc, target, is_edit_message, is_markdown, edit_msg_id, text);
 
     // Message either: 
     let chat_id =
@@ -170,7 +169,7 @@ async fn _send_msg (
 
     if is_markdown { query.push(["parse_mode", "MarkdownV2"]) }
 
-    warn!("outgoing query: {:?}", query);
+    info!("Telegram <= \x1b[1;36m{:?}", query);
 
     let mut builder = SslConnector::builder(SslMethod::tls())?;
     builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;

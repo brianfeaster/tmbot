@@ -463,6 +463,7 @@ impl CmdStruct {
     }
     // create a basic CmdStruct
     fn new(env:&Env) -> Bresult<CmdStruct> {
+        let now = Instant::now().seconds();
         let (dbconn, chat_id_default, fmt_quote, fmt_position) = {
             let envstruct = env.lock().unwrap();
             ( Connection::new(&envstruct.sqlite_filename)?,
@@ -471,7 +472,8 @@ impl CmdStruct {
               envstruct.fmt_position.to_string() )
         };
         Ok(CmdStruct{
-            env: env.clone(),  now: Instant::now().seconds(),  dbconn,
+            env: env.clone(),
+            now, dbconn,
             id: chat_id_default,  at: chat_id_default,  to: chat_id_default,
             id_level: 2,  at_level: 2,  to_level: 2,
             message_id: 0,
@@ -2268,7 +2270,6 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         &cmd.lock().unwrap().msg.to_lowercase() )?;
     if caps.is_empty() { return Ok("SKIP") }
 
-    gerror(&caps);
     let adj  = caps.as_str(1).map_or(1,|_|-1);
     let hours = caps.as_i64(3).unwrap_or(0);
     let mins  = caps.as_i64(5).unwrap_or(0);
@@ -2285,7 +2286,7 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
     let mut time = now + adjust;
     if repeat { time = time.rem_euclid(86400)}
 
-    info!("{:?}/{:?}:{:?}:{:?}/{:?}  now:{}  [id:{} at:{} time:{} cmd:{:?}]",
+    info!("adj:{:?} {:?}h{:?}m{:?}s  repeat:{:?}  now:{}  [id:{} at:{} time:{} cmd:{:?}]",
         adj, hours, mins, secs, repeat, now, id, at, time, command);
 
     //send_msg(cmd.into(), &buff).await?;
@@ -2470,36 +2471,36 @@ pub fn launch() -> Bresult<()> {
         });
 
     // A scheduler thread
+    info!("Spawned Scheduler Event Thread at 10 second interval");
     let env = env0.clone();
     std::thread::spawn( move || {
         loop {
-            info!("Thread Start (10 sec...)");
-            std::thread::sleep(std::time::Duration::from_secs(10));
-            let cmdstruct = CmdStruct::new(&env).unwrap(); // Might not need to be Arc/Mutex
-            info!("\x1b[1;31m{:#?}", cmdstruct);
-            let mut msgcmdfake = MsgCmd::from(&cmdstruct);
-            let mut envstruct = cmdstruct.env.lock().unwrap();
-            let time_scheduler = envstruct.time_scheduler;
-            let now = cmdstruct.now;
-            let rows = getsql!(
+            sleep_secs(10.0);
+            let cmdstruct = CmdStruct::new(&env).unwrap();
+            let res = getsqlquiet!(
                 cmdstruct.dbconn,
-                "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<=?",
-                time_scheduler, now).unwrap();
-            gwarn(&rows);
-            actix_web::rt::System::new("tmbot")
-                .block_on(async move {
-                    for row in rows {
-                        msgcmdfake.id = row.get_i64("id").unwrap();
-                        msgcmdfake.at = row.get_i64("at").unwrap();
-                        let time = row.get_i64("time").unwrap();
-                        let cmd = row.get_str("cmd").unwrap();
-                        let msg = format!("{} {}", time, cmd);
-                        gwarn(send_msg(msgcmdfake.clone(), &msg).await);
-                    }
-                });
-
-            envstruct.time_scheduler = now;
-            info!("Thread End.");
+                "SELECT id, at, time, cmd, fart FROM schedules WHERE ?<=time AND time<?",
+                    cmdstruct.env.lock().unwrap().time_scheduler,
+                    cmdstruct.now);
+            let rows = match res {
+                Ok(rows) => rows,
+                e => { glog!(e); continue } };
+            if 0 < rows.len() {
+                info!("\x1b[1;31m{:#?}", cmdstruct);
+                ginfo(&rows);
+                let mut msgcmdfake = MsgCmd::from(&cmdstruct); // Used by send_msg
+                actix_web::rt::System::new("tmbot")
+                    .block_on(async move {
+                        for row in rows {
+                            msgcmdfake.id = row.get_i64("id").unwrap();
+                            msgcmdfake.at = row.get_i64("at").unwrap();
+                            let cmd = row.get_str("cmd").unwrap();
+                            gwarn(send_msg(msgcmdfake.clone(), &cmd).await);
+                        }
+                    });
+                info!("Thread End.");
+            }
+            cmdstruct.env.lock().unwrap().time_scheduler = cmdstruct.now;
         }
     });
 

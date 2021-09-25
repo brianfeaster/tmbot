@@ -1,6 +1,8 @@
 use ::std::{
-    str::from_utf8,
-    error::Error,
+    thread,
+    time::{Duration},
+    str::{from_utf8},
+    error::{Error},
 };
 pub use ::serde_json::{Value};
 use log::*;
@@ -109,4 +111,12 @@ pub fn getin_str <'t> (json :&'t Value, keys :&[&str]) -> Result<String, String>
     .map_or(
         Err(format!("Unable to parse {:?} as_str", keys)),
         |j| Ok(j.to_string()) )
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+/// Useful
+
+pub fn sleep_secs(secs: f64) {
+    thread::sleep(Duration::from_millis( (secs*1000.0) as u64));
 }
