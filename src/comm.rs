@@ -11,15 +11,14 @@ use ::openssl::ssl::{SslConnector, SslMethod};
 use ::log::*;
 
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MsgCmd {
     chat_id_default: i64,
-    id: i64,
-    at: i64,
+    pub id: i64,
+    pub at: i64,
     id_level: i64,
     at_level: i64,
     url_api: String,
-    //cmd: Cmd,
     chat_id: Option<i64>, // Unoverideable un-overridable destination chat_id
     level: i64,
 }
@@ -30,12 +29,13 @@ impl From<Cmd> for MsgCmd {
         let env = cmd.env.lock().unwrap();
         MsgCmd{
             chat_id_default: env.chat_id_default,
-            id: cmd.id,
-            at: cmd.at,
+            id:       cmd.id,
+            at:       cmd.at,
             id_level: cmd.id_level,
             at_level: cmd.at_level,
-            url_api: env.url_api.to_string(),
-            chat_id:None, level:2}
+            url_api:  env.url_api.to_string(),
+            chat_id:  None,
+            level:    2}
     }
 }
 impl From<&Cmd> for MsgCmd {
@@ -44,12 +44,13 @@ impl From<&Cmd> for MsgCmd {
         let env = cmd.env.lock().unwrap();
         MsgCmd{
             chat_id_default: env.chat_id_default,
-            id: cmd.id,
-            at: cmd.at,
+            id:       cmd.id,
+            at:       cmd.at,
             id_level: cmd.id_level,
             at_level: cmd.at_level,
-            url_api: env.url_api.to_string(),
-            chat_id:None, level:2}
+            url_api:  env.url_api.to_string(),
+            chat_id:  None,
+            level:    2}
     }
 }
 
@@ -64,11 +65,12 @@ impl From<&CmdStruct> for MsgCmd {
             at_level: cmdstruct.at_level,
             url_api:  env.url_api.to_string(),
             chat_id:  None,
-            level:   2}
+            level:    2}
     }
 }
 
 impl MsgCmd {
+    // force a message to this id/channel
     pub fn _to (mut self, to:i64) -> Self {
          self.chat_id = Some(to);
          self
@@ -115,13 +117,14 @@ async fn _send_msg (
         mc, target, is_edit_message, is_markdown, edit_msg_id);
     for l in text.lines() { info!("Telegram <= \x1b[1;36m{}", l) }
 
+    // Message either: 
     let chat_id =
         if let Some(chat_id) = mc.chat_id {
-            chat_id // Forced message
+            chat_id // Forced message to this id
         } else if 1 == target && mc.level <= mc.at_level {
-            mc.at // Message channel-ish
+            mc.at // Message the "at" channel
         } else if mc.level <= mc.id_level {
-            mc.id // Message user-ish
+            mc.id // Message the "id" channel
         } else {
             mc.chat_id_default // Message sysadmin
         }.to_string();

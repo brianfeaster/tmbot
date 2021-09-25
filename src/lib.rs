@@ -46,9 +46,9 @@ impl AsF64 for Vec<Option<String>> {
     }
 }
 
-trait AsStr { fn as_istr (&self, i:usize) -> Bresult<&str>; }
+trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
 impl AsStr for Vec<Option<String>> {
-    fn as_istr (&self, i:usize) -> Bresult<&str> {
+    fn as_str (&self, i:usize) -> Bresult<&str> {
         Ok(self.get(i)
             .ok_or("can't index vector")?.as_ref()
             .ok_or("can't infer str from None")? )
@@ -109,7 +109,7 @@ impl GetChar for HashMap<String, String> {
 /*
 // Trying to implement without using ? for the learns.
 impl AsStr for Vec<Option<String>> {
-    fn as_istr (&self, i:usize) -> Bresult<&str> {
+    fn as_str (&self, i:usize) -> Bresult<&str> {
         self.get(i) // Option< Option<String> >
         .ok_or("can't index vector".into()) // Result< Option<String>>, Bresult<> >
         .map_or_else(
@@ -370,18 +370,25 @@ pub struct EnvStruct {
     // Muteables Previous message editing
     message_id_read:    i64,   // ?? Message id of the incoming messsage?
     message_id_write:   i64,   // ?? Message id of the outgoing message?
-    message_buff_write: String,
+    message_buff_write: String,// Buffer to write (sent to channel "message_id_write")
     fmt_quote:          String, // Default format string for quotes
     fmt_position:       String, // Default format string for portfolio positions
+    time_scheduler:     i64,    // Time the scheduler last ran
 }
 
 type Env = Arc<Mutex<EnvStruct>>;
 
+impl From<EnvStruct> for Env {
+    fn from (envstruct:EnvStruct) -> Self {
+        Arc::new(Mutex::new(envstruct))
+    }
+}
 ////////////////////////////////////////
 #[derive(Debug)]
-pub struct CmdStruct { // Represents in incoming Telegram message
+pub struct CmdStruct { // Represents in incoming Telegram message and session/service state.
     env: Env,
     dbconn: Connection,
+    now: i64,
     id: i64, // Entity that sent the message message.from.id
     at: i64, // Group (or entity/DM) that the message was sent in message.chat.id
     to: i64, // To whom the message is addressed (contains a message.reply_to_message.from.id) defaults to id
@@ -396,19 +403,9 @@ pub struct CmdStruct { // Represents in incoming Telegram message
 
 type Cmd = Arc<Mutex<CmdStruct>>;
 
-//Old way when structs were being passed by value/copy.  (Copy back important altered state for next time)
-//env.message_id_read = cmd.env.message_id_read;
-//env.message_id_write = cmd.env.message_id_write;
-//env.message_buff_write.clear();
-//env.message_buff_write.push_str(&cmd.env.message_buff_write);
-
 impl CmdStruct {
-    fn _level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
-    fn _to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
     // Creates a Cmd object from Env and Telegram message body.
-    // It is passed to a bunch of async functions so must exist
-    // for as long as there are async waiting.
-    fn parse_cmd(env:Env, body: &web::Bytes) -> Bresult<Cmd> {
+    fn new_cmd(env:Env, body: &web::Bytes) -> Bresult<Cmd> {
         let envstruct = env.lock().unwrap();
         let dbconn = Connection::new(&envstruct.sqlite_filename)?; // TODO move this to env
         let json: Value = bytes2json(&body)?;
@@ -453,10 +450,10 @@ impl CmdStruct {
             };
         if fmt_quote.is_empty() { fmt_quote = envstruct.fmt_quote.to_string() }
         if fmt_position.is_empty() { fmt_position = envstruct.fmt_position.to_string() }
-        info!("fmt_quote {:?}  fmt_position {:?}", fmt_quote, fmt_position);
 
         Ok(Cmd::new(Mutex::new(CmdStruct{
             env: env.clone(),
+            now: Instant::now().seconds(),
             dbconn, id, at, to,
             id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
             at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
@@ -464,7 +461,27 @@ impl CmdStruct {
             message_id, fmt_quote, fmt_position, msg
         })))
     }
-} // Cmd
+    // create a basic CmdStruct
+    fn new(env:&Env) -> Bresult<CmdStruct> {
+        let (dbconn, chat_id_default, fmt_quote, fmt_position) = {
+            let envstruct = env.lock().unwrap();
+            ( Connection::new(&envstruct.sqlite_filename)?,
+              envstruct.chat_id_default,
+              envstruct.fmt_quote.to_string(),
+              envstruct.fmt_position.to_string() )
+        };
+        Ok(CmdStruct{
+            env: env.clone(),  now: Instant::now().seconds(),  dbconn,
+            id: chat_id_default,  at: chat_id_default,  to: chat_id_default,
+            id_level: 2,  at_level: 2,  to_level: 2,
+            message_id: 0,
+            fmt_quote, fmt_position,
+            msg:format!("say hello, world")
+        })
+    }
+    //fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
+    //fn to (&self, to:i64) -> MsgCmd { MsgCmd::from(self)._to(to) }
+} // CmdStruct
 
 ////////////////////////////////////////
 
@@ -561,7 +578,6 @@ impl Quote {// Query local cache or internet for ticker details
         // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
         if &ticker[0..1] == "@" { Err("Illegal ticker")? }
         let is_self_stonk = is_self_stonk(ticker);
-        let now :i64 = Instant::now().seconds();
 
         let (res, is_in_table, is_cache_valid) = {
             let cmdstruct = cmd.lock().unwrap();
@@ -575,7 +591,7 @@ impl Quote {// Query local cache or internet for ticker details
                     let hm = &res[0];
                     let timesecs       = hm.get_i64("time")?;
                     let traded_all_day = 24 == hm.get_i64("hours")?;
-                    !update_ticker_p(&cmdstruct.env.lock().unwrap(), timesecs, now, traded_all_day)?
+                    !update_ticker_p(&cmdstruct.env.lock().unwrap(), timesecs, cmdstruct.now, traded_all_day)?
                 });
             (res, is_in_table, is_cache_valid)
         };
@@ -615,13 +631,13 @@ impl Quote {// Query local cache or internet for ticker details
             };
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
-            let dbconn = &cmd.lock().unwrap().dbconn;
+            let cmdstruct = cmd.lock().unwrap();
             if is_in_table {
-                getsql!(dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
-                    quote.price, quote.last, &*quote.market, now, quote.ticker.as_str())?
+                getsql!(&cmdstruct.dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
+                    quote.price, quote.last, &*quote.market, cmdstruct.now, quote.ticker.as_str())?
             } else {
-                getsql!(dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
-                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, now, &*quote.title)?
+                getsql!(&cmdstruct.dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
+                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, cmdstruct.now, &*quote.title)?
             };
         }
 
@@ -1008,22 +1024,11 @@ async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
         (delay, msg)
     };
 
-    //let msgcmd = MsgCmd::from(&*cmdstruct);
-    //std::thread::spawn( move || {
-        //let rt = ::tokio::runtime::Runtime::new().expect("Cannot create tokio runtime");
-        //std::thread::sleep(std::time::Duration::from_secs(delay));
-        //error!("{:?}", send_msg(cmd.into(), &format!("{} {}", delay, msg)).await);
-
-    //});
-    //task::sleep(std::time::Duration::from_secs(delay)).await;
-    //println!("send_msg => {:?}", send_msg(cmd.into(), &format!("{}", msg)).await);
-
     ::tokio::time::delay_until(tokio::time::Instant::now() + std::time::Duration::from_secs(delay)).await;
     let msgcmd :MsgCmd = cmd.clone().into();
     let res = send_msg(msgcmd, &format!("{} {}", delay, msg)).await;
     println!("{:?}", res);
-    //::tokio::spawn(async move {
-    //});
+
     Ok("COMPLETED.")
 }
 
@@ -1160,7 +1165,7 @@ async fn do_sql (cmd:&Cmd) -> Bresult<&'static str> {
         let cmdstruct = cmd.lock().unwrap();
         if cmdstruct.id != 308188500 { return Ok("do_sql invalid user"); }
         let rev = regex_to_vec("^(.*)ß$", &cmdstruct.msg)?;
-        let expr :&str = if rev.is_empty() { return Ok("SKIP") } else { rev.as_istr(1)? };
+        let expr :&str = if rev.is_empty() { return Ok("SKIP") } else { rev.as_str(1)? };
         getsql!(cmdstruct.dbconn, expr)
     };
 
@@ -2255,9 +2260,144 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
+
+    let caps = regex_to_vec(
+        //            _-__  __23h__   __59m__   __59__   _*_   _c_
+        r"^/schedule ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)",
+        &cmd.lock().unwrap().msg.to_lowercase() )?;
+    if caps.is_empty() { return Ok("SKIP") }
+
+    gerror(&caps);
+    let adj  = caps.as_str(1).map_or(1,|_|-1);
+    let hours = caps.as_i64(3).unwrap_or(0);
+    let mins  = caps.as_i64(5).unwrap_or(0);
+    let secs  = caps.as_i64(7).unwrap_or(0);
+    let repeat  = caps.as_str(8).map_or(false,|_|true);
+    let command = caps.as_str(9)?;
+
+    let adjust = adj*( 60*60*hours + 60* mins + secs );
+
+    let cmdstruct = cmd.lock().unwrap();
+    let now = cmdstruct.now;
+    let id = cmdstruct.id;
+    let at = cmdstruct.at;
+    let mut time = now + adjust;
+    if repeat { time = time.rem_euclid(86400)}
+
+    info!("{:?}/{:?}:{:?}:{:?}/{:?}  now:{}  [id:{} at:{} time:{} cmd:{:?}]",
+        adj, hours, mins, secs, repeat, now, id, at, time, command);
+
+    //send_msg(cmd.into(), &buff).await?;
+    glog!(getsql!(&cmdstruct.dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?)",
+        cmdstruct.id, cmdstruct.at, time, command));
+
+    Ok("COMPLETED.")
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+fn do_schema() -> Bresult<()> {
+    let conn = Connection::new(&"tmbot.sqlite")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS entitys (
+            id INTEGER NOT NULL UNIQUE,
+            name  TEXT NOT NULL);")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS modes (
+            id   INTEGER NOT NULL UNIQUE,
+            echo INTEGER NOT NULL);")?;
+
+    //for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+    //    let mut v = l.split(" ");
+    //    let id = v.next().ok_or("User DB malformed.")?.parse::<i64>()?;
+    //    let name = v.next().ok_or("User DB malformed.")?.to_string();
+    //    getsql!(&conn,"INSERT INTO entitys VALUES (?, ?)", id, &*name)?;
+    //    if id < 0 {
+    //        getsql!(&conn,"INSERT INTO modes VALUES (?, 2)", id)?;
+    //    }
+    //}
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS formats (
+            id    INTEGER NOT NULL UNIQUE,
+            quote    TEXT NOT NULL,
+            position TEXT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS accounts (
+            id    INTEGER  NOT NULL UNIQUE,
+            balance FLOAT  NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS stonks (
+            ticker   TEXT NOT NULL UNIQUE,
+            price   FLOAT NOT NULL,
+            last    FLOAT NOT NULL,
+            market   TEXT NOT NULL,
+            hours INTEGER NOT NULL,
+            exchange TEXT NOT NULL,
+            time  INTEGER NOT NULL,
+            title    TEXT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS orders (
+            id   INTEGER  NOT NULL,
+            ticker  TEXT  NOT NULL,
+            qty    FLOAT  NOT NULL,
+            price  FLOAT  NOT NULL,
+            time INTEGER  NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS positions (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            qty    FLOAT NOT NULL,
+            price  FLOAT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS exchange (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            qty    FLOAT NOT NULL,
+            price  FLOAT NOT NULL,
+            time INTEGER NOT NULL);
+    ")?;
+
+    // time 0 midnight
+    // time 44 44seconds   33m 33 minutes   33m44 33 min and 44 seconds
+    // when = 0:once 1:daily
+    // 1h33m44
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS schedules (
+            id   INTEGER NOT NULL,
+            at   INTEGER NOT NULL,
+            time INTEGER NOT NULL,
+            cmd     TEXT NOT NULL);")?;
+
+    Ok(())
+}
+
+fn log_header () {
+    info!("\x1b[0;31;40m _____ __  __ ____        _   ");
+    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
+    info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
+    info!("\x1b[0;34;40m  | | | |  | | |_) | (_) | |_ ");
+    info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
-    let cmd :Cmd = CmdStruct::parse_cmd(env, body)?;
-    info!("\x1b[33m{:?}", &cmd);
+    let cmd :Cmd = CmdStruct::new_cmd(env, body)?;
+    info!("\x1b[33m{:?}", &cmd.lock().unwrap());
     glogd!("do_echo =>",       do_echo(&cmd).await);
     glogd!("do_help =>",       do_help(&cmd).await);
     glogd!("do_curse =>",      do_curse(&cmd).await);
@@ -2275,133 +2415,34 @@ async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_orders =>",     do_orders(&cmd).await);
     glogd!("do_fmt =>",        do_fmt(&cmd).await);
     glogd!("do_rebalance =>",  do_rebalance(&cmd).await);
+    glogd!("do_schedule =>",   do_schedule(&cmd).await);
     Ok(())
 }
-
-////////////////////////////////////////////////////////////////////////////////
-
-fn do_schema() -> Bresult<()> {
-    let sql = ::sqlite::open("tmbot.sqlite")?;
-
-    sql.execute("
-        CREATE TABLE entitys (
-            id INTEGER NOT NULL UNIQUE,
-            name  TEXT NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        CREATE TABLE modes (
-            id   INTEGER NOT NULL UNIQUE,
-            echo INTEGER NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        CREATE TABLE formats (
-            id    INTEGER NOT NULL UNIQUE,
-            quote    TEXT NOT NULL,
-            position TEXT NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?;
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        sql.execute( format!("INSERT INTO entitys VALUES ( {}, {:?} )", id, name)).map_or_else(gwarn, ginfo);
-        if id.parse::<i64>().unwrap() < 0 {
-            sql.execute( format!("INSERT INTO modes VALUES ({}, 2)", id) ).map_or_else(gwarn, ginfo);
-        }
-    }
-
-    sql.execute("
-        CREATE TABLE accounts (
-            id    INTEGER  NOT NULL UNIQUE,
-            balance FLOAT  NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        --DROP TABLE stonks;
-        CREATE TABLE stonks (
-            ticker   TEXT NOT NULL UNIQUE,
-            price   FLOAT NOT NULL,
-            last    FLOAT NOT NULL,
-            market   TEXT NOT NULL,
-            hours INTEGER NOT NULL,
-            exchange TEXT NOT NULL,
-            time  INTEGER NOT NULL,
-            title    TEXT NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO stonks VALUES ( 'TWNK', 14.97, 1613630678, '14.97')").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO stonks VALUES ( 'GOOG', 2128.31, 1613630678, '2,128.31')").map_or_else(gwarn, ginfo);
-    //sql.execute("UPDATE stonks SET time=1613630678 WHERE ticker='TWNK'").map_or_else(gwarn, ginfo);
-    //sql.execute("UPDATE stonks SET time=1613630678 WHERE ticker='GOOG'").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        --DROP TABLE orders;
-        CREATE TABLE orders (
-            id   INTEGER  NOT NULL,
-            ticker  TEXT  NOT NULL,
-            qty    FLOAT  NOT NULL,
-            price  FLOAT  NOT NULL,
-            time INTEGER  NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO orders VALUES ( 241726795, 'TWNK', 500, 14.95, 1613544000 )").map_or_else(gwarn, ginfo);
-    //sql.execute("INSERT INTO orders VALUES ( 241726795, 'GOOG', 0.25, 2121.90, 1613544278 )").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        CREATE TABLE positions (
-            id   INTEGER NOT NULL,
-            ticker  TEXT NOT NULL,
-            qty    FLOAT NOT NULL,
-            price  FLOAT NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    sql.execute("
-        CREATE TABLE exchange (
-            id   INTEGER NOT NULL,
-            ticker  TEXT NOT NULL,
-            qty    FLOAT NOT NULL,
-            price  FLOAT NOT NULL,
-            time INTEGER NOT NULL);
-    ").map_or_else(gwarn, ginfo);
-
-    Ok(())
-}
-
-
-fn log_header () {
-    info!("\x1b[0;31;40m _____ __  __ ____        _   ");
-    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
-    info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
-    info!("\x1b[0;34;40m  | | | |  | | |_) | (_) | |_ ");
-    info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
-}
-
-////////////////////////////////////////////////////////////////////////////////
 
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
+    info!("\x1b[35m{}",
+        format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
+    info!("\x1b[35m{}  Body:\x1b[1;35m{}",
+        format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""),
+        from_utf8(&body).unwrap_or(&format!("{:?}", body)) );
 
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-
-    info!("\x1b[1m{:?}", env);
-    info!("\x1b[35m{}", format!("{:?}", &req.connection_info()).replace(": ", ":").replace("\"", "").replace(",", ""));
-    info!("\x1b[35m{}", format!("{:?}", &req).replace("\n", "").replace(r#"": ""#, ":").replace("\"", "").replace("   ", ""));
-    info!("body:\x1b[35m{}", from_utf8(&body).unwrap_or(&format!("{:?}", body)));
+    info!("\x1b[1m{:?}", env.lock().unwrap());
 
     std::thread::spawn( move || {
         let env2 = env.clone();
-        actix_web::rt::System::new("tmbot").block_on(async move {
-            do_all(env2.clone(), &body).await.unwrap_or_else(|r| error!("{:?}", r));
-        });
-
-        info!("{:#?}", env);
-        info!("End.");
+        actix_web::rt::System::new("tmbot")
+            .block_on(async move {
+                do_all(env2.clone(), &body).await.unwrap_or_else(|r| error!("{:?}", r));
+            });
+        info!("\x1b[33m{:?}\n\x1b[0;1mEnd.", env.lock().unwrap());
     });
-
-    HttpResponse::from("")
+    "".into()
 }
 
 pub fn launch() -> Bresult<()> {
+    let now = Instant::now().seconds();
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
@@ -2410,40 +2451,68 @@ pub fn launch() -> Bresult<()> {
     let chat_id_default  = env::args().nth(2).ok_or("args[2] missing")?.parse::<i64>()?;
     let dst_hours_adjust = env::args().nth(3).ok_or("args[3] missing")?.parse::<i8>()?;
 
-    if !true { do_schema()? } // Create DB
+    if !true { glog!(do_schema()); } // Create DB
+    if !true { glogd!("fun():", fun()) } // Hacks and other test code
 
-    // Hacks and other test code
-    if !true { return fun().map_err( |e| {
-        info!("{:?}", e);
-        e
-    } ) }
+    let env0 =  // Common/shared environment for all event handlers
+        Env::from(EnvStruct{
+            url_api:            format!("https://api.telegram.org/bot{}", &botkey),
+            sqlite_filename:    format!("tmbot.sqlite"),
+            chat_id_default:    chat_id_default,
+            dst_hours_adjust:   dst_hours_adjust,
+            quote_delay_secs:   QUOTE_DELAY_SECS,
+            message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
+            message_id_write:   0,
+            message_buff_write: String::new(),
+            fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
+            fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
+            time_scheduler:     now,
+        });
 
-    let env :Env =  // Shared by requests handler threads.
-        Arc::new(Mutex::new(EnvStruct{
-            url_api:             format!("https://api.telegram.org/bot{}", &botkey),
-            sqlite_filename:     format!("tmbot.sqlite"),
-            chat_id_default:     chat_id_default,
-            dst_hours_adjust:    dst_hours_adjust,
-            quote_delay_secs:    QUOTE_DELAY_SECS,
-            message_id_read:     0, // TODO edited_message mechanism is broken especially when /echo=1
-            message_id_write:    0,
-            message_buff_write:  String::new(),
-            fmt_quote:           format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
-            fmt_position:        format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
-        }));
+    // A scheduler thread
+    let env = env0.clone();
+    std::thread::spawn( move || {
+        loop {
+            info!("Thread Start (10 sec...)");
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let cmdstruct = CmdStruct::new(&env).unwrap(); // Might not need to be Arc/Mutex
+            info!("\x1b[1;31m{:#?}", cmdstruct);
+            let mut msgcmdfake = MsgCmd::from(&cmdstruct);
+            let mut envstruct = cmdstruct.env.lock().unwrap();
+            let time_scheduler = envstruct.time_scheduler;
+            let now = cmdstruct.now;
+            let rows = getsql!(
+                cmdstruct.dbconn,
+                "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<=?",
+                time_scheduler, now).unwrap();
+            gwarn(&rows);
+            actix_web::rt::System::new("tmbot")
+                .block_on(async move {
+                    for row in rows {
+                        msgcmdfake.id = row.get_i64("id").unwrap();
+                        msgcmdfake.at = row.get_i64("at").unwrap();
+                        let time = row.get_i64("time").unwrap();
+                        let cmd = row.get_str("cmd").unwrap();
+                        let msg = format!("{} {}", time, cmd);
+                        gwarn(send_msg(msgcmdfake.clone(), &msg).await);
+                    }
+                });
+
+            envstruct.time_scheduler = now;
+            info!("Thread End.");
+        }
+    });
 
     let srv =
-        HttpServer::new(
-            move || {
+        HttpServer::new( move ||
             App::new()
-            .data(env.clone())
+            .data(env0.clone())
             .service(
                 web::resource("*")
-                .route(
-                    Route::new()
-                    .to(main_dispatch) ) ) } )
+                .route( Route::new().to(main_dispatch) ) ) )
         .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
         
+    // This should never return
     Ok(actix_web::rt::System::new("tmbot").block_on(async move {
         println!("launch() => {:?}", srv.run().await)
     }))
@@ -2465,15 +2534,16 @@ fn _fun_macros() -> Bresult<()> {
     Ok(g.hello())
 }
 
-fn fun () -> Bresult<()> {
+fn fun () -> Bresult<Vec<HashMap<String, String>>>  {
     let conn = Connection::new(&"tmbot.sqlite")?;
-    glog!(getsql!(&conn, "BEGIN TRANSACTION; INSERT INTO entitys VALUES (69, 'xxx')"));
-    glog!(getsql!(&conn, "BEGIN TRANSACTION; BEGIN TRANSACTION; INSERT INTO entitys VALUES (69, 'xxx'); COMMIT;  ROLLBACK;"));
-    glog!(getsql!(&conn, "ROLLBACK"));
-    Ok(())
+    getsql!(&conn, "
+        INSERT INTO entitys VALUES (42, 'xxx');
+        INSERT INTO entitys VALUES (69, 'yyy');")
+    //glog!(getsql!(&conn, "ROLLBACK"));
 }
    
 /*
+  format!("{:#?}", env);
   DROP   TABLE users
   CREATE TABLE users (name TEXT, age INTEGER)
   INSERT INTO  users VALUES ('Alice', 42)
