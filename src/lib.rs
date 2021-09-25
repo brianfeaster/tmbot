@@ -2479,7 +2479,7 @@ pub fn launch() -> Bresult<()> {
             let cmdstruct = CmdStruct::new(&env).unwrap();
             let res = getsqlquiet!(
                 cmdstruct.dbconn,
-                "SELECT id, at, time, cmd, fart FROM schedules WHERE ?<=time AND time<?",
+                "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<?",
                     cmdstruct.env.lock().unwrap().time_scheduler,
                     cmdstruct.now);
             let rows = match res {
