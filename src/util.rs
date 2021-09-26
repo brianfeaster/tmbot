@@ -38,21 +38,21 @@ macro_rules! gerrord {
 }
 
 #[macro_export(local_inner_macros)]
-macro_rules! glogd {
-    ($pre:expr, $arg:expr) => {
-        match &$arg {
-            Ok(o)  => ::log::info!("{} {:?}", $pre, o),
-            Err(e) => ::log::error!("{} {:?}", $pre, e)
-        }
-    }
-}
-
-#[macro_export(local_inner_macros)]
 macro_rules! glog {
     ($arg:expr) => {
         match &$arg {
             Ok(o)  => ::log::info!("{:?}", o),
             Err(e) => ::log::error!("{:?}", e)
+        }
+    }
+}
+
+#[macro_export(local_inner_macros)]
+macro_rules! glogd {
+    ($pre:expr, $arg:expr) => {
+        match &$arg {
+            Ok(o)  => ::log::info!("{} {:?}", $pre, o),
+            Err(e) => ::log::error!("{} {:?}", $pre, e)
         }
     }
 }

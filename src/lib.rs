@@ -357,6 +357,94 @@ pub fn sql_table_order_insert (dbconn:&Connection, id:i64, ticker:&str, qty:f64,
     getsql!(dbconn, "INSERT INTO orders VALUES (?, ?, ?, ?, ?)", id, ticker, qty, price, time)
 }
 
+fn create_schema() -> Bresult<()> {
+    let conn = Connection::new(&"tmbot.sqlite")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS entitys (
+            id INTEGER NOT NULL UNIQUE,
+            name  TEXT NOT NULL);")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS modes (
+            id   INTEGER NOT NULL UNIQUE,
+            echo INTEGER NOT NULL);")?;
+
+    //for l in read_to_string("tmbot/users.txt").unwrap().lines() {
+    //    let mut v = l.split(" ");
+    //    let id = v.next().ok_or("User DB malformed.")?.parse::<i64>()?;
+    //    let name = v.next().ok_or("User DB malformed.")?.to_string();
+    //    getsql!(&conn,"INSERT INTO entitys VALUES (?, ?)", id, &*name)?;
+    //    if id < 0 {
+    //        getsql!(&conn,"INSERT INTO modes VALUES (?, 2)", id)?;
+    //    }
+    //}
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS formats (
+            id    INTEGER NOT NULL UNIQUE,
+            quote    TEXT NOT NULL,
+            position TEXT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS accounts (
+            id    INTEGER  NOT NULL UNIQUE,
+            balance FLOAT  NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS stonks (
+            ticker   TEXT NOT NULL UNIQUE,
+            price   FLOAT NOT NULL,
+            last    FLOAT NOT NULL,
+            market   TEXT NOT NULL,
+            hours INTEGER NOT NULL,
+            exchange TEXT NOT NULL,
+            time  INTEGER NOT NULL,
+            title    TEXT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS orders (
+            id   INTEGER  NOT NULL,
+            ticker  TEXT  NOT NULL,
+            qty    FLOAT  NOT NULL,
+            price  FLOAT  NOT NULL,
+            time INTEGER  NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS positions (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            qty    FLOAT NOT NULL,
+            price  FLOAT NOT NULL);
+    ")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS exchange (
+            id   INTEGER NOT NULL,
+            ticker  TEXT NOT NULL,
+            qty    FLOAT NOT NULL,
+            price  FLOAT NOT NULL,
+            time INTEGER NOT NULL);
+    ")?;
+
+    // time 0 midnight
+    // time 44 44seconds   33m 33 minutes   33m44 33 min and 44 seconds
+    // when = 0:once 1:daily
+    // 1h33m44
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS schedules (
+            id   INTEGER NOT NULL,
+            at   INTEGER NOT NULL,
+            time INTEGER NOT NULL,
+            cmd     TEXT NOT NULL);")?;
+
+    Ok(())
+} // create_schema
+
 ////////////////////////////////////////////////////////////////////////////////
 /// Blobs
 
@@ -383,7 +471,27 @@ impl From<EnvStruct> for Env {
         Arc::new(Mutex::new(envstruct))
     }
 }
+
+impl EnvStruct {
+    fn new (mut argv: std::env::Args) -> Bresult<Env> {
+        Ok(Env::from(EnvStruct{
+            url_api:            format!("https://api.telegram.org/bot{}", argv.nth(1).ok_or("args[1] missing")?),
+            sqlite_filename:    format!("tmbot.sqlite"),
+            chat_id_default:    argv.nth(0).ok_or("args[2] missing")?.parse::<i64>()?,
+            dst_hours_adjust:   argv.nth(0).ok_or("args[3] missing")?.parse::<i8>()?,
+            quote_delay_secs:   QUOTE_DELAY_SECS,
+            message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
+            message_id_write:   0,
+            message_buff_write: String::new(),
+            fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
+            fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
+            time_scheduler:     Instant::now().seconds(),
+        }))
+    }
+}
+
 ////////////////////////////////////////
+
 #[derive(Debug)]
 pub struct CmdStruct { // Represents in incoming Telegram message and session/service state.
     env: Env,
@@ -462,21 +570,17 @@ impl CmdStruct {
         })))
     }
     // create a basic CmdStruct
-    fn new(env:&Env, dbconn:Connection, now:i64) -> Bresult<CmdStruct> {
-        let (chat_id_default, fmt_quote, fmt_position) = {
-            let envstruct = env.lock().unwrap();
-            ( envstruct.chat_id_default,
-              envstruct.fmt_quote.to_string(),
-              envstruct.fmt_position.to_string() )
-        };
+    fn new(env:&Env, dbconn:Connection, now:i64, id:i64, at:i64, to:i64, msg:String) -> Bresult<CmdStruct> {
+        let envl = env.lock().unwrap();
         Ok(CmdStruct{
             env: env.clone(),
             now, dbconn,
-            id: chat_id_default,  at: chat_id_default,  to: chat_id_default,
+            id, at, to,
             id_level: 2,  at_level: 2,  to_level: 2,
             message_id: 0,
-            fmt_quote, fmt_position,
-            msg:format!("say hello, world")
+            fmt_quote:    envl.fmt_quote.to_string(),
+            fmt_position: envl.fmt_position.to_string(),
+            msg: msg.to_string()
         })
     }
     //fn level (&self, level:i64) -> MsgCmd { MsgCmd::from(self).level(level) }
@@ -2256,18 +2360,43 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
 
 async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let caps = regex_to_vec(
-        //            _-__  __23h__   __59m__   __59__   _*_   _c_
-        r"^/schedule ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)",
-        &cmd.lock().unwrap().msg.to_lowercase() )?;
+    let caps = {
+        let cmdl = cmd.lock().unwrap();
+        regex_to_vec(
+            //            __-__  ___23h____ ____59m____ ____59____ __*__  cmd_  _11234__ 
+            r"^/schedule( ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)| ([0-9]+)?| )?",
+            &cmdl.msg.to_lowercase() )?
+    };
     if caps.is_empty() { return Ok("SKIP") }
 
-    let adj  = caps.as_str(1).map_or(1,|_|-1);
-    let hours = caps.as_i64(3).unwrap_or(0);
-    let mins  = caps.as_i64(5).unwrap_or(0);
-    let secs  = caps.as_i64(7).unwrap_or(0);
-    let repeat  = caps.as_str(8).map_or(false,|_|true);
-    let command = caps.as_str(9)?;
+    if caps.get(1).unwrap().is_none() {
+        let res = {
+            let cmdstruct = cmd.lock().unwrap();
+            getsql!(cmdstruct.dbconn, "SELECT name, time, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
+        };
+        let buff =
+            res.iter().map( |row| format!("`{}` `{}` ```{}```",
+                row.get_i64("time").unwrap(),
+                row.get_str("name").unwrap(),
+                row.get_str("cmd").unwrap()) )
+            .collect::<Vec<String>>()
+            .join("\n");
+        send_msg_markdown(cmd.into(), &buff).await?;
+        return Ok("COMPLETED.")
+    }
+
+    if let Ok(time) = caps.as_i64(11) {
+        let cmdl = cmd.lock().unwrap();
+        getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE time=?", time)?;
+        return Ok("COMPLETED.")
+    }
+
+    let adj  = caps.as_str(2).map_or(1,|_|-1);
+    let hours = caps.as_i64(4).unwrap_or(0);
+    let mins  = caps.as_i64(6).unwrap_or(0);
+    let secs  = caps.as_i64(8).unwrap_or(0);
+    let repeat  = caps.as_str(9).map_or(false,|_|true);
+    let command = caps.as_str(10)?;
 
     let adjust = adj*( 60*60*hours + 60* mins + secs );
 
@@ -2286,104 +2415,6 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         cmdstruct.id, cmdstruct.at, time, command));
 
     Ok("COMPLETED.")
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-fn do_schema() -> Bresult<()> {
-    let conn = Connection::new(&"tmbot.sqlite")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS entitys (
-            id INTEGER NOT NULL UNIQUE,
-            name  TEXT NOT NULL);")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS modes (
-            id   INTEGER NOT NULL UNIQUE,
-            echo INTEGER NOT NULL);")?;
-
-    //for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-    //    let mut v = l.split(" ");
-    //    let id = v.next().ok_or("User DB malformed.")?.parse::<i64>()?;
-    //    let name = v.next().ok_or("User DB malformed.")?.to_string();
-    //    getsql!(&conn,"INSERT INTO entitys VALUES (?, ?)", id, &*name)?;
-    //    if id < 0 {
-    //        getsql!(&conn,"INSERT INTO modes VALUES (?, 2)", id)?;
-    //    }
-    //}
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS formats (
-            id    INTEGER NOT NULL UNIQUE,
-            quote    TEXT NOT NULL,
-            position TEXT NOT NULL);
-    ")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS accounts (
-            id    INTEGER  NOT NULL UNIQUE,
-            balance FLOAT  NOT NULL);
-    ")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS stonks (
-            ticker   TEXT NOT NULL UNIQUE,
-            price   FLOAT NOT NULL,
-            last    FLOAT NOT NULL,
-            market   TEXT NOT NULL,
-            hours INTEGER NOT NULL,
-            exchange TEXT NOT NULL,
-            time  INTEGER NOT NULL,
-            title    TEXT NOT NULL);
-    ")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS orders (
-            id   INTEGER  NOT NULL,
-            ticker  TEXT  NOT NULL,
-            qty    FLOAT  NOT NULL,
-            price  FLOAT  NOT NULL,
-            time INTEGER  NOT NULL);
-    ")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS positions (
-            id   INTEGER NOT NULL,
-            ticker  TEXT NOT NULL,
-            qty    FLOAT NOT NULL,
-            price  FLOAT NOT NULL);
-    ")?;
-
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS exchange (
-            id   INTEGER NOT NULL,
-            ticker  TEXT NOT NULL,
-            qty    FLOAT NOT NULL,
-            price  FLOAT NOT NULL,
-            time INTEGER NOT NULL);
-    ")?;
-
-    // time 0 midnight
-    // time 44 44seconds   33m 33 minutes   33m44 33 min and 44 seconds
-    // when = 0:once 1:daily
-    // 1h33m44
-    getsql!(&conn,"
-        CREATE TABLE IF NOT EXISTS schedules (
-            id   INTEGER NOT NULL,
-            at   INTEGER NOT NULL,
-            time INTEGER NOT NULL,
-            cmd     TEXT NOT NULL);")?;
-
-    Ok(())
-}
-
-fn log_header () {
-    info!("\x1b[0;31;40m _____ __  __ ____        _   ");
-    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
-    info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
-    info!("\x1b[0;34;40m  | | | |  | | |_) | (_) | |_ ");
-    info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2416,6 +2447,14 @@ async fn do_all (cmd:Cmd) -> Bresult<()> {
     Ok(())
 }
 
+fn log_header () {
+    info!("\x1b[0;31;40m _____ __  __ ____        _   ");
+    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
+    info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
+    info!("\x1b[0;34;40m  | | | |  | | |_) | (_) | |_ ");
+    info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
+}
+
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
     info!("\x1b[35m{}",
@@ -2441,58 +2480,51 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     "".into()
 }
 
-pub fn launch_scheduler(env1:&Env) -> Bresult<()> {
-    // A scheduler thread
-    info!("Spawned Scheduler Event Thread at 10 second interval");
-    let env00 = env1.clone();
-    std::thread::spawn( move || {
-        loop {
-            let env0 = env00.clone();
-            sleep_secs(10.0);
-            let now = Instant::now().seconds();
-            let res = {
-                let envc = env0.clone();
-                let envl = envc.lock().unwrap();
-                let dbconn = match Connection::new(&envl.sqlite_filename) {
-                    Ok(dbconn) => dbconn,
-                    _ => continue
-                };
-                let res = getsqlquiet!( dbconn,
-                    "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<?",
-                    envl.time_scheduler, now);
-                res
+pub fn launch_scheduler(env:Env) -> Bresult<()> {
+    info!("Spawned Scheduler Event Thread, 10sec interval");
+    std::thread::spawn( move || { loop {
+        sleep_secs(10.0);
+        let now = Instant::now().seconds();
+        let res = {
+            let env = env.clone();
+            let envl = env.lock().unwrap();
+            let dbconn = match Connection::new(&envl.sqlite_filename) {
+                Ok(dbconn) => dbconn,
+                _ => continue
             };
-
-            let rows = match res {
-                Ok(rows) => rows,
-                e => { glog!(e); continue } };
-            if 0 < rows.len() {
-                ginfo(&rows);
-                let env = env0.clone();
-                actix_web::rt::System::new("tmbot")
-                    .block_on(async move {
-                        for row in rows {
-                            let dbconn = match Connection::new(&env0.clone().lock().unwrap().sqlite_filename) {
-                                Ok(dbconn) => dbconn,
-                                _ => continue
-                            };
-                            let mut cmdstruct = match CmdStruct::new(&env, dbconn, now) {
-                                Ok(dbconn) => dbconn,
-                                _ => continue
-                            };
-                            cmdstruct.id = row.get_i64("id").unwrap();
-                            cmdstruct.at = row.get_i64("at").unwrap();
-                            cmdstruct.to = cmdstruct.at;
-                            cmdstruct.msg = row.get_str("cmd").unwrap();
-                            info!("\x1b[1;31m{:#?}", cmdstruct);
-                            glog!(do_all( Cmd::new(Mutex::new(cmdstruct)) ).await);
-                        }
-                    });
-                info!("Thread End.");
-            }
-            env00.lock().unwrap().time_scheduler = now;
+            getsqlquiet!( dbconn,
+                "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?)",
+                envl.time_scheduler,         now,
+                envl.time_scheduler % 86400, now % 86400)
+        };
+        let rows = match res {
+            Ok(rows) => rows,
+            e => { glog!(e); continue }
+        };
+        if 0 < rows.len() {
+            info!("\x1b[1mSchedules start...");
+            ginfo(&rows);
+            let env = env.clone();
+            actix_web::rt::System::new("tmbot").block_on(async move{ for row in rows {
+                let dbconn = match Connection::new(&env.clone().lock().unwrap().sqlite_filename) {
+                    Ok(dbconn) => dbconn,
+                    e => { glog!(e); continue }
+                };
+                let cmdstruct = CmdStruct::new(
+                    &env, dbconn, now,
+                    row.get_i64("id").unwrap(), row.get_i64("at").unwrap(), row.get_i64("at").unwrap(), // id at to
+                    row.get_str("cmd").unwrap() );
+                let cmd = match cmdstruct  {
+                    Ok(cmdstruct) => Arc::new(Mutex::new(cmdstruct)),
+                    e => { glog!(e); continue }
+                };
+                //info!("\x1b[1;31m{:#?}", cmdstruct);
+                glog!(do_all(cmd).await);
+            } } ); // for rows, async, block_on
+            info!("\x1b[1mSchedules end.");
         }
-    });
+        env.lock().unwrap().time_scheduler = now;
+    } } ); // loop, ||, thread
     Ok(())
 }
 
@@ -2500,7 +2532,6 @@ pub fn launch_server(env:Env) -> Bresult<()> {
     let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
     ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
     ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
-
     let srv =
         HttpServer::new( move ||
             App::new()
@@ -2509,37 +2540,21 @@ pub fn launch_server(env:Env) -> Bresult<()> {
                 web::resource("*")
                 .route( Route::new().to(main_dispatch) ) ) )
         .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
-        
-    // This should never return
     Ok(actix_web::rt::System::new("tmbot").block_on(async move {
         println!("launch() => {:?}", srv.run().await)
-    }))
+    })) // This should never return
 } // launch_server
-
-fn create_env (mut argv: std::env::Args) -> Bresult<Env> {
-    Ok(Env::from(EnvStruct{
-        url_api:            format!("https://api.telegram.org/bot{}", argv.nth(1).ok_or("args[1] missing")?),
-        sqlite_filename:    format!("tmbot.sqlite"),
-        chat_id_default:    argv.nth(0).ok_or("args[2] missing")?.parse::<i64>()?,
-        dst_hours_adjust:   argv.nth(0).ok_or("args[3] missing")?.parse::<i8>()?,
-        quote_delay_secs:   QUOTE_DELAY_SECS,
-        message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
-        message_id_write:   0,
-        message_buff_write: String::new(),
-        fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
-        fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
-        time_scheduler:     Instant::now().seconds(),
-    }))
-}
 
 pub fn main_launch() -> Bresult<()> {
     let argv = env::args();
-    if argv.len() == 1 { Err(format!("unexpected arg count {:?}", argv))? }
-    if !true { glogd!("schema => ", do_schema()); } // Create DB
+    if 1 == argv.len() {
+        Err(format!("{:?} missing: KEY ID DST", argv))?
+    }
+    if !true { glogd!("create_schema => ", create_schema()); } // Create DB
     if !true { fun() } // Hacks and other test code
     else {
-        let env = create_env(argv)?;
-        glogd!("scheduler() =>", launch_scheduler(&env));
+        let env = EnvStruct::new(argv)?;
+        glogd!("scheduler() =>", launch_scheduler(env.clone()));
         launch_server(env)
     }
 }
@@ -2561,8 +2576,6 @@ struct Greetings {
 
 fn _fun_macros() -> Bresult<()> {
     let g = Greetings{z:42, err:"".into() };
-    //Err("oh noe".into())
-    //return Err(std::fmt::Error{});
     Err(std::io::Error::from_raw_os_error(0))?;
     Ok(g.hello())
 }
