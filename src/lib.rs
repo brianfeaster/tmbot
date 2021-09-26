@@ -2368,15 +2368,15 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
             &cmdl.msg.to_lowercase() )?
     };
     if caps.is_empty() { return Ok("SKIP") }
-    error!("{:#?}", caps);
 
     if caps.get(1).unwrap().is_none() {
-        let res = {
+        let mut res = {
             let cmdstruct = cmd.lock().unwrap();
             getsql!(cmdstruct.dbconn, "SELECT name, time, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
         };
+        res.sort_by( |a,b| a.get_i64("time").unwrap().cmp(&b.get_i64("time").unwrap()) );
         let buff =
-            res.iter().map( |row| format!("`{}` `{}` ```{}```",
+            res.iter().map( |row| format!("`{} {}` `{}`",
                 row.get_i64("time").unwrap(),
                 row.get_str("name").unwrap(),
                 row.get_str("cmd").unwrap()) )
@@ -2420,31 +2420,31 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_all (cmd:Cmd) -> Bresult<()> {
-    info!("\x1b[33m{:?}", &cmd.lock().unwrap());
+async fn do_all (cmd:&Cmd) -> Bresult<()> {
+    info!("\x1b[33m{:?}", cmd.lock().unwrap());
 
-    let res = do_schedule(&cmd).await; {
+    let res = do_schedule(cmd).await; {
         glogd!("do_schedule =>", res);
         if res.is_ok() && res.unwrap() == "COMPLETED." { return Ok(()) }
     }
 
-    glogd!("do_echo =>",       do_echo(&cmd).await);
-    glogd!("do_help =>",       do_help(&cmd).await);
-    glogd!("do_curse =>",      do_curse(&cmd).await);
-    glogd!("do_say =>",        do_say(&cmd).await);
-    glogd!("do_like =>",       do_like(&cmd).await);
-    glogd!("do_like_info =>",  do_like_info(&cmd).await);
-    glogd!("do_def =>",        do_def(&cmd).await);
-    glogd!("do_sql =>",        do_sql(&cmd).await);
-    glogd!("do_quotes => ",    do_quotes(&cmd).await);
-    glogd!("do_portfolio =>",  do_portfolio(&cmd).await);
-    glogd!("do_yolo =>",       do_yolo(&cmd).await);
-    glogd!("do_trade_buy =>",  do_trade_buy(&cmd).await);
-    glogd!("do_trade_sell =>", do_trade_sell(&cmd).await);
-    glogd!("do_exchange_bidask =>", do_exchange_bidask(&cmd).await);
-    glogd!("do_orders =>",     do_orders(&cmd).await);
-    glogd!("do_fmt =>",        do_fmt(&cmd).await);
-    glogd!("do_rebalance =>",  do_rebalance(&cmd).await);
+    glogd!("do_echo =>",       do_echo(cmd).await);
+    glogd!("do_help =>",       do_help(cmd).await);
+    glogd!("do_curse =>",      do_curse(cmd).await);
+    glogd!("do_say =>",        do_say(cmd).await);
+    glogd!("do_like =>",       do_like(cmd).await);
+    glogd!("do_like_info =>",  do_like_info(cmd).await);
+    glogd!("do_def =>",        do_def(cmd).await);
+    glogd!("do_sql =>",        do_sql(cmd).await);
+    glogd!("do_quotes => ",    do_quotes(cmd).await);
+    glogd!("do_portfolio =>",  do_portfolio(cmd).await);
+    glogd!("do_yolo =>",       do_yolo(cmd).await);
+    glogd!("do_trade_buy =>",  do_trade_buy(cmd).await);
+    glogd!("do_trade_sell =>", do_trade_sell(cmd).await);
+    glogd!("do_exchange_bidask =>", do_exchange_bidask(cmd).await);
+    glogd!("do_orders =>",     do_orders(cmd).await);
+    glogd!("do_fmt =>",        do_fmt(cmd).await);
+    glogd!("do_rebalance =>",  do_rebalance(cmd).await);
     Ok(())
 }
 
@@ -2472,7 +2472,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
         actix_web::rt::System::new("tmbot")
             .block_on(async move {
                 match CmdStruct::new_cmd(env2.clone(), &body) {
-                    Ok(cmd) => do_all(cmd).await.unwrap_or_else(|r| error!("{:?}", r)),
+                    Ok(cmd) => do_all(&cmd).await.unwrap_or_else(|r| error!("{:?}", r)),
                     e => glog!(e)
                 }
             });
@@ -2520,7 +2520,12 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
                     e => { glog!(e); continue }
                 };
                 //info!("\x1b[1;31m{:#?}", cmdstruct);
-                glog!(do_all(cmd).await);
+                glog!(do_all(&cmd).await);
+                let time = row.get_i64("time").unwrap();
+                if 86400 <= time {
+                    let cmdl = cmd.lock().unwrap();
+                    getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE time=?", time).unwrap();
+                }
             } } ); // for rows, async, block_on
             info!("\x1b[1mSchedules end.");
         }
