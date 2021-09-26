@@ -2364,10 +2364,11 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         let cmdl = cmd.lock().unwrap();
         regex_to_vec(
             //            __-__  ___23h____ ____59m____ ____59____ __*__  cmd_  _11234__ 
-            r"^/schedule( ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)| ([0-9]+)?| )?",
+            r"^/schedule( ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)| ([0-9]+))?",
             &cmdl.msg.to_lowercase() )?
     };
     if caps.is_empty() { return Ok("SKIP") }
+    error!("{:#?}", caps);
 
     if caps.get(1).unwrap().is_none() {
         let res = {
