@@ -1,5 +1,5 @@
 use std::io::Write;
-use log::{Record, Level::{Error, Warn, Info, Debug, Trace}};
+use log::{error, Record, Level::{Error, Warn, Info, Debug, Trace}};
 use env_logger::fmt::{Formatter, Color};
 
 /// Logger output serializer.
@@ -31,7 +31,7 @@ fn logger_init () {
 
 fn main () {
     logger_init();
-    println!("main() => {:?}", ::tmbot::launch());
+    error!("main => {:?}", ::tmbot::main_launch()); // Should never return
 }
 
 ////////////////////////////////////////////////////////////////////////////////

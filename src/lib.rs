@@ -462,12 +462,10 @@ impl CmdStruct {
         })))
     }
     // create a basic CmdStruct
-    fn new(env:&Env) -> Bresult<CmdStruct> {
-        let now = Instant::now().seconds();
-        let (dbconn, chat_id_default, fmt_quote, fmt_position) = {
+    fn new(env:&Env, dbconn:Connection, now:i64) -> Bresult<CmdStruct> {
+        let (chat_id_default, fmt_quote, fmt_position) = {
             let envstruct = env.lock().unwrap();
-            ( Connection::new(&envstruct.sqlite_filename)?,
-              envstruct.chat_id_default,
+            ( envstruct.chat_id_default,
               envstruct.fmt_quote.to_string(),
               envstruct.fmt_position.to_string() )
         };
@@ -1012,25 +1010,19 @@ async fn do_curse (cmd:&Cmd) -> Bresult<&'static str> {
 }
 
 // Trying to delay an action
-async fn do_repeat (cmd :&Cmd) -> Bresult<&'static str> {
+async fn do_say (cmd :&Cmd) -> Bresult<&'static str> {
 
-    let (delay, msg) = {
+    let msg = {
         let cmdstruct = cmd.lock().unwrap();
         let caps =
-            match Regex::new(r"^/repeat ([0-9]+) (.*)$").unwrap().captures(&cmdstruct.msg) {
+            match Regex::new(r"^/say (.*)$").unwrap().captures(&cmdstruct.msg) {
                 Some(caps) => caps,
                 None => return Ok("SKIP".into())
             };
-        let delay = caps[1].parse::<u64>()?;
-        let msg = caps[2].to_string();
-        (delay, msg)
+        let msg = caps[1].to_string();
+        msg
     };
-
-    ::tokio::time::delay_until(tokio::time::Instant::now() + std::time::Duration::from_secs(delay)).await;
-    let msgcmd :MsgCmd = cmd.clone().into();
-    let res = send_msg(msgcmd, &format!("{} {}", delay, msg)).await;
-    println!("{:?}", res);
-
+    send_msg(cmd.into(), &msg).await?;
     Ok("COMPLETED.")
 }
 
@@ -2396,13 +2388,18 @@ fn log_header () {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
-    let cmd :Cmd = CmdStruct::new_cmd(env, body)?;
+async fn do_all (cmd:Cmd) -> Bresult<()> {
     info!("\x1b[33m{:?}", &cmd.lock().unwrap());
+
+    let res = do_schedule(&cmd).await; {
+        glogd!("do_schedule =>", res);
+        if res.is_ok() && res.unwrap() == "COMPLETED." { return Ok(()) }
+    }
+
     glogd!("do_echo =>",       do_echo(&cmd).await);
     glogd!("do_help =>",       do_help(&cmd).await);
     glogd!("do_curse =>",      do_curse(&cmd).await);
-    glogd!("do_repeat =>",     do_repeat(&cmd).await);
+    glogd!("do_say =>",        do_say(&cmd).await);
     glogd!("do_like =>",       do_like(&cmd).await);
     glogd!("do_like_info =>",  do_like_info(&cmd).await);
     glogd!("do_def =>",        do_def(&cmd).await);
@@ -2416,7 +2413,6 @@ async fn do_all (env: Env, body: &web::Bytes) -> Bresult<()> {
     glogd!("do_orders =>",     do_orders(&cmd).await);
     glogd!("do_fmt =>",        do_fmt(&cmd).await);
     glogd!("do_rebalance =>",  do_rebalance(&cmd).await);
-    glogd!("do_schedule =>",   do_schedule(&cmd).await);
     Ok(())
 }
 
@@ -2435,79 +2431,80 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
         let env2 = env.clone();
         actix_web::rt::System::new("tmbot")
             .block_on(async move {
-                do_all(env2.clone(), &body).await.unwrap_or_else(|r| error!("{:?}", r));
+                match CmdStruct::new_cmd(env2.clone(), &body) {
+                    Ok(cmd) => do_all(cmd).await.unwrap_or_else(|r| error!("{:?}", r)),
+                    e => glog!(e)
+                }
             });
         info!("\x1b[33m{:?}\n\x1b[0;1mEnd.", env.lock().unwrap());
     });
     "".into()
 }
 
-pub fn launch() -> Bresult<()> {
-    let now = Instant::now().seconds();
-    let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
-    ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
-
-    let botkey           = env::args().nth(1).ok_or("args[1] missing")?;
-    let chat_id_default  = env::args().nth(2).ok_or("args[2] missing")?.parse::<i64>()?;
-    let dst_hours_adjust = env::args().nth(3).ok_or("args[3] missing")?.parse::<i8>()?;
-
-    if !true { glog!(do_schema()); } // Create DB
-    if !true { glogd!("fun():", fun()) } // Hacks and other test code
-
-    let env0 =  // Common/shared environment for all event handlers
-        Env::from(EnvStruct{
-            url_api:            format!("https://api.telegram.org/bot{}", &botkey),
-            sqlite_filename:    format!("tmbot.sqlite"),
-            chat_id_default:    chat_id_default,
-            dst_hours_adjust:   dst_hours_adjust,
-            quote_delay_secs:   QUOTE_DELAY_SECS,
-            message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
-            message_id_write:   0,
-            message_buff_write: String::new(),
-            fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
-            fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
-            time_scheduler:     now,
-        });
-
+pub fn launch_scheduler(env1:&Env) -> Bresult<()> {
     // A scheduler thread
     info!("Spawned Scheduler Event Thread at 10 second interval");
-    let env = env0.clone();
+    let env00 = env1.clone();
     std::thread::spawn( move || {
         loop {
+            let env0 = env00.clone();
             sleep_secs(10.0);
-            let cmdstruct = CmdStruct::new(&env).unwrap();
-            let res = getsqlquiet!(
-                cmdstruct.dbconn,
-                "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<?",
-                    cmdstruct.env.lock().unwrap().time_scheduler,
-                    cmdstruct.now);
+            let now = Instant::now().seconds();
+            let res = {
+                let envc = env0.clone();
+                let envl = envc.lock().unwrap();
+                let dbconn = match Connection::new(&envl.sqlite_filename) {
+                    Ok(dbconn) => dbconn,
+                    _ => continue
+                };
+                let res = getsqlquiet!( dbconn,
+                    "SELECT id, at, time, cmd FROM schedules WHERE ?<=time AND time<?",
+                    envl.time_scheduler, now);
+                res
+            };
+
             let rows = match res {
                 Ok(rows) => rows,
                 e => { glog!(e); continue } };
             if 0 < rows.len() {
-                info!("\x1b[1;31m{:#?}", cmdstruct);
                 ginfo(&rows);
-                let mut msgcmdfake = MsgCmd::from(&cmdstruct); // Used by send_msg
+                let env = env0.clone();
                 actix_web::rt::System::new("tmbot")
                     .block_on(async move {
                         for row in rows {
-                            msgcmdfake.id = row.get_i64("id").unwrap();
-                            msgcmdfake.at = row.get_i64("at").unwrap();
-                            let cmd = row.get_str("cmd").unwrap();
-                            gwarn(send_msg(msgcmdfake.clone(), &cmd).await);
+                            let dbconn = match Connection::new(&env0.clone().lock().unwrap().sqlite_filename) {
+                                Ok(dbconn) => dbconn,
+                                _ => continue
+                            };
+                            let mut cmdstruct = match CmdStruct::new(&env, dbconn, now) {
+                                Ok(dbconn) => dbconn,
+                                _ => continue
+                            };
+                            cmdstruct.id = row.get_i64("id").unwrap();
+                            cmdstruct.at = row.get_i64("at").unwrap();
+                            cmdstruct.to = cmdstruct.at;
+                            cmdstruct.msg = row.get_str("cmd").unwrap();
+                            info!("\x1b[1;31m{:#?}", cmdstruct);
+                            glog!(do_all( Cmd::new(Mutex::new(cmdstruct)) ).await);
                         }
                     });
                 info!("Thread End.");
             }
-            cmdstruct.env.lock().unwrap().time_scheduler = cmdstruct.now;
+            env00.lock().unwrap().time_scheduler = now;
         }
     });
+    Ok(())
+}
+
+pub fn launch_server(env:Env) -> Bresult<()> {
+    let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
 
     let srv =
         HttpServer::new( move ||
             App::new()
-            .data(env0.clone())
+            .data(env.clone())
             .service(
                 web::resource("*")
                 .route( Route::new().to(main_dispatch) ) ) )
@@ -2517,9 +2514,44 @@ pub fn launch() -> Bresult<()> {
     Ok(actix_web::rt::System::new("tmbot").block_on(async move {
         println!("launch() => {:?}", srv.run().await)
     }))
-} // launch
+} // launch_server
+
+fn create_env (mut argv: std::env::Args) -> Bresult<Env> {
+    Ok(Env::from(EnvStruct{
+        url_api:            format!("https://api.telegram.org/bot{}", argv.nth(1).ok_or("args[1] missing")?),
+        sqlite_filename:    format!("tmbot.sqlite"),
+        chat_id_default:    argv.nth(0).ok_or("args[2] missing")?.parse::<i64>()?,
+        dst_hours_adjust:   argv.nth(0).ok_or("args[3] missing")?.parse::<i8>()?,
+        quote_delay_secs:   QUOTE_DELAY_SECS,
+        message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
+        message_id_write:   0,
+        message_buff_write: String::new(),
+        fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
+        fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
+        time_scheduler:     Instant::now().seconds(),
+    }))
+}
+
+pub fn main_launch() -> Bresult<()> {
+    let argv = env::args();
+    if argv.len() == 1 { Err(format!("unexpected arg count {:?}", argv))? }
+    if !true { glogd!("schema => ", do_schema()); } // Create DB
+    if !true { fun() } // Hacks and other test code
+    else {
+        let env = create_env(argv)?;
+        glogd!("scheduler() =>", launch_scheduler(&env));
+        launch_server(env)
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
+ 
+fn fun () -> Bresult<()>  {
+    let conn = Connection::new(&"tmbot.sqlite")?;
+    info!("fun => {:?}",
+        getsql!(&conn, "INSERT INTO entitys VALUES (42, 'wat')")?);
+    Ok(())
+}
 
 #[derive(Debug, Hello)]
 struct Greetings {
@@ -2535,14 +2567,6 @@ fn _fun_macros() -> Bresult<()> {
     Ok(g.hello())
 }
 
-fn fun () -> Bresult<Vec<HashMap<String, String>>>  {
-    let conn = Connection::new(&"tmbot.sqlite")?;
-    getsql!(&conn, "
-        INSERT INTO entitys VALUES (42, 'xxx');
-        INSERT INTO entitys VALUES (69, 'yyy');")
-    //glog!(getsql!(&conn, "ROLLBACK"));
-}
-   
 /*
   format!("{:#?}", env);
   DROP   TABLE users
