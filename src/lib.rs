@@ -1077,8 +1077,9 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
         envstruct.quote_delay_secs
     };
     send_msg_markdown(cmd.clone().into(), &format!(
-"`          ™Bot Commands          `
+r#"`          ™Bot Commands          `
 `/echo 2` `Echo level (verbose 2…0 quiet)`
+`/say hi` `™Bot will say "hi"`
 `word: ` `Definition lookup`
 `+1    ` `Like someone's post (via reply)`
 `+?    ` `Like leaderboard`
@@ -1095,9 +1096,11 @@ pub async fn do_help (cmd:&Cmd) -> Bresult<&'static str> {
 `@usr+2@3` `Bid/buy 2sh of '@usr' at $3`
 `@usr-5@4` `Ask/sell 5sh of '@usr' at $4`
 `/rebalance -9.99 AMC 40 QQQ 60 ...`
-   `rebalances AMC/40% QQQ/60%, offset -$9.99`
+   `rebalances AMC/40% QQQ/60%, opt adj -$9.99`
 `/fmt [?]     ` `Show format strings, help`
-`/fmt [qp] ...` `Set quote/position fmt str`", delay)).await?;
+`/fmt [qp] ...` `Set quote/position fmt str`
+`/schedule [time]` `List jobs, delete time`
+`/schedule [1h][2m][3][*] CMD` `schedule CMD 01:02:03 from now, * repeat daily`"#, delay)).await?;
     Ok("COMPLETED.")
 }
 
@@ -2414,7 +2417,7 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
     //send_msg(cmd.into(), &buff).await?;
     glog!(getsql!(&cmdstruct.dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?)",
         cmdstruct.id, cmdstruct.at, time, command));
-
+        
     Ok("COMPLETED.")
 }
 
@@ -2511,9 +2514,11 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
                     Ok(dbconn) => dbconn,
                     e => { glog!(e); continue }
                 };
+                let id = row.get_i64("id").unwrap();
+                let at = row.get_i64("at").unwrap();
                 let cmdstruct = CmdStruct::new(
                     &env, dbconn, now,
-                    row.get_i64("id").unwrap(), row.get_i64("at").unwrap(), row.get_i64("at").unwrap(), // id at to
+                    id, at, row.get_i64("at").unwrap(), // id at to
                     row.get_str("cmd").unwrap() );
                 let cmd = match cmdstruct  {
                     Ok(cmdstruct) => Arc::new(Mutex::new(cmdstruct)),
@@ -2524,7 +2529,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
                 let time = row.get_i64("time").unwrap();
                 if 86400 <= time {
                     let cmdl = cmd.lock().unwrap();
-                    getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE time=?", time).unwrap();
+                    getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE id=? AND at=? AND time=?", id, at, time).unwrap();
                 }
             } } ); // for rows, async, block_on
             info!("\x1b[1mSchedules end.");
