@@ -748,13 +748,13 @@ impl Quote {// Query local cache or internet for ticker details
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             let cmdstruct = cmd.lock().unwrap();
-            if is_in_table {
-                getsql!(&cmdstruct.dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
-                    quote.price, quote.last, &*quote.market, cmdstruct.now, quote.ticker.as_str())?
-            } else {
+            if !is_in_table {
                 getsql!(&cmdstruct.dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
-                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, cmdstruct.now, &*quote.title)?
-            };
+                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, cmdstruct.now, &*quote.title)?;
+            } else if !is_cache_valid {
+                getsql!(&cmdstruct.dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
+                    quote.price, quote.last, &*quote.market, cmdstruct.now, quote.ticker.as_str())?;
+            }
         }
 
         Ok(quote)
@@ -1373,7 +1373,7 @@ async fn do_portfolio (cmd:&Cmd) -> Bresult<&'static str> {
 
     if is_new_id {
         // Keep message_id of this placeholder message so we continue to update it
-        let new_write_id = send_msg( MsgCmd::from(cmd.clone()).level(1), "…").await?;
+        let new_write_id = send_msg( MsgCmd::from(cmd.clone()), "…").await?;
 
         let cmdstruct = cmd.lock().unwrap();
         let mut envstruct = cmdstruct.env.lock().unwrap();
@@ -2348,15 +2348,17 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
                 info!("rebalance position {:?}", positions[i]);
                 let ticker = &positions[i].get_str("ticker")?;
                 let mut diffstr = positions[i].get_str("diff")?;
-                let bank_balance = { get_bank_balance(&cmd.lock().unwrap())?  };
-                // The last buy might be so off, so skip or adjust to account value
-                if bank_balance < diffstr.parse::<f64>()? {
-                    if 0.01 <= bank_balance {
-                        diffstr = format!("{}", (bank_balance*100.0) as i64 as f64 / 100.0);
-                    } else {
-                        diffstr = format!("0");
+                if diffstr != "0" {
+                    let bank_balance = { get_bank_balance(&cmd.lock().unwrap())?  };
+                    // The last buy might be so off, so skip or adjust to account value
+                    if bank_balance < diffstr.parse::<f64>()? {
+                        if 0.01 <= bank_balance {
+                            diffstr = format!("{}", (bank_balance*100.0) as i64 as f64 / 100.0);
+                        } else {
+                            diffstr = format!("0");
+                        }
+                        warn!("updated diff position {} {}", ticker, diffstr);
                     }
-                    warn!("updated diff position {} {}", ticker, diffstr);
                 }
 
                 if "0" == diffstr {
