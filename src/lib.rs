@@ -2325,7 +2325,7 @@ async fn do_rebalance (cmd :&Cmd) -> Bresult<&'static str> {
             let ticker = positions[i].get_str("ticker")?;
             let value = positions[i].get_f64("value")?;
             let mut diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
-            if -0.01 > diff || diff < 0.01 { diff = 0.0; } // under 1¢ diffs will be skipped
+            if -0.01 < diff && diff < 0.01 { diff = 0.0; } // under 1¢ diffs will be skipped
             positions[i].insert("diff".to_string(), diff.to_string()); // Add new key/val to Position HashMap
         }
         for i in 0..positions.len() {
