@@ -14,7 +14,7 @@ use ::std::{env,
 use ::std::boxed::Box;
 use ::log::*;
 use ::regex::{Regex};
-use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece,
+use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece,
     Weekday::{Sunday, Saturday} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
@@ -329,6 +329,18 @@ fn reference_ticker (dbconn:&Connection, t :&str) -> String {
 
 fn is_self_stonk (s: &str) -> bool {
     Regex::new(r"^[0-9]+$").unwrap().find(s).is_some()
+}
+
+pub fn time2datetimestr (time:i64) -> String {
+    let dt = LocalDateTime::from_instant(Instant::at(time));
+    format!("{}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        dt.year(), 1+dt.month().months_from_january(),
+        dt.day(), dt.hour(), dt.minute(), dt.second() )
+}
+
+pub fn time2timestr (time:i64) -> String {
+    let dt = LocalDateTime::from_instant(Instant::at(time));
+    format!("{:02}:{:02}:{:02}", dt.hour(), dt.minute(), dt.second() )
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -2367,7 +2379,7 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         let cmdl = cmd.lock().unwrap();
         regex_to_vec(
             //            __-__  ___23h____ ____59m____ ____59____ __*__  cmd_  _11234__ 
-            r"^/schedule( ([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? (.*)| ([0-9]+))?",
+            r"^/schedule( +([-])?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+))?([*])? +(.*)| +([0-9]+))?",
             &cmdl.msg.to_lowercase() )?
     };
     if caps.is_empty() { return Ok("SKIP") }
@@ -2383,10 +2395,15 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         }
         res.sort_by( |a,b| a.get_i64("time").unwrap().cmp(&b.get_i64("time").unwrap()) );
         let buff =
-            res.iter().map( |row| format!("`{} {}` `{}`",
-                row.get_i64("time").unwrap(),
-                row.get_str("name").unwrap(),
-                row.get_str("cmd").unwrap()) )
+            res.iter()
+            .map( |row| {
+                let time = row.get_i64("time").unwrap();
+                format!("`{} {} {}` `{}`",
+                    time,
+                    row.get_str("name").unwrap(),
+                    if time < 86400 { format!("daily@{}Z",time2timestr(time)) } else { time2datetimestr(time) },
+                    row.get_str("cmd").unwrap())
+            } )
             .collect::<Vec<String>>()
             .join("\n");
         send_msg_markdown(cmd.into(), &buff).await?;
@@ -2394,8 +2411,11 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
     }
 
     if let Ok(time) = caps.as_i64(11) {
-        let cmdl = cmd.lock().unwrap();
-        getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE time=?", time)?;
+        {
+            let cmdl = cmd.lock().unwrap();
+            getsql!(cmdl.dbconn, "DELETE FROM schedules WHERE time=?", time)?;
+        }
+        send_msg_markdown(cmd.into(), &format!("Removed job {}", time)).await?;
         return Ok("COMPLETED.")
     }
 
@@ -2408,20 +2428,29 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
 
     let adjust = adj*( 60*60*hours + 60* mins + secs );
 
-    let cmdstruct = cmd.lock().unwrap();
-    let now = cmdstruct.now;
-    let id = cmdstruct.id;
-    let at = cmdstruct.at;
-    let mut time = now + adjust;
-    if repeat { time = time.rem_euclid(86400)}
+    let time = {
+        let cmdstruct = cmd.lock().unwrap();
+        let now = cmdstruct.now;
+        let id = cmdstruct.id;
+        let at = cmdstruct.at;
+        let mut time = now + adjust;
+        if repeat { time = time.rem_euclid(86400)}
 
-    info!("adj:{:?} {:?}h{:?}m{:?}s  repeat:{:?}  now:{}  [id:{} at:{} time:{} cmd:{:?}]",
-        adj, hours, mins, secs, repeat, now, id, at, time, command);
+        info!("adj:{:?} {:?}h{:?}m{:?}s  repeat:{:?}  now:{}  [id:{} at:{} time:{} cmd:{:?}]",
+            adj, hours, mins, secs, repeat, now, id, at, time, command);
 
-    //send_msg(cmd.into(), &buff).await?;
-    glog!(getsql!(&cmdstruct.dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?)",
-        cmdstruct.id, cmdstruct.at, time, command));
+        glog!(getsql!(&cmdstruct.dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?)",
+            cmdstruct.id, cmdstruct.at, time, command));
+        time
+    };
         
+    let msg =
+        format!("Scheduled: `{} {}` `{}`",
+            time,
+            if time < 86400 { format!("daily@{}Z",time2timestr(time)) } else { time2datetimestr(time) },
+            command);
+    send_msg_markdown(cmd.into(), &msg).await?;
+
     Ok("COMPLETED.")
 }
 
@@ -2577,9 +2606,12 @@ pub fn main_launch() -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
  
 fn fun () -> Bresult<()>  {
-    let conn = Connection::new(&"tmbot.sqlite")?;
-    info!("fun => {:?}",
-        getsql!(&conn, "INSERT INTO entitys VALUES (42, 'wat')")?);
+    //let conn = Connection::new(&"tmbot.sqlite")?;
+    //info!("fun => {:?}", getsql!(&conn, "INSERT INTO entitys VALUES (42, 'wat')")?);
+
+    /*  LocalDateTime(1970-01-01T00:00:00.000)
+     *  LocalDateTime(2021-09-27T01:06:39.000)
+     */
     Ok(())
 }
 
