@@ -480,8 +480,8 @@ impl EnvStruct {
             chat_id_default:    argv.nth(0).ok_or("args[2] missing")?.parse::<i64>()?,
             dst_hours_adjust:   argv.nth(0).ok_or("args[3] missing")?.parse::<i8>()?,
             quote_delay_secs:   QUOTE_DELAY_SECS,
-            message_id_read:    0, // TODO edited_message mechanism is broken especially when /echo=1
-            message_id_write:   0,
+            message_id_read:    -1,
+            message_id_write:   -1,
             message_buff_write: String::new(),
             fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
             fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
@@ -2377,6 +2377,10 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
             let cmdstruct = cmd.lock().unwrap();
             getsql!(cmdstruct.dbconn, "SELECT name, time, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
         };
+        if res.is_empty() {
+            send_msg_markdown(cmd.into(), "No Scheduled Jobs").await?;
+            return Ok("COMPLETED.")
+        }
         res.sort_by( |a,b| a.get_i64("time").unwrap().cmp(&b.get_i64("time").unwrap()) );
         let buff =
             res.iter().map( |row| format!("`{} {}` `{}`",
