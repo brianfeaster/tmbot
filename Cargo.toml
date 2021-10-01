@@ -15,7 +15,6 @@ openssl = { version = "0.10" }
 serde_json = "*"
 serde_urlencoded = "*"
 sqlite = "*"
-#datetime = { version="*", features=["default","format","parse"] }
 datetime = "*"
 awc = "*"
 rand = "*"

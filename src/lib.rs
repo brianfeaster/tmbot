@@ -525,7 +525,6 @@ type Cmd = Arc<Mutex<CmdStruct>>;
 impl CmdStruct {
     // Creates a Cmd object from Env and Telegram message body.
     fn new_cmd(env:Env, body: &web::Bytes) -> Bresult<Cmd> {
-        let envstruct = env.lock().unwrap();
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
 
@@ -548,6 +547,7 @@ impl CmdStruct {
                     (id, at, id, msg) // TODO: should "to" be the "at" group and not the "id" sender?  Check existing logic first.
                 }
             } else { Err("Nothing to do.")? };
+        let envstruct = env.lock().unwrap();
 
         // Create hash map id -> echoLevel
         let echo_levels =
@@ -787,9 +787,7 @@ fn amt_as_glyph (amt: f64) -> (&'static str, &'static str) {
 impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
     fn format_quote (&self) -> Bresult<String> {
         let cmdstruct = self.cmd.lock().unwrap();
-        let envstruct = cmdstruct.env.lock().unwrap();
-
-        let dbconn = &envstruct.dbconn;
+        let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
         let fmt = cmdstruct.fmt_quote.to_string();
         let gain_glyphs = amt_as_glyph(self.amount);
 
@@ -1065,7 +1063,7 @@ async fn do_echo (cmd:&Cmd) -> Bresult<&'static str> {
                 echo, echo as f64/0.02)).await?;
             let cmdstruct = cmd.lock().unwrap();
             let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
-            getsql!( dbconn, "UPDATE modes set echo=? WHERE id=?", echo, at)?;
+            getsql!(dbconn, "UPDATE modes set echo=? WHERE id=?", echo, at)?;
         }
         Err(_) => { // Create or return existing echo level
             let mut echo = 2;
@@ -1118,8 +1116,8 @@ r#"`          ™Bot Commands          `
    `rebalances AMC/40% QQQ/60%, opt adj -$9.99`
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`
-`/schedule [time]` `List jobs, delete time`
-`/schedule [1h][2m][3][*] CMD` `schedule CMD 01:02:03 from now, * repeat daily`"#, delay)).await?;
+`/schedule [time]` `List jobs, delete job at time`
+`/schedule [ISO-8601] [1h][2m][3][*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, * repeat daily`"#, delay)).await?;
     Ok("COMPLETED.")
 }
 
@@ -1135,7 +1133,6 @@ async fn do_curse (cmd:&Cmd) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-// Trying to delay an action
 async fn do_say (cmd :&Cmd) -> Bresult<&'static str> {
 
     let msg = {
@@ -2422,7 +2419,7 @@ async fn do_rebalance (cmd:&Cmd) -> Bresult<&'static str> {
 
 async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
     let caps = {
-        let cmdl = cmd.lock().unwrap();
+        let cmdstruct = cmd.lock().unwrap();
         regex_to_vec(
             //           _  -   _23h__   _59m__   _59__   _*_  _ _cmd|_ _123_
             r"(?xi)^/schedule
@@ -2447,7 +2444,7 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
                     (.+)
                 )?
             )?",
-            &cmdl.msg )?
+            &cmdstruct.msg )?
     };
     caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
     if caps.is_empty() { return Ok("SKIP") }
@@ -2491,7 +2488,7 @@ async fn do_schedule (cmd :&Cmd) -> Bresult<&'static str> {
         let mut time =
             if let Ok(datestr) = caps.as_str(2) {
                 LocalDateTime
-                    ::from_str( &format!("{}{}", datestr, caps.as_str(3)?) )?
+                    ::from_str( &format!("{}{}", datestr, caps.as_str(3)?).to_uppercase() )?
                     .to_instant()
                     .seconds()
             } else if let Ok(timestr) = caps.as_str(3) {
@@ -2681,9 +2678,8 @@ pub fn main_launch() -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
  
 fn fun () -> Bresult<()>  {
-    let dt = LocalDateTime::from_str("2015-06-26T16:43:23"); println!("{:?}", dt);
-    let dt = LocalTime::from_str("16:43:23-0700"); println!("{:?}", dt);
-
+    let dt = LocalDateTime::from_str("2015-06-26T16:43:23Z"); println!("{:?}", dt);
+    let dt = LocalDateTime::from_str("2015-06-26T16:43:23z"); println!("{:?}", dt);
     Ok(())
 }
 
