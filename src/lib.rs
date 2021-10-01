@@ -2541,8 +2541,13 @@ async fn do_all (cmd:&Cmd) -> Bresult<()> {
 
     let res = do_schedule(cmd).await;
     glogd!("do_schedule =>", res);
-    // Stop evaluating if this is a successfull scheduled job
-    if res.is_ok() && res.unwrap() == "COMPLETED." { return Ok(()) }
+    match res {
+        Err(e) => { send_msg_id(cmd.into(), &format!("Scheduler {}", e)).await?; }
+        Ok(o) =>  {
+            // Stop evaluating if this is a successfull scheduled job
+            if o == "COMPLETED." { return Ok(()) }
+        }
+    }
 
     glogd!("do_echo =>",       do_echo(cmd).await);
     glogd!("do_help =>",       do_help(cmd).await);
@@ -2679,7 +2684,7 @@ pub fn main_launch() -> Bresult<()> {
  
 fn fun () -> Bresult<()>  {
     let dt = LocalDateTime::from_str("2015-06-26T16:43:23Z"); println!("{:?}", dt);
-    let dt = LocalDateTime::from_str("2015-06-26T16:43:23z"); println!("{:?}", dt);
+    let dt = LocalTime::from_str("6:43:23z"); println!("{:?}", dt);
     Ok(())
 }
 
