@@ -1,72 +1,20 @@
-//! # Communication with external services
-
+//! # Telegram Communication
 use crate::*;
-
-use ::std::{
-    time::{Duration},
-};
-use ::actix_web::{
-    client::{Client, Connector}};
+//use util::*;
+use ::std::{fmt, time::{Duration} };
 use ::openssl::ssl::{SslConnector, SslMethod};
-use ::log::*;
+use ::actix_web::{ client::{Client, Connector} };
 
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MsgCmd {
-    chat_id_default: i64,
     pub id: i64,
     pub at: i64,
-    id_level: i64,
-    at_level: i64,
-    url_api: String,
-    chat_id: Option<i64>, // Unoverideable un-overridable destination chat_id
-    level: i64,
-}
-
-impl From<Cmd> for MsgCmd {
-    fn from (cmd:Cmd) -> Self {
-        let cmd = cmd.lock().unwrap();
-        let env = cmd.env.lock().unwrap();
-        MsgCmd{
-            chat_id_default: env.chat_id_default,
-            id:       cmd.id,
-            at:       cmd.at,
-            id_level: cmd.id_level,
-            at_level: cmd.at_level,
-            url_api:  env.url_api.to_string(),
-            chat_id:  None,
-            level:    2}
-    }
-}
-impl From<&Cmd> for MsgCmd {
-    fn from (cmd:&Cmd) -> Self {
-        let cmd = cmd.lock().unwrap();
-        let env = cmd.env.lock().unwrap();
-        MsgCmd{
-            chat_id_default: env.chat_id_default,
-            id:       cmd.id,
-            at:       cmd.at,
-            id_level: cmd.id_level,
-            at_level: cmd.at_level,
-            url_api:  env.url_api.to_string(),
-            chat_id:  None,
-            level:    2}
-    }
-}
-
-impl From<&CmdStruct> for MsgCmd {
-    fn from (cmdstruct:&CmdStruct) -> MsgCmd {
-        let env = cmdstruct.env.lock().unwrap();
-        MsgCmd{
-            chat_id_default: env.chat_id_default,
-            id:       cmdstruct.id,
-            at:       cmdstruct.at,
-            id_level: cmdstruct.id_level,
-            at_level: cmdstruct.at_level,
-            url_api:  env.url_api.to_string(),
-            chat_id:  None,
-            level:    2}
-    }
+    pub id_level: i64,
+    pub at_level: i64,
+    pub url_api: String,
+    pub chat_id: Option<i64>, // Unoverideable un-overridable destination chat_id
+    pub level: i64,
 }
 
 impl MsgCmd {
@@ -75,37 +23,70 @@ impl MsgCmd {
          self.chat_id = Some(to);
          self
     }
-    pub fn level (mut self, level:i64) -> Self {
+    pub fn _level (mut self, level:i64) -> Self {
          self.level = level;
          self
     }
 }
 
-pub async fn send_msg (mc:MsgCmd, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 1, false, false, None, text).await
+////////////////////////////////////////
+
+pub struct Telegram {
+    client: Client
 }
 
-pub async fn send_msg_markdown (mc:MsgCmd, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 1, false, true, None, text).await
+impl Telegram {
+    pub fn new () -> Bresult<Self> {
+        let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
+        ssl_connector_builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
+        ssl_connector_builder.set_certificate_chain_file("cert.pem")?;
+
+        let client = 
+            Client::builder()
+                .connector(
+                    Connector::new()
+                        .ssl( ssl_connector_builder.build() )
+                        .timeout(Duration::new(30,0))
+                        .finish())
+                .finish();
+        Ok(Telegram { client })
+    }
+    pub async fn send_msg (&self, mc:MsgCmd, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 1, false, false, None, text).await
+    }
+
+    pub async fn send_msg_markdown (&self, mc:MsgCmd, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 1, false, true, None, text).await
+    }
+
+    pub async fn send_edit_msg (&self, mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 1, true, false, Some(edit_msg_id), text).await
+    }
+
+    pub async fn send_edit_msg_markdown (&self, mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 1, true, true, Some(edit_msg_id), text).await
+    }
+
+    pub async fn send_msg_id (&self, mc:MsgCmd, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 0, false, false, None, text).await
+    }
+
+    pub async fn send_msg_markdown_id (&self, mc:MsgCmd, text:&str) -> Bresult<i64> {
+        send_msg(&self.client, mc, 0, false, true,  None, text).await
+    }
+} // impl Telegram
+
+impl fmt::Debug for Telegram {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        f.debug_struct("Telegram")
+         .field("client", &format!("Client Object"))
+         .finish()
+    }
 }
 
-pub async fn send_edit_msg (mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 1, true, false, Some(edit_msg_id), text).await
-}
-
-pub async fn send_edit_msg_markdown (mc:MsgCmd, edit_msg_id:i64, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 1, true, true, Some(edit_msg_id), text).await
-}
-
-pub async fn send_msg_id (mc:MsgCmd, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 0, false, false, None, text).await
-}
-
-pub async fn send_msg_markdown_id (mc:MsgCmd, text:&str) -> Bresult<i64> {
-    _send_msg(mc, 0, false, true,  None, text).await
-}
-
-async fn _send_msg (
+async fn send_msg (
+    client: &Client,
     mc: MsgCmd,
     target: i64, // 0->cmd.id   1->cmd.at
     is_edit_message: bool,
@@ -119,13 +100,11 @@ async fn _send_msg (
     // Message either: 
     let chat_id =
         if let Some(chat_id) = mc.chat_id {
-            chat_id // Forced message to this id
+            chat_id // Forced message to id
         } else if 1 == target && mc.level <= mc.at_level {
-            mc.at // Message the "at" channel
-        } else if mc.level <= mc.id_level {
-            mc.id // Message the "id" channel
+            mc.at // Message the channel if sender has better/equal privs than channel
         } else {
-            mc.chat_id_default // Message sysadmin
+            mc.id // Message the "id" channel
         }.to_string();
     let text = if is_markdown {
         text // Quick and dirty uni/url decode
@@ -176,12 +155,7 @@ async fn _send_msg (
     builder.set_certificate_chain_file("cert.pem")?;
 
     let mut send_client_request =
-        Client::builder()
-            .connector(Connector::new()
-                        .ssl( builder.build() )
-                        .timeout(Duration::new(30,0))
-                        .finish())
-            .finish()
+        client
             .get(theurl)
             .header("User-Agent", "Actix-web")
             .timeout(Duration::new(30,0))
