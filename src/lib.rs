@@ -4,6 +4,8 @@ mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
 mod db;    use crate::db::*;
 use ::std::{env,
+    cmp::Ordering,
+    boxed::Box,
     error::Error,
     mem::transmute,
     collections::{HashMap, HashSet},
@@ -11,7 +13,6 @@ use ::std::{env,
     fs::{read_to_string, write},
     sync::{Arc, Mutex},
  };
-use ::std::boxed::Box;
 use ::log::*;
 use ::regex::{Regex};
 use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece,
@@ -485,12 +486,12 @@ impl EnvStruct {
         Ok(Env::from(EnvStruct{
             url_api:
                 format!("https://api.telegram.org/bot{}",
-                        env::var_os( &argv.nth(1).ok_or("args[2] missing")? )
+                        env::var_os( &argv.nth(1).ok_or("args[1] missing")? )
                         .ok_or("can't resolve telegram api key")?
                         .to_str()
                         .unwrap()),
             dbconn:             Connection::new(&argv.next().ok_or("args[2] missing")?)?,
-            dst_hours_adjust:   argv.next().ok_or("args[4] missing")?.parse::<i8>()?,
+            dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
             quote_delay_secs:   QUOTE_DELAY_SECS,
             fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
             fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
@@ -1119,7 +1120,7 @@ r#"`          ™Bot Commands          `
 `word: ` `Definition lookup`
 `+1    ` `Like someone's post (via reply)`
 `+?    ` `Like leaderboard`
-`/stonks` `Your Stonkfolio`
+`/stonks [sort]` `Your Stonkfolio`
 `/orders` `Your @shares and bid/ask orders`
 `/yolo  ` `Stonks leaderboard`
 `gme$   ` `Quote ({}min delay)`
@@ -1351,7 +1352,11 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
 
 async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
-    if Regex::new(r"/STONKS").unwrap().find(&cmdstruct.msg.to_uppercase()).is_none() { return Ok("SKIP"); }
+    let cap = regex_to_vec(r"(?i)/stonks( sort)?", &cmdstruct.msg)?;
+    if cap.is_empty() { return Ok("SKIP"); }
+
+    let dosort = !cap[1].is_none();
+
     let positions = Position::get_users_positions(&cmdstruct)?;
 
     // Keep message_idof this placeholder message so we continue to update it
@@ -1360,12 +1365,25 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     cmdstruct.message_id_out = message_id;
 
     let mut total = 0.0;
+    let mut positions_table :Vec<(f64,String)> = Vec::new();
     for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
             pos.update_quote(&cmdstruct).await?;
             info!("{} position {:?}", cmdstruct.id, &pos);
             let pretty_position = pos.format_position(&cmdstruct.env.lock().unwrap().dbconn)?;
-            cmdstruct.msg_out.push_str(&pretty_position);
+
+            if dosort {
+                let value = pos.qty * pos.quote.as_ref().unwrap().price;
+                positions_table.push( (value, pretty_position) );
+                positions_table.sort_by( |a,b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Less) );
+                cmdstruct.msg_out =
+                    positions_table.iter()
+                        .map( |(_,s)| s.to_string())
+                        .collect::<Vec<String>>().join("");
+            } else {
+                cmdstruct.msg_out.push_str( &pretty_position )
+            }
+
             total += pos.qty * pos.quote.unwrap().price;
             let msgcmd = cmdstruct.into();
             cmdstruct.telegram.send_edit_msg_markdown(
