@@ -11,7 +11,7 @@
             "cwd": "${workspaceFolder}",
             "program": "${cargo:program}",
             "cargo": { "args": [ "run", "-p", "tmbot" ] },
-            "args": [ "1544486685:AAGcw-z_PeTIsmJLXnXtlRCb6-J1n0huc_c", "tmbot.sqlite", "1"],
+            "args": [ "TELEGRAM_API_TOKEN", "tmbot.sqlite", "1"],
             //"stopOnEntry": false,
             //"sourceMap": { "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-x86_64-apple-darwin/lib/rustlib/src/rust" },
         },{

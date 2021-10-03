@@ -483,7 +483,12 @@ impl From<EnvStruct> for Env {
 impl EnvStruct {
     fn new (mut argv: std::env::Args) -> Bresult<Env> {
         Ok(Env::from(EnvStruct{
-            url_api:            format!("https://api.telegram.org/bot{}", argv.nth(1).ok_or("args[1] missing")?),
+            url_api:
+                format!("https://api.telegram.org/bot{}",
+                        env::var_os( &argv.nth(1).ok_or("args[2] missing")? )
+                        .ok_or("can't resolve telegram api key")?
+                        .to_str()
+                        .unwrap()),
             dbconn:             Connection::new(&argv.next().ok_or("args[2] missing")?)?,
             dst_hours_adjust:   argv.next().ok_or("args[4] missing")?.parse::<i8>()?,
             quote_delay_secs:   QUOTE_DELAY_SECS,
