@@ -1373,8 +1373,13 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             let pretty_position = pos.format_position(&cmdstruct.env.lock().unwrap().dbconn)?;
 
             if dosort {
-                let value = pos.qty * pos.quote.as_ref().unwrap().price;
-                positions_table.push( (value, pretty_position) );
+                let qty = pos.qty;
+                let cost = pos.price;
+                let price = pos.quote.as_ref().unwrap().price;
+                let basis = qty*cost;
+                let value = qty*price;
+                let gain = value - basis;
+                positions_table.push( (gain, pretty_position) );
                 positions_table.sort_by( |a,b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Less) );
                 cmdstruct.msg_out =
                     positions_table.iter()
