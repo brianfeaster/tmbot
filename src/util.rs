@@ -88,7 +88,7 @@ pub fn bytes2json (body: &[u8]) -> Result<Value, Box<dyn Error>> {
 
 ////////////////////////////////////////
 
-pub fn getin<'t> (mut j :&'t Value, keys :&[&str]) -> &'t Value {
+pub fn getin<'a> (mut j :&'a Value, keys :&[&str]) -> &'a Value {
     for k in keys { j = &j[*k] }
     j
 }
@@ -97,6 +97,10 @@ pub fn getin_i64 (json :&Value, keys :&[&str]) -> Result<i64, String> {
     getin(json, keys)
     .as_i64()
     .ok_or( format!("Unable to parse {:?} as_i64", keys) )
+}
+
+pub fn getin_i64_or (default:i64, json :&Value, keys :&[&str]) -> i64 {
+    getin(json, keys).as_i64().unwrap_or(default)
 }
 
 pub fn getin_f64 (json :&Value, keys :&[&str]) -> Result<f64, String> {

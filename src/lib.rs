@@ -555,64 +555,27 @@ impl CmdStruct {
     fn newcmdstruct(env:Env, body: &web::Bytes) -> Bresult<CmdStruct> {
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
-
         let edited_message = &json["edited_message"];
         let message = if edited_message.is_object() { edited_message } else { &json["message"] };
         let message_id = getin_i64(message, &["message_id"]).unwrap_or(0);
-
-        let (id, at, to, msg) =
-            if inline_query.is_object() {
+        let (id, at, to, message) =
+            if inline_query.is_object() { // Inline queries are DMs so no other associated channels
                 let id = getin_i64(inline_query, &["from", "id"])?;
-                let msg = getin_str(inline_query, &["query"])?.to_string();
-                (id, id, id, msg) // Inline queries are strictly DMs (no associated "at" groups nor reply "to" messages)
-            } else if message.is_object() {
+                let message = getin_str(inline_query, &["query"])?.to_string();
+                (id, id, id, message)
+            } else if message.is_object() { // An incoming message could be a reply or normal.
                 let id = getin_i64(message, &["from", "id"])?;
                 let at = getin_i64(message, &["chat", "id"])?;
-                let msg = getin_str(message, &["text"])?.to_string();
-                if let Ok(to) = getin_i64(&message, &["reply_to_message", "from", "id"]) {
-                    (id, at, to, msg) // Reply to message
-                } else {
-                    (id, at, at, msg) // Normal message
-                }
+                let to = getin_i64_or(at, &message, &["reply_to_message", "from", "id"]);
+                let message = getin_str(message, &["text"])?.to_string();
+                (id, at, to, message) // Normal message
             } else { Err("Nothing to do.")? };
-        let envstruct = env.lock().unwrap();
 
-        // Create hash map id -> echoLevel
-        let echo_levels =
-            getsql!(envstruct.dbconn, "SELECT id, echo FROM entitys NATURAL JOIN modes")?.iter()
-            .map( |hm| // tuple -> hashmap
-                 ( hm.get_i64("id").unwrap(),
-                   hm.get_i64("echo").unwrap() ) )
-            .collect::<HashMap<i64,i64>>();
-
-        let rows = getsql!(envstruct.dbconn, r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#,
-            id)?;
-
-        let (mut fmt_quote, mut fmt_position) =
-            if rows.is_empty() {
-                Err( format!("{} missing from entitys", id))?
-            } else {
-                (rows[0].get_str("quote")?, rows[0].get_str("position")? )
-            };
-        if fmt_quote.is_empty() { fmt_quote = envstruct.fmt_quote.to_string() }
-        if fmt_position.is_empty() { fmt_position = envstruct.fmt_position.to_string() }
-
-        Ok( //Cmd::new(Mutex::new(
-            CmdStruct {
-            env: env.clone(),
-            telegram: Telegram::new(envstruct.url_api.to_string())?,
-            now: Instant::now().seconds(),
-            id, at, to, message_id,
-            message: msg,
-            id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
-            at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
-            fmt_quote, fmt_position,
-            msg_id: None,
-            msg: String::new()
-        }) //))
+        CmdStruct::new_cmdstruct(&env, Instant::now().seconds(), id, at, to, message_id, &message)
     }
+
     // create a basic CmdStruct
-    fn new_cmdstruct(env:&Env, now:i64, id:i64, at:i64, to:i64, message:&str) -> Bresult<CmdStruct> {
+    fn new_cmdstruct(env:&Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let envstruct = env.lock().unwrap();
         // Create hash map id -> echoLevel
         let echo_levels =
@@ -637,9 +600,7 @@ impl CmdStruct {
         Ok(CmdStruct{
             env: env.clone(),
             telegram: Telegram::new(envstruct.url_api.to_string())?,
-            now,
-            id, at, to,
-            message_id: 0,
+            now, id, at, to, message_id,
             message: message.to_string(),
             id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
             at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
@@ -1356,12 +1317,12 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 }
 
 async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
-
     let tickers = extract_tickers(&cmdstruct.message);
     if tickers.is_empty() { return Ok("SKIP") }
 
     // Send/update to the same message to reduce clutter
     cmdstruct.msg_id = Some(cmdstruct.push_msg("…").send_msg().await?);
+    cmdstruct.set_msg("");
 
     let mut found_tickers = false;
     for ticker in &tickers {
@@ -1369,7 +1330,7 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
         match get_quote_pretty(&cmdstruct, ticker).await {
             Ok(res) => {
                 info!("get_quote_pretty {:?}", res);
-                cmdstruct.set_msg(&format!("{}\n", res)).send_msg_markdown().await?;
+                cmdstruct.push_msg(&format!("{}\n", res)).send_msg_markdown().await?;
                 found_tickers = true;
             },
             e => { glogd!("get_quote_pretty => ", e); }
@@ -1410,7 +1371,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let gain = value - basis;
                 positions_table.push( (gain, pretty_position) );
                 positions_table.sort_by( |a,b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Less) );
-                cmdstruct.set_msg(
+                cmdstruct.set_msg( // Refresh message with sorted stonks
                     &positions_table.iter()
                         .map( |(_,s)| s.to_string())
                         .collect::<Vec<String>>().join(""));
@@ -2670,7 +2631,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
                 let id = row.get_i64("id").unwrap();
                 let at = row.get_i64("at").unwrap();
                 let command = row.get_str("cmd").unwrap();
-                let mut cmdstruct = match CmdStruct::new_cmdstruct(&env, now, id, at, at, &command) {
+                let mut cmdstruct = match CmdStruct::new_cmdstruct(&env, now, id, at, at, 0, &command) {
                     Ok(cmdstruct) => cmdstruct,
                     e => { glog!(e); continue }
                 };
