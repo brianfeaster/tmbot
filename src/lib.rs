@@ -249,10 +249,13 @@ fn percent_squish (num:f64) -> String {
 // Stringify float to two decimal places unless under 10
 // where it's 4 decimal places with trailing 0s truncate.
 fn money_pretty (n:f64) -> String {
-    if n < 10.0 {
+    if n < 0.0001 {
+        format!("0.0")
+    } else if n < 1.0 {
         let mut np = format!("{:.4}", n);
-        np = regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() );
-        regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() )
+        np = regex_to_hashmap(r"^0(.*)$", &np).map_or(np, |c| c["1"].to_string() ); // strip leading 0
+        np = regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() ); // strip trailing 0
+        regex_to_hashmap(r"^(.*)0$", &np).map_or(np, |c| c["1"].to_string() ) // strip trailing 0
     } else {
         format!("{:.2}", n)
     }
@@ -2684,6 +2687,9 @@ pub fn main_launch() -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
  
 fn fun () -> Bresult<()>  {
+    for f in [0.0, 0.1009, 1.1009, 11.1009] {
+      println!("{}", money_pretty(f))
+    }
     Ok(())
 }
 
