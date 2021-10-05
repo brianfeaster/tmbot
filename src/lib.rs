@@ -2199,7 +2199,7 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
 
     let caps = regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &cmdstruct.message)?;
-    caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
+    //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
     if caps.is_empty() { return Ok("SKIP"); }
 
     if caps.as_str(1).is_err() {
@@ -2445,7 +2445,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 )?
             )?",
             &cmdstruct.message )?;
-    caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
+    //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
     if caps.is_empty() { return Ok("SKIP") }
 
     // "/schedule" Show all jobs
@@ -2598,13 +2598,12 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
     std::thread::spawn( move || {
         let envc = env.clone();
-        actix_web::rt::System::new("tmbot")
-            .block_on(async move {
-                match CmdStruct::newcmdstruct(envc, &body) {
-                    Ok(mut cmdstruct) => do_all(&mut cmdstruct).await.unwrap_or_else(|r| error!("{:?}", r)),
-                    e => glog!(e)
-                }
-            });
+        actix_web::rt::System::new("tmbot").block_on(async move {
+            match CmdStruct::newcmdstruct(envc, &body) {
+                Ok(mut cmdstruct) => do_all(&mut cmdstruct).await.unwrap_or_else(|r| error!("{:?}", r)),
+                e => glog!(e)
+            }
+        });
         info!("\x1b[33m{:?}\n\x1b[0;1mEnd.", env.lock().unwrap());
     });
     "".into()
@@ -2612,34 +2611,35 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 
 pub fn launch_scheduler(env:Env) -> Bresult<()> {
     info!("Spawned Scheduler Event Thread, 10s delay");
-    std::thread::spawn( move || { loop {
+    std::thread::spawn( move ||
+    loop {
         sleep_secs(10.0);
         let now = Instant::now().seconds();
-        let qry = {
+        let jobs = {
             let envstruct = env.lock().unwrap();
-            getsqlquiet!(&envstruct.dbconn,
+            let res = getsqlquiet!(&envstruct.dbconn,
                 "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
                 envstruct.time_scheduler, now, // one-time jobs
-                envstruct.time_scheduler % 86400, now % 86400) // daily jobs
+                envstruct.time_scheduler % 86400, now % 86400); // daily jobs
+            if res.is_err() { glog!(res); continue }
+            res.unwrap()
         };
-        let jobs_to_run = match qry {
-            Ok(jobs_to_run) => jobs_to_run,
-            e => { glog!(e); continue }
-        };
-        if 0 < jobs_to_run.len() {
+
+        if 0 < jobs.len() {
             info!("\x1b[1mSchedules start...");
-            ginfo(&jobs_to_run);
+            ginfo(&jobs);
             let env = env.clone();
-            actix_web::rt::System::new("tmbot").block_on(async move {for row in jobs_to_run {
-                let id = row.get_i64("id").unwrap();
-                let at = row.get_i64("at").unwrap();
-                let command = row.get_str("cmd").unwrap();
+            actix_web::rt::System::new("tmbot").block_on( async move {
+            for job in jobs {
+                let id = job.get_i64("id").unwrap();
+                let at = job.get_i64("at").unwrap();
+                let command = job.get_str("cmd").unwrap();
                 let mut cmdstruct = match CmdStruct::new_cmdstruct(&env, now, id, at, at, 0, &command) {
                     Ok(cmdstruct) => cmdstruct,
                     e => { glog!(e); continue }
                 };
                 glog!(do_all(&mut cmdstruct).await);
-                let time = row.get_i64("time").unwrap();
+                let time = job.get_i64("time").unwrap();
                 if 86400 <= time { // Delete the non-daily job
                     let dbconn = &env.lock().unwrap().dbconn;
                     getsql!(dbconn, "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND cmd=?", id, at, time, &*command).unwrap();
@@ -2648,7 +2648,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
             info!("\x1b[1mSchedules end.");
         }
         env.lock().unwrap().time_scheduler = now;
-    } } ); // loop, ||, thread
+    } ); // loop, ||, thread
     Ok(())
 }
 
