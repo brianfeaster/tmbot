@@ -50,7 +50,7 @@ impl Telegram {
                 .connector(
                     Connector::new()
                         .ssl( ssl_connector_builder.build() )
-                        .timeout(Duration::new(30,0))
+                        .timeout(Duration::new(90,0))
                         .finish())
                 .finish();
         Ok(Telegram { client, url_api })
@@ -59,7 +59,7 @@ impl Telegram {
 
 impl Telegram {
     pub async fn send_msg<'a> (&self, mut mc: MsgCmd<'a>) -> Bresult<i64> {
-        info!("{:?} {:?}", self, mc);
+        info!("Telegram {:?}", mc);
         let chat_id =
             if let Some(dm_id) = mc.dm_id {
                 dm_id // Forced message to id
@@ -116,7 +116,7 @@ impl Telegram {
             self.client
                 .get(theurl)
                 .header("User-Agent", "Actix-web")
-                .timeout(Duration::new(30,0))
+                .timeout(Duration::new(90,0))
                 .query(&query)
                 .unwrap()
                 .send().await?;

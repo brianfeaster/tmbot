@@ -5,12 +5,12 @@ pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( std::time::Duration::new(30,0) )
+                    .timeout( std::time::Duration::new(90,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://www.onelook.com/")
         .header("User-Agent", "Actix-web")
-        .timeout(std::time::Duration::new(30,0))
+        .timeout(std::time::Duration::new(90,0))
         .query(&[["q",word]])?
         .send()
         .await?
@@ -53,12 +53,12 @@ pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls()).unwrap().build() )
-                    .timeout( std::time::Duration::new(30,0) )
+                    .timeout( std::time::Duration::new(90,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://onelook.com/")
         .header("User-Agent", "Actix-web")
-        .timeout(std::time::Duration::new(30,0))
+        .timeout(std::time::Duration::new(90,0))
         .query(&[["clue", word]]).unwrap()
         .send()
         .await.unwrap()
@@ -90,12 +90,12 @@ pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
         Client::builder()
         .connector( Connector::new()
                     .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( std::time::Duration::new(30,0) )
+                    .timeout( std::time::Duration::new(90,0) )
                     .finish() )
         .finish() // -> Client
         .get("https://finance.yahoo.com/chart/".to_string() + ticker)
         .header("User-Agent", "Actix-web")
-        .timeout(std::time::Duration::new(30,0))
+        .timeout(std::time::Duration::new(90,0))
         .send()
         .await?
         .body().limit(1_000_000).await;

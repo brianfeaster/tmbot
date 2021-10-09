@@ -152,3 +152,10 @@ pub fn getin_str <'t> (json :&'t Value, keys :&[&str]) -> Result<String, String>
 pub fn sleep_secs(secs: f64) {
     thread::sleep(Duration::from_millis( (secs*1000.0) as u64));
 }
+
+#[macro_export(local_inner_macros)]
+macro_rules! IF {
+    ($predicate:expr, $trueblock:expr, $falseblock:expr) => (
+        if $predicate { $trueblock } else { $falseblock }
+    )
+}

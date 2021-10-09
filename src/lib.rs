@@ -26,6 +26,8 @@ use ::macros::*;
 ////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_SECS :i64 = 60;
+const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
+const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
 
 //////////////////////////////////////////////////////////////////////////////
 // Rust primitives enahancements
@@ -529,8 +531,6 @@ pub struct EnvStruct {
     dbconn:           Connection, // SQLite connection
     quote_delay_secs: i64,    // Delay between remote stock quote queries
     dst_hours_adjust: i8,     // 1 = DST, 0 = ST
-    fmt_quote:        String, // Default format string for quotes
-    fmt_position:     String, // Default format string for portfolio positions
     time_scheduler:   i64,    // Time the scheduler last ran
     entitys:          HashMap<i64, Entity>
 }
@@ -540,6 +540,17 @@ type Env = Arc<Mutex<EnvStruct>>;
 impl From<EnvStruct> for Env {
     fn from (envstruct:EnvStruct) -> Self {
         Arc::new(Mutex::new(envstruct))
+    }
+}
+
+impl EnvStruct {
+    fn fmt_str_quote (&self, id:i64) -> String {
+        let s = &self.entitys.get(&id).unwrap().quote;
+        if s.is_empty() { FORMAT_STRING_QUOTE } else { s }.to_string()
+    }
+    fn fmt_str_position (&self, id:i64) -> String {
+        let s = &self.entitys.get(&id).unwrap().position;
+        if s.is_empty() { FORMAT_STRING_POSITION } else { s }.to_string()
     }
 }
 
@@ -580,8 +591,6 @@ fn new (
         url_api, dbconn,
         dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
-        fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
-        fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
         time_scheduler:     Instant::now().seconds(),
         entitys
     }))
@@ -602,8 +611,6 @@ pub struct CmdStruct { // Represents in incoming Telegram message and session/se
     message: String, // The incoming message
     id_level: i64, // Echo level [0,1,2] for each id.  Higher can't write to lower.
     at_level: i64,
-    fmt_quote: String, // Stonk/quote format strings.  User/id configurable.
-    fmt_position: String,
     // Telegram outgoing response message details
     msg_id: Option<i64>, // previous message_id (for response updating/editing)
     msg: String
@@ -665,8 +672,6 @@ impl CmdStruct {
     // create a basic CmdStruct
     fn new_cmdstruct(env:&Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let envstruct = env.lock().unwrap();
-        let fmt_quote = envstruct.fmt_quote.to_string();
-        let fmt_position = envstruct.fmt_position.to_string();
         Ok(CmdStruct{
             env: env.clone(),
             telegram: Telegram::new(envstruct.url_api.to_string())?,
@@ -674,7 +679,6 @@ impl CmdStruct {
             message: message.to_string(),
             id_level: envstruct.entitys.get(&id).unwrap().echo,
             at_level: envstruct.entitys.get(&at).unwrap().echo,
-            fmt_quote, fmt_position,
             msg_id: None,
             msg: String::new()
         })
@@ -852,6 +856,7 @@ impl Quote {// Query local cache or internet for ticker details
             } else { // Quote not in cache so query internet
                 Quote::new_market_quote(env.clone(), ticker).await?
             };
+        info!("quote = {:?}", quote);
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             let dbconn = &env.lock().unwrap().dbconn;
@@ -892,11 +897,11 @@ fn amt_as_glyph (amt: f64) -> (&'static str, &'static str) {
 }
 
 impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
-    fn format_quote (&self, fmt_quote:&str) -> Bresult<String> {
-        let dbconn = &self.env.lock().unwrap().dbconn;
+    fn format_quote (&self, id:i64) -> Bresult<String> {
+        let envstruct = &self.env.lock().unwrap();
         let gain_glyphs = amt_as_glyph(self.amount);
         Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
-            .captures_iter(&fmt_quote)
+            .captures_iter(&envstruct.fmt_str_quote(id))
             .fold(String::new(), |mut s, cap| {
                 if let Some(m) = cap.get(2) {
                     match m.as_str() {
@@ -904,7 +909,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
                     "C" => s.push_str(&percent_squish(self.percent.abs())), // inter-day percent
                     "D" => s.push_str(gain_glyphs.0), // red/green light
-                    "E" => s.push_str(&reference_ticker(&dbconn, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
+                    "E" => s.push_str(&reference_ticker(&envstruct.dbconn, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
                     "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
@@ -919,7 +924,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                 s
             } )
         )
-    } // Quote.format_quote
+    }
 }
 
 ////////////////////////////////////////
@@ -944,7 +949,8 @@ impl Position {
 impl Position {
     // Return vector instead of option in case of box/short positions.
     fn get_position (cmdstruct:&CmdStruct, id: i64, ticker: &str) -> Bresult<Vec<Position>> {
-        let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
+        let envstruct = cmdstruct.env.lock().unwrap();
+        let dbconn = &envstruct.dbconn;
         Ok(getsql!(dbconn, "SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?
         .iter()
         .map( |pos|
@@ -954,16 +960,17 @@ impl Position {
                 ticker: ticker.to_string(),
                 qty:    pos.get_f64("qty").unwrap(),
                 price:  pos.get_f64("price").unwrap(),
-                fmt_position: cmdstruct.fmt_position.to_string()
+                fmt_position: envstruct.fmt_str_position(id)
             } )
         .collect())
     }
 }
 
 impl Position {
-    fn get_users_positions (cmdstruct:&CmdStruct) -> Bresult<Vec<Position>> {
+    fn get_users_positions (cmdstruct: &CmdStruct) -> Bresult<Vec<Position>> {
         let id = cmdstruct.id;
-        let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
+        let envstruct = cmdstruct.env.lock().unwrap();
+        let dbconn = &envstruct.dbconn;
         Ok(getsql!(dbconn, "SELECT ticker,qty,price FROM positions WHERE id=?", id)?
         .iter()
         .map( |pos|
@@ -973,7 +980,7 @@ impl Position {
                 ticker: pos.get_str("ticker").unwrap(),
                 qty: pos.get_f64("qty").unwrap(),
                 price: pos.get_f64("price").unwrap(),
-                fmt_position: cmdstruct.fmt_position.to_string()
+                fmt_position: envstruct.fmt_str_position(id)
             } )
         .collect())
     }
@@ -995,7 +1002,7 @@ impl Position {
                     ticker: ticker.to_string(),
                     qty: 0.0,
                     price: 0.0,
-                    fmt_position: cmdstruct.fmt_position.to_string() }
+                    fmt_position: cmdstruct.env.lock().unwrap().fmt_str_position(id) }
             } else {
                 hm.pop().unwrap()
             };
@@ -1135,9 +1142,7 @@ async fn get_quote_pretty (cmdstruct:&CmdStruct, ticker :&str) -> Bresult<String
 
     let quote = Quote::get_market_quote(cmdstruct.env.clone(), &ticker, cmdstruct.now).await?;
 
-    Ok(format!("{}{}",
-        quote.format_quote(&cmdstruct.fmt_quote)?,
-        bidask))
+    Ok(format!("{}{}", quote.format_quote(cmdstruct.id)?, bidask))
 } // get_quote_pretty
 
 
@@ -2196,17 +2201,16 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     for pos in rows {
         if is_self_stonk(pos.get("ticker").unwrap()) {
             let mut pos = {
-                let envstruct = cmdstruct.env.lock().unwrap();
                 Position {
                     quote: None,
                     id: pos.get_i64("id")?,
                     ticker: pos.get_str("ticker")?,
                     qty: pos.get_f64("qty")?,
                     price: pos.get_f64("price")?,
-                    fmt_position: envstruct.fmt_position.to_string()
+                    fmt_position: cmdstruct.env.lock().unwrap().fmt_str_quote(cmdstruct.id)
                 }
             };
-            pos.update_quote(&cmdstruct).await?; // Locks cmd, env
+            pos.update_quote(&cmdstruct).await?; // Locks cmdstruct.env
 
             let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
             msg += &pos.format_position(dbconn)?;
@@ -2242,41 +2246,14 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
+async fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<i64> {
+    cmdstruct
+        .push_msg(FORMAT_STRINGS_HELP)
+        .send_msg_markdown()
+        .await
+}
 
-    let caps = regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &cmdstruct.message)?;
-    //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
-    if caps.is_empty() { return Ok("SKIP"); }
-
-    if caps.as_str(1).is_err() {
-        let res = {
-            let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
-            getsql!(
-                dbconn,
-                r#"SELECT COALESCE(quote, "") as quote, COALESCE(position, "") as position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#,
-                cmdstruct.id)?
-        };
-
-        let fmt_quote =
-            if res.is_empty() || res[0].get_str("quote")?.is_empty() {
-                format!("DEFAULT {:?}", cmdstruct.fmt_quote.to_string())
-            } else {
-                res[0].get_str("quote")?
-            };
-        let fmt_position =
-            if res.is_empty() || res[0].get_str("position")?.is_empty() {
-                format!("DEFAULT {:?}", cmdstruct.fmt_position.to_string())
-            } else {
-                res[0].get_str("position")?
-            };
-        cmdstruct.push_msg(&format!("fmt_quote {}\nfmt_position {}", fmt_quote, fmt_position)).send_msg().await?;
-        return Ok("COMPLETED.")
-    }
-
-    let c = match caps.as_str(2)? {
-        "?" => {
-            cmdstruct
-                .push_msg(
+const FORMAT_STRINGS_HELP: &str =
 "` ™Bot Quote Formatting `
 `%A` `Gain Arrow`
 `%B` `Gain`
@@ -2304,36 +2281,61 @@ async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
 `%L` `Day Arrow`
 `%M` `Day Gain %`
 `%[%nbiusq]` `% newline bold italics underline strikeout quote`
-")
-                .send_msg_markdown()
-                .await?;
-            return Ok("COMPLETED.");
-        },
-        "q" => "quote",
-        _ => "position"
-    };
-    let s = caps.as_str(3).unwrap_or("");
+";
 
-    info!("set format {} to {:?}", c, s);
+async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
+
+    let caps = regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &cmdstruct.message)?;
+    //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
+    if caps.is_empty() { return Ok("SKIP"); }
+
+    let id = cmdstruct.id;
+
+    // "/fmt" show current format strings
+
+    if caps.as_str(1).is_err() {
+        let (fmt_quote, fmt_position) = {
+            let envstruct = cmdstruct.env.lock().unwrap();
+            (envstruct.fmt_str_quote(id).to_string(), envstruct.fmt_str_position(id).to_string())
+        };
+        return cmdstruct
+            .push_msg(&format!("FORMAT STRINGS\nQuote{} {}\nPosition{} {}",
+                IF!(fmt_quote==FORMAT_STRING_QUOTE, "*", ""), fmt_quote,
+                IF!(fmt_position==FORMAT_STRING_POSITION, "*", ""), fmt_position))
+            .send_msg().await
+            .and(Ok("COMPLETED."))
+    }
+
+    // "/fmt [qp?] [*]" show current format strings
+
+    let new_format_str = caps.as_str(3).unwrap_or("").to_string();
+    let format_type = match caps.as_str(2)? {
+        "q" => {
+            cmdstruct.env.lock().unwrap().entitys.get_mut(&id).unwrap().quote = new_format_str.to_string();
+            "quote"
+        },
+        "p" => {
+            cmdstruct.env.lock().unwrap().entitys.get_mut(&id).unwrap().position = new_format_str.to_string();
+            "position"
+        },
+          _ => return send_format_strings_help(cmdstruct).await.and(Ok("COMPLETED."))
+    };
 
     // notify user the change
     cmdstruct
         .push_msg(
-            &format!("fmt_{} {}",
-                c,
-                if s.is_empty() { "DEFAULT".to_string() } else { format!("{:?}", s) }))
+            &format!("Format {}\n{}",
+                format_type,
+                if new_format_str.is_empty() { "DEFAULT".to_string() } else { format!("{}", new_format_str) }))
         .send_msg()
         .await?;
 
     let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
-    if getsql!(dbconn, "SELECT id FROM formats WHERE id=?", cmdstruct.id)?.is_empty() {
-        getsql!(dbconn, r#"INSERT INTO formats VALUES (?, "", "")"#, cmdstruct.id)?;
-    }
 
     // make change to DB
-    getsql!(dbconn, format!("UPDATE formats SET {}=? WHERE id=?", c),
-        &*s.replacen("\"", "\"\"", 10000),
-        cmdstruct.id)?;
+    getsql!(dbconn, "INSERT OR IGNORE INTO formats VALUES (?, '', '')", id)?;
+    getsql!(dbconn, format!("UPDATE formats SET {}=? WHERE id=?", format_type),
+        &*new_format_str.replacen("\"", "\"\"", 10000), id)?;
 
     Ok("COMPLETED.")
 }
@@ -2640,7 +2642,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
             .unwrap_or(&format!("{:?}", body)) );
 
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    //info!("\x1b[1m{:?}", env.lock().unwrap());
+    info!("\x1b[1m{:?}", env.lock().unwrap());
 
     std::thread::spawn( move || {
         let envc = env.clone();
@@ -2721,7 +2723,7 @@ pub fn main_launch() -> Bresult<()> {
     if 1 == argv.len() {
         Err(format!("{:?} missing: KEY ID DST", argv))?
     }
-    if true { glogd!("create_schema => ", create_schema()); } // Create DB
+    if !true { glogd!("create_schema => ", create_schema()); } // Create DB
     if !true { fun(argv) } // Hacks and other test code
     else {
         let env = EnvStruct::new(argv)?;
