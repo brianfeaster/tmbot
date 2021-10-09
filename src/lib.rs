@@ -3,19 +3,20 @@ mod util;  pub use crate::util::*;
 mod comm;  use crate::comm::*;
 mod srvs;  use crate::srvs::*;
 mod db;    use crate::db::*;
-use ::std::{env,
+use ::std::{
+    env,
     cmp::Ordering,
     boxed::Box,
     error::Error,
     mem::transmute,
     collections::{HashMap, HashSet},
     str::{from_utf8, FromStr},
-    fs::{read_to_string, write},
     sync::{Arc, Mutex},
  };
 use ::log::*;
 use ::regex::{Regex};
-use ::datetime::{Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece,
+use ::datetime::{
+    Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece,
     Weekday::{Sunday, Saturday} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
@@ -28,6 +29,29 @@ const QUOTE_DELAY_SECS :i64 = 60;
 
 //////////////////////////////////////////////////////////////////////////////
 // Rust primitives enahancements
+trait GetI64Or    { fn get_i64_or    (&self, default:i64,  key:&str) -> i64; }
+trait GetF64Or    { fn get_f64_or    (&self, default:f64,  key:&str) -> f64; }
+trait GetStringOr { fn get_string_or (&self, default:&str, key:&str) -> String; }
+
+impl GetI64Or for HashMap<String, ::sqlite::Value> {
+    fn get_i64_or (&self, default:i64, key:&str) -> i64 {
+        self.get(key).and_then( ::sqlite::Value::as_integer ).unwrap_or(default)
+    }
+}
+
+impl GetF64Or for HashMap<String, ::sqlite::Value> {
+    fn get_f64_or (&self, default:f64, key:&str) -> f64 {
+        self.get(key).and_then( ::sqlite::Value::as_float ).unwrap_or(default)
+    }
+}
+
+impl GetStringOr for HashMap<String, ::sqlite::Value> {
+    fn get_string_or (&self, default:&str, key:&str) -> String {
+        self.get(key).and_then( ::sqlite::Value::as_string ).unwrap_or(default).to_string()
+    }
+}
+
+//////////////////////////////////////// 
 
 trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
 impl AsI64 for Vec<Option<String>> {
@@ -66,6 +90,8 @@ impl AsString for Vec<Option<String>> {
     }
 }
 
+////////////////////////////////////////
+
 trait GetI64 { fn get_i64 (&self, k:&str) -> Bresult<i64>; }
 impl GetI64 for HashMap<String, String> {
     fn get_i64 (&self, k:&str) -> Bresult<i64> {
@@ -74,6 +100,14 @@ impl GetI64 for HashMap<String, String> {
             .parse::<i64>()?)
     }
 }
+impl GetI64 for HashMap<String, ::sqlite::Value> {
+    fn get_i64 (&self, k:&str) -> Bresult<i64> {
+        Ok(self
+            .get(k).ok_or(format!("Can't find key '{}'", k))?
+            .as_integer().ok_or(format!("Not an integer '{}'", k))?)
+    }
+}
+
 trait GetF64 { fn get_f64 (&self, k:&str) -> Bresult<f64>; }
 impl GetF64 for HashMap<String, String> {
     fn get_f64 (&self, k:&str) -> Bresult<f64> {
@@ -83,15 +117,24 @@ impl GetF64 for HashMap<String, String> {
     }
 }
 
-trait GetStr { fn get_str (&self, k:&str) -> Bresult<String>; }
+trait GetStr { fn get_str (&self, key:&str) -> Bresult<String>; }
 impl GetStr for HashMap<String, String> {
-    fn get_str (&self, k:&str) -> Bresult<String> {
+    fn get_str (&self, key:&str) -> Bresult<String> {
         Ok(self
-            .get(k)
-            .ok_or(format!("Can't find key '{}'", k))?
+            .get(key)
+            .ok_or(format!("Can't find key '{}'", key))?
             .to_string() )
     }
 }
+impl GetStr for HashMap<String, ::sqlite::Value> {
+    fn get_str (&self, key:&str) -> Bresult<String> {
+        Ok(self
+            .get(key).ok_or(format!("Can't find key '{}'", key))?
+            .as_string().ok_or(format!("Not a string '{}'", key))?
+            .to_string())
+    }
+}
+
 
 trait GetChar { fn get_char (&self, k:&str) -> Bresult<char>; }
 impl GetChar for HashMap<String, String> {
@@ -458,11 +501,27 @@ fn create_schema() -> Bresult<()> {
             time INTEGER NOT NULL,
             cmd     TEXT NOT NULL);")?;
 
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS likes (
+            id    INTEGER NOT NULL UNIQUE,
+            likes INTEGER NOT NULL);")?;
+
     Ok(())
 } // create_schema
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Blobs
+
+#[derive(Debug)]
+pub struct Entity {
+    id: i64,
+    name: String,
+    balance: f64,
+    echo: i64,
+    likes: i64,
+    quote: String,
+    position: String
+}
 
 #[derive(Debug)]
 pub struct EnvStruct {
@@ -473,6 +532,7 @@ pub struct EnvStruct {
     fmt_quote:        String, // Default format string for quotes
     fmt_position:     String, // Default format string for portfolio positions
     time_scheduler:   i64,    // Time the scheduler last ran
+    entitys:          HashMap<i64, Entity>
 }
 
 type Env = Arc<Mutex<EnvStruct>>;
@@ -484,23 +544,48 @@ impl From<EnvStruct> for Env {
 }
 
 impl EnvStruct {
-    fn new (mut argv: std::env::Args) -> Bresult<Env> {
-        Ok(Env::from(EnvStruct{
-            url_api:
-                format!("https://api.telegram.org/bot{}",
-                        env::var_os( &argv.nth(1).ok_or("args[1] missing")? )
-                        .ok_or("can't resolve telegram api key")?
-                        .to_str()
-                        .unwrap()),
-            dbconn:             Connection::new(&argv.next().ok_or("args[2] missing")?)?,
-            dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
-            quote_delay_secs:   QUOTE_DELAY_SECS,
-            fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
-            fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
-            time_scheduler:     Instant::now().seconds(),
-        }))
+fn new (
+    mut argv: std::env::Args
+) -> Bresult<Env> {
+    let url_api = format!(
+        "https://api.telegram.org/bot{}",
+        env::var_os( &argv.nth(1).ok_or("args[1] missing")? )
+            .ok_or("can't resolve telegram api key")?
+            .to_str()
+            .unwrap());
+    let dbconn = Connection::new(&argv.next().ok_or("args[2] missing")?)?; 
+    let mut entitys = HashMap::new();
+    for hm in
+        getsqlraw!(dbconn,
+            r"SELECT entitys.id, entitys.name, accounts.balance, modes.echo, likes.likes, formats.quote, formats.position
+            FROM entitys
+            LEFT JOIN accounts ON entitys.id = accounts.id
+            LEFT JOIN modes    ON entitys.id = modes.id
+            LEFT JOIN likes    ON entitys.id = likes.id
+            LEFT JOIN formats  ON entitys.id = formats.id")?
+    {
+        //warn!("{:#?}", hm);
+        let id = hm.get_i64("id")?;
+        entitys.insert(id,
+            Entity{
+                id,
+                name:    hm.get_str("name")?,
+                balance: hm.get_f64_or(0.0, "balance"),
+                echo:    hm.get_i64_or(2, "echo"),
+                likes:   hm.get_i64_or(0, "likes"),
+                quote:   hm.get_string_or("", "quote"),
+                position:hm.get_string_or("", "position")} );
     }
-}
+    Ok(Env::from(EnvStruct{
+        url_api, dbconn,
+        dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
+        quote_delay_secs:   QUOTE_DELAY_SECS,
+        fmt_quote:          format!("%q%A%B %C%% %D%E@%F %G%H%I%q"),
+        fmt_position:       format!("%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q"),
+        time_scheduler:     Instant::now().seconds(),
+        entitys
+    }))
+} }
 
 ////////////////////////////////////////
 
@@ -580,33 +665,15 @@ impl CmdStruct {
     // create a basic CmdStruct
     fn new_cmdstruct(env:&Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let envstruct = env.lock().unwrap();
-        // Create hash map id -> echoLevel
-        let echo_levels =
-            getsql!(envstruct.dbconn, "SELECT id, echo FROM entitys NATURAL JOIN modes")?.iter()
-            .map( |hm| // tuple -> hashmap
-                 ( hm.get_i64("id").unwrap(),
-                   hm.get_i64("echo").unwrap() ) )
-            .collect::<HashMap<i64,i64>>();
-
-        let rows = getsql!(envstruct.dbconn, r#"SELECT entitys.id, COALESCE(quote, "") AS quote, coalesce(position, "") AS position FROM entitys LEFT JOIN formats ON entitys.id = formats.id WHERE entitys.id=?"#,
-            id)?;
-
-        let (mut fmt_quote, mut fmt_position) =
-            if rows.is_empty() {
-                Err( format!("{} missing from entitys", id))?
-            } else {
-                (rows[0].get_str("quote")?, rows[0].get_str("position")? )
-            };
-        if fmt_quote.is_empty() { fmt_quote = envstruct.fmt_quote.to_string() }
-        if fmt_position.is_empty() { fmt_position = envstruct.fmt_position.to_string() }
-
+        let fmt_quote = envstruct.fmt_quote.to_string();
+        let fmt_position = envstruct.fmt_position.to_string();
         Ok(CmdStruct{
             env: env.clone(),
             telegram: Telegram::new(envstruct.url_api.to_string())?,
             now, id, at, to, message_id,
             message: message.to_string(),
-            id_level: echo_levels.get(&id).map(|v|*v).unwrap_or(2_i64),
-            at_level: echo_levels.get(&at).map(|v|*v).unwrap_or(2_i64),
+            id_level: envstruct.entitys.get(&id).unwrap().echo,
+            at_level: envstruct.entitys.get(&at).unwrap().echo,
             fmt_quote, fmt_position,
             msg_id: None,
             msg: String::new()
@@ -726,7 +793,7 @@ impl Quote { // Query internet for ticker details
             market:  details[0].2.to_string(),
             hours, exchange, title,
             updated: true})
-    } // Quote::new_market_quote 
+    } // Quote::new_market_quote
 }
 
 impl Quote {// Query local cache or internet for ticker details
@@ -742,8 +809,8 @@ impl Quote {// Query local cache or internet for ticker details
                 "SELECT ticker, price, last, market, hours, exchange, time, title FROM stonks WHERE ticker=?",
                 ticker)?;
             let is_in_table = !res.is_empty();
-            let is_cache_valid = 
-                is_in_table && (is_self_stonk || { 
+            let is_cache_valid =
+                is_in_table && (is_self_stonk || {
                     let hm = &res[0];
                     let timesecs       = hm.get_i64("time")?;
                     let traded_all_day = 24 == hm.get_i64("hours")?;
@@ -998,7 +1065,7 @@ impl<'a> Trade<'a> {
     fn new (cmdstruct:&'a mut CmdStruct) -> Option<Self> {
         //                         _____ticker____  _+-_  _$_   ____________amt_______________
         match regex_to_hashmap(r"^([A-Za-z0-9^.-]+)([+-])([$])?([0-9]+\.?|([0-9]*\.[0-9]{1,4}))?$", &cmdstruct.message) {
-            Some(caps) => 
+            Some(caps) =>
                 Some(Self {
                     cmdstruct,
                     ticker:     caps.get("1").unwrap().to_uppercase(),
@@ -1169,32 +1236,23 @@ async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
                 if cmdstruct.id == cmdstruct.to { return Ok("SKIP self plussed".into()); }
                 else if &cap[1] == "+" { 1 } else { -1 }
     };
-    // Load database of users
-    let mut people :HashMap<i64, String> = HashMap::new();
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?.parse::<i64>().unwrap();
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        people.insert(id, name);
-    }
-    info!("{:?}", people);
 
-    // Load/update/save likes
-    let likes = read_to_string( format!("tmbot/{}", cmdstruct.to) )
-        .unwrap_or("0".to_string())
-        .lines()
-        .nth(0).unwrap()
-        .parse::<i32>()
-        .unwrap() + amt;
 
-    info!("update likes in filesystem {:?} by {} to {:?}  write => {:?}",
-        cmdstruct.to, amt, likes,
-        write( format!("tmbot/{}", cmdstruct.to), likes.to_string()));
+    let (fromname, likes, toname) = {
+        let mut envstruct = cmdstruct.env.lock().unwrap();
 
-    let sfrom = cmdstruct.id.to_string();
-    let sto = cmdstruct.to.to_string();
-    let fromname = people.get(&cmdstruct.id).unwrap_or(&sfrom);
-    let toname   = people.get(&cmdstruct.to).unwrap_or(&sto);
+        let likes :i64 = {
+          let entity = envstruct.entitys.get_mut(&cmdstruct.to).unwrap();
+          entity.likes = entity.likes + amt;
+          entity.likes
+        };
+
+        let entitys = &envstruct.entitys;
+        getsql!(&envstruct.dbconn, "INSERT OR REPLACE INTO likes VALUES (?, ?)", cmdstruct.to, likes)?;
+        (entitys.get(&cmdstruct.id).unwrap().name.to_string(),
+        likes,
+        entitys.get(&cmdstruct.to).unwrap().name.to_string() )
+    };
 
     cmdstruct
         .push_msg(&format!("{}{}{}", fromname, num2heart(likes), toname))
@@ -1205,23 +1263,11 @@ async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
 
 async fn do_like_info (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     if cmdstruct.message != "+?" { return Ok("SKIP"); }
-    let mut likes = Vec::new();
-    // Over each user in file
-    for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-        let mut v = l.split(" ");
-        let id = v.next().ok_or("User DB malformed.")?;
-        let name = v.next().ok_or("User DB malformed.")?.to_string();
-        // Read the user's count file
-        let count =
-            read_to_string( "tmbot/".to_string() + &id )
-            .unwrap_or("0".to_string())
-            .trim()
-            .parse::<i32>().or(Err("user like count parse i32 error"))?;
-        likes.push((count, name));
-    }
+
+    let mut likes :Vec<(i64, String)>=
+        cmdstruct.env.lock().unwrap().entitys.iter().map( |(_,e)| (e.likes, e.name.clone()) ).collect();
     likes.sort_by(|a,b| b.0.cmp(&a.0));
 
-    //info!("HEARTS -> msg tmbot {:?}", send_msg(env, chat_id, &(-6..=14).map( |n| num2heart(n) ).collect::<Vec<&str>>().join("")).await);
     cmdstruct
         .push_msg(
             &likes
@@ -1305,17 +1351,17 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
             Ok(r) => r
         };
 
-    // SQL rows to single string.
-    let mut msg =
+    let msg = // SQL rows to single string.
         results.iter().fold(
             String::new(),
             |mut b, vv| {
-                vv.iter().for_each( |(key,val)| {b+=&format!(" {}:{}", key, val);} );
+                vv.iter().for_each( |(k,v)| b += &format!(" {}:{}", k, v) );
                 b+"\n"
             } );
 
-    if msg.is_empty() { msg.push_str(&"empty results"); }
-    cmdstruct.push_msg(&msg).send_msg().await?;
+    cmdstruct
+        .push_msg(if msg.is_empty() { &"empty results" } else { &msg })
+        .send_msg().await?;
     Ok("COMPLETED.")
 }
 
@@ -1398,7 +1444,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 // Handle: /yolo
 async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
-    if Regex::new(r"/yolo").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP"); }
+    if regex_to_vec(r"/yolo", &cmdstruct.message)?.is_empty() { return Ok("SKIP"); }
 
     cmdstruct.msg_id = Some(cmdstruct.push_msg("working...").send_msg().await?);
 
@@ -1757,7 +1803,7 @@ async fn do_trade_sell (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
             [[ 0.01  0.30  0.50  0.99   1.00  1.55  2.00  9.00 ]]
     Best BID price (next buyer)--^      ^--Best ASK price (next seller)
     Positive quantity                      Negative quantity
-*/ 
+*/
 
 #[derive(Debug)]
 struct ExQuote<'a> { // Local Exchange Quote Structure
@@ -2118,7 +2164,7 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let mut asks = String::from("");
     let mut bids = String::from("");
     let rows = {
-        let envstruct = &cmdstruct.env.lock().unwrap(); 
+        let envstruct = &cmdstruct.env.lock().unwrap();
         let dbconn = &envstruct.dbconn;
         if Regex::new(r"(?i)/orders").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP"); }
         let id = cmdstruct.id;
@@ -2324,7 +2370,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             envstruct.dbconn,
             format!("SELECT hours FROM stonks WHERE hours!=24 AND ticker IN ('{}')",
                 percents.keys().map(String::to_string).collect::<Vec<String>>().join("','")))?
-        .len() != 0 
+        .len() != 0
     } {
         cmdstruct.push_msg(&"\nRebalance During Trading Hours Mon..Fri 1AM..5PM").send_msg().await?;
         return Ok("COMPLETED.");
@@ -2594,7 +2640,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
             .unwrap_or(&format!("{:?}", body)) );
 
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    info!("\x1b[1m{:?}", env.lock().unwrap());
+    //info!("\x1b[1m{:?}", env.lock().unwrap());
 
     std::thread::spawn( move || {
         let envc = env.clone();
@@ -2675,8 +2721,8 @@ pub fn main_launch() -> Bresult<()> {
     if 1 == argv.len() {
         Err(format!("{:?} missing: KEY ID DST", argv))?
     }
-    if !true { glogd!("create_schema => ", create_schema()); } // Create DB
-    if !true { fun() } // Hacks and other test code
+    if true { glogd!("create_schema => ", create_schema()); } // Create DB
+    if !true { fun(argv) } // Hacks and other test code
     else {
         let env = EnvStruct::new(argv)?;
         glogd!("scheduler() =>", launch_scheduler(env.clone()));
@@ -2685,11 +2731,13 @@ pub fn main_launch() -> Bresult<()> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
- 
-fn fun () -> Bresult<()>  {
-    for f in [0.0, 0.1009, 1.1009, 11.1009] {
-      println!("{}", money_pretty(f))
-    }
+
+fn fun (argv: std::env::Args) -> Bresult<()>  {
+    let _env = EnvStruct::new(argv)?;
+    //info!("{:#?}", env);
+
+    (-6..=28).for_each( |c| info!("{}", num2heart(c)) );
+
     Ok(())
 }
 
@@ -2704,12 +2752,3 @@ fn _fun_macros() -> Bresult<()> {
     Err(std::io::Error::from_raw_os_error(0))?;
     Ok(g.hello())
 }
-
-/*
-  format!("{:#?}", env);
-  DROP   TABLE users
-  CREATE TABLE users (name TEXT, age INTEGER)
-  INSERT INTO  users VALUES ('Alice', 42)
-  DELETE FROM  users WHERE age=42 AND name="Oskafunoioi"
-  UPDATE       ukjsers SET a=1, b=2  WHERE c=3
-*/

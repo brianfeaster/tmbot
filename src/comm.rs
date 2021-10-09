@@ -55,9 +55,11 @@ impl Telegram {
                 .finish();
         Ok(Telegram { client, url_api })
     }
+}
+
+impl Telegram {
     pub async fn send_msg<'a> (&self, mut mc: MsgCmd<'a>) -> Bresult<i64> {
         info!("{:?} {:?}", self, mc);
-        // Message either: 
         let chat_id =
             if let Some(dm_id) = mc.dm_id {
                 dm_id // Forced message to id

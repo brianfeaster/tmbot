@@ -60,23 +60,51 @@ macro_rules! glogd {
 ////////////////////////////////////////////////////////////////////////////////
 /// UTF-8
 
-pub fn num2heart (n :i32) -> &'static str {
-    if n < -4 { return from_utf8(b"\xCE\xBB").unwrap(); } // lambda
-    if n <= -1{ return from_utf8(b"\xF0\x9F\x96\xA4").unwrap(); } // black heart
-    if n == 0 { return from_utf8(b"\xF0\x9F\x92\x94").unwrap(); } // red broken heart
-    if n == 1 { return from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F").unwrap(); } // red heart
-    if n == 2 { return from_utf8(b"\xF0\x9F\xA7\xA1").unwrap(); } // orange heart
-    if n == 3 { return from_utf8(b"\xF0\x9F\x92\x9B").unwrap(); } // yellow heart
-    if n == 4 { return from_utf8(b"\xF0\x9F\x92\x9A").unwrap(); } // green heart
-    if n == 5 { return from_utf8(b"\xF0\x9F\x92\x99").unwrap(); } // blue heart
-    if n == 6 { return from_utf8(b"\xF0\x9F\x92\x9C").unwrap(); } // violet heart
-    if n == 7 { return from_utf8(b"\xF0\x9F\x92\x97").unwrap(); } // pink growing heart
-    if n == 8 { return from_utf8(b"\xF0\x9F\x92\x96").unwrap(); } // pink sparkling heart
-    if n == 9 { return from_utf8(b"\xF0\x9F\x92\x93").unwrap(); } // beating heart
-    if n == 10 { return from_utf8(b"\xF0\x9F\x92\x98").unwrap(); } // heart with arrow
-    if n == 11 { return from_utf8(b"\xF0\x9F\x92\x9D").unwrap(); } // heart with ribbon
-    if n == 12 { return from_utf8(b"\xF0\x9F\x92\x9E").unwrap(); } // revolving hearts
-    return from_utf8(b"\xF0\x9F\x8D\x86").unwrap(); // egg plant
+//info!("HEARTS {}", &(-6..=14).map( num2heart ).collect::<Vec<&str>>().join(""));
+pub fn n2heart2 (n :usize) -> String {
+    match n%2 {
+        0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
+        1 => from_utf8(b"\xF0\x9F\x92\x94"), // red broken heart
+        _ => Ok("?")
+    }.unwrap().to_string()
+}
+
+pub fn n2heart13 (n :usize) -> String {
+    match n%13 {
+        0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
+        1 => from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F"), // red heart
+        2 => from_utf8(b"\xF0\x9F\xA7\xA1"), // orange heart
+        3 => from_utf8(b"\xF0\x9F\x92\x9B"), // yellow heart
+        4 => from_utf8(b"\xF0\x9F\x92\x9A"), // green heart
+        5 => from_utf8(b"\xF0\x9F\x92\x99"), // blue heart
+        6 => from_utf8(b"\xF0\x9F\x92\x9C"), // violet heart
+        7 => from_utf8(b"\xF0\x9F\x92\x93"), // beating heart
+        8 => from_utf8(b"\xF0\x9F\x92\x97"), // pink growing heart
+        9 => from_utf8(b"\xF0\x9F\x92\x9E"), // revolving hearts
+        10 => from_utf8(b"\xF0\x9F\x92\x98"), // heart with arrow
+        11 => from_utf8(b"\xF0\x9F\x92\x96"), // pink sparkling heart
+        12 => from_utf8(b"\xF0\x9F\x92\x9D"), // heart with ribbon
+        _ => Ok("?")
+    }.unwrap().to_string()
+}
+
+pub fn num2heart (mut n :i64) -> String {
+    let mut sheart = String::new();
+    if n < 0 {
+        let mut n = -n as usize;
+        loop {
+            sheart.insert_str(0, &n2heart2(n));
+            n /= 2;
+            if n < 1 { return sheart }
+        }
+    }
+
+    loop {
+        sheart.insert_str(0, &n2heart13(n as usize));
+        n /= 13;
+        if n < 1 { break }
+    }
+    sheart
 }
 
 ////////////////////////////////////////////////////////////////////////////////

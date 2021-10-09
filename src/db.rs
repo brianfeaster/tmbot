@@ -1,5 +1,5 @@
 //use crate::*;
-//pub use sqlite::*;
+pub use sqlite::{Statement};
 //use ::std::sync::Arc;
 use crate::util::Bresult;
 
@@ -22,13 +22,34 @@ impl std::fmt::Debug for Connection {
 }
 
 #[macro_export]
+macro_rules! getsqlraw {
+    ( $conn:expr, $sql:expr ) => {(|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
+        info!("SQLiteRaw <= \x1b[1;36m{}", $sql);
+        let statement = $conn.conn.prepare( $sql )?;
+        let col_names :Vec<String> =
+            Statement::column_names(&statement).into_iter().map( String::from ).collect();
+        let mut cursor =
+            Statement::into_cursor(statement);
+        let mut rows :Vec<HashMap<String, sqlite::Value>> = Vec::new();
+        while let Some(vals) = cursor.next()? {
+            rows.push(vals.iter().enumerate()
+                .map( |(i, v)| (col_names[i].clone(), v.clone()) )
+                .collect() )
+        }
+        info!("SQLiteRaw => \x1b[36m{:?}", rows);
+        Bresult::Ok(rows)
+    })()};
+}
+
+
+#[macro_export]
 macro_rules! getsql {
     ( $conn:expr, $sql:expr ) => {(|| -> Bresult<Vec<HashMap<String, String>>> {
         info!("SQLite <= \x1b[1;36m{}", $sql);
         let statement = $conn.conn.prepare( $sql )?;
         // No place holders to bind
-        let col_names = ::sqlite::Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
-        let mut cursor = ::sqlite::Statement::into_cursor(statement);
+        let col_names = Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
+        let mut cursor = Statement::into_cursor(statement);
         let mut rows :Vec<HashMap<String,String>> = Vec::new();
         while let Some(vals) = cursor.next()? {
             rows.push(
@@ -55,8 +76,8 @@ macro_rules! getsql {
             info!("SQLite    \x1b[36m{} {}", placeholderidx, $v);
             statement.bind(placeholderidx, $v)?;
         )*
-        let col_names = ::sqlite::Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
-        let mut cursor = ::sqlite::Statement::into_cursor(statement);
+        let col_names = Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
+        let mut cursor = Statement::into_cursor(statement);
         let mut rows :Vec<HashMap<String,String>> = Vec::new();
         while let Some(vals) = cursor.next()? {
             rows.push(
@@ -85,8 +106,8 @@ macro_rules! getsqlquiet {
             placeholderidx += 1;
             statement.bind(placeholderidx, $v)?;
         )*
-        let col_names = ::sqlite::Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
-        let mut cursor = ::sqlite::Statement::into_cursor(statement);
+        let col_names = Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect::<Vec<String>>();
+        let mut cursor = Statement::into_cursor(statement);
         let mut rows :Vec<HashMap<String,String>> = Vec::new();
         while let Some(vals) = cursor.next()? {
             rows.push(
