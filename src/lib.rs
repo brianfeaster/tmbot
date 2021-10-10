@@ -29,33 +29,49 @@ const QUOTE_DELAY_SECS :i64 = 60;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
 
-//////////////////////////////////////////////////////////////////////////////
-// Rust primitives enahancements
-trait GetI64Or    { fn get_i64_or    (&self, default:i64,  key:&str) -> i64; }
-trait GetF64Or    { fn get_f64_or    (&self, default:f64,  key:&str) -> f64; }
-trait GetStringOr { fn get_string_or (&self, default:&str, key:&str) -> String; }
+////////////////////////////////////////////////////////////////////////////////
+// Regex enhancements
+////////////////////////////////////////////////////////////////////////////////
 
-impl GetI64Or for HashMap<String, ::sqlite::Value> {
-    fn get_i64_or (&self, default:i64, key:&str) -> i64 {
-        self.get(key).and_then( ::sqlite::Value::as_integer ).unwrap_or(default)
-    }
+// Return hashmap of the regex capture groups, if any.
+fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
+    let regex = Regex::new(re).unwrap();
+    regex.captures(msg).map(|captures| { // Consider capture groups or return None
+        regex
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, capname)| { // Over capture group names (or indices)
+                capname.map_or(
+                    captures
+                        .get(i) // Get match via index.  This could be null which is filter by filter_map
+                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())),
+                    |capname| {
+                        captures
+                            .name(capname) // Get match via capture name.  Could be null which is filter by filter_map
+                            .map(|capmatch| (capname.into(), capmatch.as_str().into()))
+                    },
+                )
+            })
+            .collect()
+    })
 }
-
-impl GetF64Or for HashMap<String, ::sqlite::Value> {
-    fn get_f64_or (&self, default:f64, key:&str) -> f64 {
-        self.get(key).and_then( ::sqlite::Value::as_float ).unwrap_or(default)
-    }
+// Return vector of the regex capture groups, if any.
+fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Regex::new(re)?
+    .captures(msg) // An Option<Captures>
+    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
+        |captures|          // ...or return Ok Vec of Option<Vec>
+        Ok(captures.iter() // Iterator over Option<Match>
+            .map( |o_match| // None or Some<String>
+                    o_match.map( |mtch| mtch.as_str().into() ) )
+            .collect()))
 }
-
-impl GetStringOr for HashMap<String, ::sqlite::Value> {
-    fn get_string_or (&self, default:&str, key:&str) -> String {
-        self.get(key).and_then( ::sqlite::Value::as_string ).unwrap_or(default).to_string()
-    }
-}
-
-//////////////////////////////////////// 
 
 trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
+trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
+trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
+trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
+
 impl AsI64 for Vec<Option<String>> {
     fn as_i64 (&self, i:usize) -> Bresult<i64> {
         Ok(self.get(i).ok_or("Can't index vector")?
@@ -64,7 +80,6 @@ impl AsI64 for Vec<Option<String>> {
     }
 }
 
-trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
 impl AsF64 for Vec<Option<String>> {
     fn as_f64 (&self, i:usize) -> Bresult<f64> {
         Ok(self.get(i).ok_or("Can't index vector")?
@@ -73,7 +88,6 @@ impl AsF64 for Vec<Option<String>> {
     }
 }
 
-trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
 impl AsStr for Vec<Option<String>> {
     fn as_str (&self, i:usize) -> Bresult<&str> {
         Ok(self.get(i)
@@ -82,98 +96,22 @@ impl AsStr for Vec<Option<String>> {
     }
 }
 
-trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
 impl AsString for Vec<Option<String>> {
     fn as_string (&self, i:usize) -> Bresult<String> {
-        Ok(self.get(i)
-            .ok_or("can't index vector")?.as_ref()
-            .ok_or("can't infer str from None")?
-            .to_string() )
+        self.as_str(i).map( String::from )
     }
 }
 
-////////////////////////////////////////
-
-trait GetI64 { fn get_i64 (&self, k:&str) -> Bresult<i64>; }
-impl GetI64 for HashMap<String, String> {
-    fn get_i64 (&self, k:&str) -> Bresult<i64> {
-        Ok(self
-            .get(k).ok_or(format!("Can't find key '{}'", k))?
-            .parse::<i64>()?)
-    }
-}
-impl GetI64 for HashMap<String, ::sqlite::Value> {
-    fn get_i64 (&self, k:&str) -> Bresult<i64> {
-        Ok(self
-            .get(k).ok_or(format!("Can't find key '{}'", k))?
-            .as_integer().ok_or(format!("Not an integer '{}'", k))?)
-    }
-}
-
-trait GetF64 { fn get_f64 (&self, k:&str) -> Bresult<f64>; }
-impl GetF64 for HashMap<String, String> {
-    fn get_f64 (&self, k:&str) -> Bresult<f64> {
-        Ok(self
-            .get(k).ok_or(format!("Can't find key '{}'", k))?
-            .parse::<f64>()?)
-    }
-}
-
-trait GetStr { fn get_str (&self, key:&str) -> Bresult<String>; }
-impl GetStr for HashMap<String, String> {
-    fn get_str (&self, key:&str) -> Bresult<String> {
-        Ok(self
-            .get(key)
-            .ok_or(format!("Can't find key '{}'", key))?
-            .to_string() )
-    }
-}
-impl GetStr for HashMap<String, ::sqlite::Value> {
-    fn get_str (&self, key:&str) -> Bresult<String> {
-        Ok(self
-            .get(key).ok_or(format!("Can't find key '{}'", key))?
-            .as_string().ok_or(format!("Not a string '{}'", key))?
-            .to_string())
-    }
-}
-
-
-trait GetChar { fn get_char (&self, k:&str) -> Bresult<char>; }
-impl GetChar for HashMap<String, String> {
-    fn get_char (&self, k:&str) -> Bresult<char> {
-        Ok(self
-            .get(k)
-            .ok_or(format!("Can't find key '{}'", k))?
-            .to_string()
-            .chars()
-            .nth(0)
-            .ok_or(format!("string lacks character key '{}'", k))? )
-
-    }
-}
-
-/*
-// Trying to implement without using ? for the learns.
-impl AsStr for Vec<Option<String>> {
-    fn as_str (&self, i:usize) -> Bresult<&str> {
-        self.get(i) // Option< Option<String> >
-        .ok_or("can't index vector".into()) // Result< Option<String>>, Bresult<> >
-        .map_or_else(
-            |e| e, // the previous error
-            |o| o.ok_or("can't infer str from None".into())
-                .map( |r| &r.to_string()) ) // Result< String, Bresult >
-    }
-}
-*/
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Abstracted primitive types helpers
+////////////////////////////////////////////////////////////////////////////////
 
 /// Decide if a ticker's price should be refreshed given its last lookup time.
-///    Market   PreMarket   Regular  AfterHours       Closed
-///       PST   0900Zpre..  1430Z..  2100Z..0100Zaft  0100Z..9000Z
-///       PDT   0800Z..     1330Z..  2000Z..2400Z     0000Z..0800Z
-///  Duration   5.5h        6.5h     4h               8h
+///  PacificTZ  PreMarket  Regular  AfterHours  Closed
+///  PST        0900z      1430z    2100z       0100z..9000z
+///  PDT        0800z      1330z    2000z       0000z..0800z
+///  Duration   5.5h       6.5h     4h          8h
 fn most_recent_trading_hours (
     dst_hours_adjust: i8,
     now: LocalDateTime,
@@ -274,7 +212,7 @@ fn roundkilofy (f:f64) -> String {
 }
 
 // Trim trailing . and 0
-fn num_simp (num:&str) -> String {
+fn num_simp (num:String) -> String {
     num
     .trim_start_matches("0")
     .trim_end_matches("0")
@@ -316,49 +254,15 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
     format!("{: <pad$}{}", a, b, pad=width-lenb)
 }
 
-/// Return hashmap of the regex capture groups, if any.
-fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
-    let regex = Regex::new(re).unwrap();
-    regex.captures(msg).map(|captures| { // Consider capture groups or return None
-        regex
-            .capture_names()
-            .enumerate()
-            .filter_map(|(i, capname)| { // Over capture group names (or indices)
-                capname.map_or(
-                    captures
-                        .get(i) // Get match via index.  This could be null which is filter by filter_map
-                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())),
-                    |capname| {
-                        captures
-                            .name(capname) // Get match via capture name.  Could be null which is filter by filter_map
-                            .map(|capmatch| (capname.into(), capmatch.as_str().into()))
-                    },
-                )
-            })
-            .collect()
-    })
-}
-
-fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re)?
-    .captures(msg) // An Option<Captures>
-    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
-        |captures|          // ...or return Ok Vec of Option<Vec>
-        Ok(captures.iter() // Iterator over Option<Match>
-            .map( |o_match| // None or Some<String>
-                    o_match.map( |mtch| mtch.as_str().into() ) )
-            .collect()))
-}
-
 // Transforms @user_nickname to {USER_ID}
 fn deref_ticker (dbconn:&Connection, s:&str) -> Option<String> {
-    // Expects:  @shrewm   Returns: Some(308188500)
+    // Expects:  "@shrewm"   Returns: Some(308188500)
     if &s[0..1] == "@" {
         // Quote is ID of whomever this nick matches
         getsql!(dbconn, "SELECT id FROM entitys WHERE name=?", &s[1..])
             .ok()
             .filter( |v| 1 == v.len() )
-            .map( |v| v[0].get("id").unwrap().to_string() )
+            .map( |v| v[0].get_string("id").unwrap() )
     } else { None }
 }
 
@@ -369,7 +273,7 @@ fn reference_ticker (dbconn:&Connection, t :&str) -> String {
         .map_err( |e| error!("{:?}", e) )
         .ok()
         .filter( |v| 1 == v.len() )
-        .map( |v| format!("@{}", v[0].get("name").unwrap()) )
+        .map( |v| format!("@{}", v[0].get_string("name").unwrap()) )
         .unwrap_or(t.to_string())
     } else {
         t.to_string()
@@ -399,27 +303,24 @@ fn get_bank_balance (cmdstruct:&CmdStruct) -> Bresult<f64> {
     let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
     let id = cmdstruct.id;
     let res = getsql!(dbconn, "SELECT * FROM accounts WHERE id=?", id)?;
-    Ok(
-        if res.is_empty() {
-            let sql = getsql!(dbconn, "INSERT INTO accounts VALUES (?, ?)", id, 1000.0)?;
-            info!("{:?}", sql);
-            1000.0
-        } else {
-            res[0]
-            .get("balance".into())
-            .ok_or("balance missing from accounts table")?
-            .parse::<f64>()
-            .or( Err("can't parse balance field from accounts table") )?
-        }
-    )
+    if res.is_empty() {
+        let sql = getsql!(dbconn, "INSERT INTO accounts VALUES (?, ?)", id, 1000.0)?;
+        info!("{:?}", sql);
+        Ok(1000.0)
+    } else {
+        res[0].get_f64("balance")
+    }
 }
 
-pub fn sql_table_order_insert (dbconn:&Connection, id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<Vec<HashMap<String, String>>> {
-    getsql!(dbconn, "INSERT INTO orders VALUES (?, ?, ?, ?, ?)", id, ticker, qty, price, time)
+pub fn sql_table_order_insert (dbconn:&Connection, id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<()> {
+    getsql!(dbconn,
+        "INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
+        id, ticker, qty, price, time)?;
+    Ok(())
 }
 
 fn create_schema() -> Bresult<()> {
-    let conn = Connection::new(&"tmbot.sqlite")?;
+    let conn = Connection::new("tmbot.sqlite".into())?;
 
     getsql!(&conn,"
         CREATE TABLE IF NOT EXISTS entitys (
@@ -430,16 +331,6 @@ fn create_schema() -> Bresult<()> {
         CREATE TABLE IF NOT EXISTS modes (
             id   INTEGER NOT NULL UNIQUE,
             echo INTEGER NOT NULL);")?;
-
-    //for l in read_to_string("tmbot/users.txt").unwrap().lines() {
-    //    let mut v = l.split(" ");
-    //    let id = v.next().ok_or("User DB malformed.")?.parse::<i64>()?;
-    //    let name = v.next().ok_or("User DB malformed.")?.to_string();
-    //    getsql!(&conn,"INSERT INTO entitys VALUES (?, ?)", id, &*name)?;
-    //    if id < 0 {
-    //        getsql!(&conn,"INSERT INTO modes VALUES (?, 2)", id)?;
-    //    }
-    //}
 
     getsql!(&conn,"
         CREATE TABLE IF NOT EXISTS formats (
@@ -492,10 +383,6 @@ fn create_schema() -> Bresult<()> {
             time INTEGER NOT NULL);
     ")?;
 
-    // time 0 midnight
-    // time 44 44seconds   33m 33 minutes   33m44 33 min and 44 seconds
-    // when = 0:once 1:daily
-    // 1h33m44
     getsql!(&conn,"
         CREATE TABLE IF NOT EXISTS schedules (
             id   INTEGER NOT NULL,
@@ -564,10 +451,10 @@ fn new (
             .ok_or("can't resolve telegram api key")?
             .to_str()
             .unwrap());
-    let dbconn = Connection::new(&argv.next().ok_or("args[2] missing")?)?; 
+    let dbconn = Connection::new(argv.next().ok_or("args[2] missing")?)?; 
     let mut entitys = HashMap::new();
     for hm in
-        getsqlraw!(dbconn,
+        getsql!(dbconn,
             r"SELECT entitys.id, entitys.name, accounts.balance, modes.echo, likes.likes, formats.quote, formats.position
             FROM entitys
             LEFT JOIN accounts ON entitys.id = accounts.id
@@ -580,7 +467,7 @@ fn new (
         entitys.insert(id,
             Entity{
                 id,
-                name:    hm.get_str("name")?,
+                name:    hm.get_string("name")?,
                 balance: hm.get_f64_or(0.0, "balance"),
                 echo:    hm.get_i64_or(2, "echo"),
                 likes:   hm.get_i64_or(0, "likes"),
@@ -754,7 +641,7 @@ impl Quote { // Query internet for ticker details
             if title == title_new { break title_new.to_string() }
             title = title_new;
         };
-        info!("title pretty {} => {}", title_raw, &title);
+        info!("cleane title: '{}' => '{}'", title_raw, &title);
 
         let exchange = getin_str(&details, &["exchange"])?;
 
@@ -830,14 +717,14 @@ impl Quote {// Query local cache or internet for ticker details
                 let last = hm.get_f64("last")?;
                 Quote{
                     env: env.clone(),
-                    ticker: hm.get_str("ticker")?,
+                    ticker: hm.get_string("ticker")?,
                     price, last,
                     amount:   roundqty(price-last),
                     percent:  percentify(last,price),
-                    market:   hm.get_str("market")?,
+                    market:   hm.get_string("market")?,
                     hours:    hm.get_i64("hours")?,
-                    exchange: hm.get_str("exchange")?,
-                    title:    hm.get_str("title")?,
+                    exchange: hm.get_string("exchange")?,
+                    title:    hm.get_string("title")?,
                     updated:  false}
             } else if is_self_stonk { // FNFT is not in cache so create
                 Quote {
@@ -900,7 +787,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
     fn format_quote (&self, id:i64) -> Bresult<String> {
         let envstruct = &self.env.lock().unwrap();
         let gain_glyphs = amt_as_glyph(self.amount);
-        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap() // (?s) dot accepts newline
             .captures_iter(&envstruct.fmt_str_quote(id))
             .fold(String::new(), |mut s, cap| {
                 if let Some(m) = cap.get(2) {
@@ -977,7 +864,7 @@ impl Position {
             Position {
                 quote: None,
                 id,
-                ticker: pos.get_str("ticker").unwrap(),
+                ticker: pos.get_string("ticker").unwrap(),
                 qty: pos.get_f64("qty").unwrap(),
                 price: pos.get_f64("price").unwrap(),
                 fmt_position: envstruct.fmt_str_position(id)
@@ -1123,14 +1010,14 @@ async fn get_quote_pretty (cmdstruct:&CmdStruct, ticker :&str) -> Bresult<String
                 for ask in getsql!(dbconn, "SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker)? {
                     asks.push_str(
                         &format!(" `{}@{}`",
-                        num_simp(ask.get("qty").unwrap()),
+                        num_simp( format!("{:.4}", ask.get_f64("qty")?) ),
                         ask.get_f64("price")?));
                 }
                 let mut bids = format!("*Bids:*");
                 for bid in getsql!(dbconn, "SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker)? {
                     bids.push_str(
                         &format!(" `{}@{}`",
-                        num_simp(bid.get("qty").unwrap()),
+                        num_simp( format!("{:.4}", bid.get_f64("qty")?) ),
                         bid.get_f64("price")?));
                 }
                 format!("\n{}\n{}", asks, bids)
@@ -1360,7 +1247,10 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
         results.iter().fold(
             String::new(),
             |mut b, vv| {
-                vv.iter().for_each( |(k,v)| b += &format!(" {}:{}", k, v) );
+                vv.iter().for_each( |(k,_v)|
+                    b += &format!(" {}:{}", k,
+                      vv.to_string(k)
+                      .unwrap_or_else( |e| {error!("{:?}", e); "?".into()} ) ) );
                 b+"\n"
             } );
 
@@ -1383,7 +1273,7 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
         // Catch error and continue looking up tickers
         match get_quote_pretty(&cmdstruct, ticker).await {
             Ok(res) => {
-                info!("get_quote_pretty {:?}", res);
+                info!("get_quote_pretty => {:?}", res);
                 cmdstruct.push_msg(&format!("{}\n", res)).send_msg_markdown().await?;
                 found_tickers = true;
             },
@@ -1474,11 +1364,11 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     // Update all user-positioned tickers
     for row in rows {
-        let ticker = row.get("ticker").unwrap();
+        let ticker = row.get_string("ticker")?;
         //working_message.push_str(ticker);
         //working_message.push_str("...");
         //send_edit_msg(cmd, message_id, &working_message).await?;
-        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct.env.clone(), ticker, cmdstruct.now).await?);
+        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct.env.clone(), &ticker, cmdstruct.now).await?);
     }
 
     /* Everyone's YOLO including non positioned YOLOers
@@ -1527,7 +1417,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     for row in sql_results {
         msg.push_str( &format!(" `{:.2}@{}`",
             row.get_f64("yolo")?,
-            row.get("name").unwrap()) );
+            row.get_string("name")?) );
     }
     cmdstruct.set_msg(&msg).send_msg_markdown().await?;
     Ok("COMPLETED.")
@@ -1848,9 +1738,9 @@ impl<'a> ExQuote<'a> {
 #[derive(Debug)]
 struct QuoteCancelMine<'a> {
     qty: f64,
-    myasks: Vec<HashMap<String,String>>,
+    myasks: Vec<HashMap<String, ::sqlite::Value>>,
     myasksqty: f64,
-    mybids: Vec<HashMap<String,String>>,
+    mybids: Vec<HashMap<String, ::sqlite::Value>>,
     exquote: ExQuote<'a>,
     msg: String
 }
@@ -1877,13 +1767,13 @@ impl<'a> QuoteCancelMine<'a> {
                     let bidqty = roundqty(mybid.get_f64("qty")?);
                     if bidqty <= -qty {
                         getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, bidqty, price)?;
-                        mybid.insert("*UPDATED*".into(), "*REMOVED*".into());
+                        mybid.insert("*UPDATED*".into(), ::sqlite::Value::String("*REMOVED*".into()));
                         qty = roundqty(qty + bidqty);
                         msg += &format!("\n*Removed bid:* `{}+{}@{}`", exquote.thing, bidqty, price);
                     } else {
                         let newbidqty = roundqty(bidqty+qty);
                         getsql!(dbconn, "UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newbidqty, id, &**ticker, bidqty, price)?;
-                        mybid.insert("*UPDATED*".into(), format!("*QTY={:.}*", newbidqty));
+                        mybid.insert("*UPDATED*".into(), ::sqlite::Value::String(format!("*QTY={:.}*", newbidqty)));
                         qty = 0.0;
                         msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", exquote.thing, bidqty, price, newbidqty, price);
                     }
@@ -1894,13 +1784,13 @@ impl<'a> QuoteCancelMine<'a> {
                     let askqty = roundqty(myask.get_f64("qty")?);
                     if -askqty <= qty {
                         getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", id, &**ticker, askqty, price)?;
-                        myask.insert("*UPDATED*".into(), "*REMOVED*".into());
+                        myask.insert("*UPDATED*".into(), ::sqlite::Value::String("*REMOVED*".into()));
                         qty = roundqty(qty + askqty);
                         msg += &format!("\n*Removed ask:* `{}{}@{}`", exquote.thing, askqty, price);
                     } else {
                         let newaskqty = roundqty(askqty+qty);
                         getsql!(dbconn, "UPDATE exchange SET qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newaskqty, id, &**ticker, askqty, price)?;
-                        myask.insert("*UPDATED*".into(), format!("*QTY={:.}*", newaskqty));
+                        myask.insert("*UPDATED*".into(), ::sqlite::Value::String(format!("*QTY={:.}*", newaskqty)));
                         qty = 0.0;
                         msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", exquote.thing, askqty, price, newaskqty, price);
                     }
@@ -1916,7 +1806,7 @@ impl<'a> QuoteCancelMine<'a> {
 #[derive(Debug)]
 struct QuoteExecute<'a> {
     qty: f64,
-    bids: Vec<HashMap<String,String>>,
+    bids: Vec<HashMap<String, ::sqlite::Value>>,
     quotecancelmine: QuoteCancelMine<'a>,
     msg: String
 }
@@ -1965,10 +1855,10 @@ impl<'a> QuoteExecute<'a> {
 
                         if xqty == aqty { // bid to be entirely settled
                             getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
-                            abid.insert("*UPDATED*".into(), "*REMOVED*".into());
+                            abid.insert("*UPDATED*".into(), sqlite::Value::String("*REMOVED*".into()));
                         } else {
                             getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", aqty-xqty, aid, &**ticker, aqty, aprice)?;
-                            abid.insert("*UPDATED*".into(), format!("*qty={}*", aqty-xqty));
+                            abid.insert("*UPDATED*".into(), sqlite::Value::String(format!("*qty={}*", aqty-xqty)));
                         }
 
                         // Update order table with the purchase and buy info
@@ -2021,13 +1911,13 @@ impl<'a> QuoteExecute<'a> {
                             let newqty = roundqty(oldqty + qty); // both negative, so "increased" ask qty
                             let mytime = myask.get_i64("time").unwrap();
                             getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
-                            myask.insert("*UPDATED*".into(), format!("qty={}", newqty));
+                            myask.insert("*UPDATED*".into(), ::sqlite::Value::String(format!("qty={}", newqty)));
                             msg += &format!("\n*Updated ask:* `{}{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                         } else {
                             getsql!(dbconn, "INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}", qty), &*format!("{:.4}", price), now)?;
                             // Add a fake entry to local myasks vector for logging's sake
-                            let mut hm = HashMap::<String,String>::new();
-                            hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
+                            let mut hm = HashMap::<String, ::sqlite::Value>::new();
+                            hm.insert("*UPDATED*".to_string(), ::sqlite::Value::String(format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now)));
                             myasks.push(hm);
                             msg += &format!("\n*Created ask:* `{}{}@{}`", obj.exquote.thing, qty, price);
                         }
@@ -2061,11 +1951,11 @@ impl<'a> QuoteExecute<'a> {
 
                             if xqty == -aqty { // ask to be entirely settled
                                 getsql!(dbconn, "DELETE FROM exchange WHERE id=? AND ticker=? AND qty=? AND price=?", aid, &**ticker, aqty, aprice)?;
-                                aask.insert("*UPDATED*".into(), "*REMOVED*".into());
+                                aask.insert("*UPDATED*".into(), ::sqlite::Value::String("*REMOVED*".into()));
                             } else {
                                 let newqty = aqty+xqty;
                                 getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND qty=? AND price=?", newqty, aid, &**ticker, aqty, aprice)?;
-                                aask.insert("*UPDATED*".into(), format!("*qty={}*", newqty));
+                                aask.insert("*UPDATED*".into(), ::sqlite::Value::String(format!("*qty={}*", newqty)));
                             }
 
                             //error!("new order {} {} {} {} {}", id, ticker, aqty, price, now);
@@ -2124,13 +2014,13 @@ impl<'a> QuoteExecute<'a> {
                             let newqty = roundqty(oldqty + qty);
                             let mytime = mybid.get_i64("time").unwrap();
                             getsql!(dbconn, "UPDATE exchange set qty=? WHERE id=? AND ticker=? AND price=? AND time=?", newqty, id, &**ticker, price, mytime)?;
-                            mybid.insert("*UPDATED*".into(), format!("qty={}", newqty));
+                            mybid.insert("*UPDATED*".into(), ::sqlite::Value::String(format!("qty={}", newqty)));
                             msg += &format!("\n*Updated bid:* `{}+{}@{}` -> `{}@{}`", obj.exquote.thing, oldqty, price, newqty, price);
                         } else {
                             getsql!(dbconn, "INSERT INTO exchange VALUES (?, ?, ?, ?, ?)", id, &**ticker, &*format!("{:.4}",qty), &*format!("{:.4}",price), now)?;
                             // Add a fake entry to local mybids vector for logging's sake
-                            let mut hm = HashMap::<String,String>::new();
-                            hm.insert("*UPDATED*".to_string(), format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now));
+                            let mut hm = HashMap::<String, ::sqlite::Value>::new();
+                            hm.insert("*UPDATED*".to_string(), ::sqlite::Value::String(format!("*INSERTED* {} {} {} {} {}", id, ticker, qty, price, now)));
                             mybids.push(hm);
                             msg += &format!("\n*Created bid:* `{}+{}@{}`", obj.exquote.thing, qty, price);
                         }
@@ -2174,10 +2064,10 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         if Regex::new(r"(?i)/orders").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP"); }
         let id = cmdstruct.id;
         for order in getsql!(dbconn, "SELECT * FROM exchange WHERE id=?", id)? {
-            let ticker = order.get("ticker").unwrap();
-            let stonk = reference_ticker(dbconn, ticker).replacen("_", "\\_", 10000);
+            let ticker = order.get_string("ticker")?;
+            let stonk = reference_ticker(dbconn, &ticker).replacen("_", "\\_", 10000);
             let qty = order.get_f64("qty")?;
-            let price = order.get("price").unwrap();
+            let price = order.get_f64("price")?;
             if qty < 0.0 {
                 asks += &format!("\n{}{:+}@{}", stonk, qty, price);
             } else {
@@ -2199,12 +2089,12 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let mut msg = String::new();
     let mut total = 0.0;
     for pos in rows {
-        if is_self_stonk(pos.get("ticker").unwrap()) {
+        if is_self_stonk(&pos.get_string("ticker")?) {
             let mut pos = {
                 Position {
                     quote: None,
                     id: pos.get_i64("id")?,
-                    ticker: pos.get_str("ticker")?,
+                    ticker: pos.get_string("ticker")?,
                     qty: pos.get_f64("qty")?,
                     price: pos.get_f64("price")?,
                     fmt_position: cmdstruct.env.lock().unwrap().fmt_str_quote(cmdstruct.id)
@@ -2412,17 +2302,17 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         cmdstruct.push_msg("no valid tickers").send_msg().await?;
     } else {
         for i in 0..positions.len() {
-            let ticker = positions[i].get_str("ticker")?;
+            let ticker = positions[i].get_string("ticker")?;
             let value = positions[i].get_f64("value")?;
             let mut diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
             if -0.01 < diff && diff < 0.01 { diff = 0.0; } // under 1¢ diffs will be skipped
-            positions[i].insert("diff".to_string(), diff.to_string()); // Add new key/val to Position HashMap
+            positions[i].insert("diff".to_string(), ::sqlite::Value::String(diff.to_string())); // Add new key/val to Position HashMap
         }
         for i in 0..positions.len() {
-            if positions[i].get_str("diff")?.chars().nth(0).unwrap() == '-'  {
+            if positions[i].get_string("diff")?.chars().nth(0).unwrap() == '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                let ticker = &positions[i].get_str("ticker")?;
-                let diffstr = &positions[i].get_str("diff")?[1..];
+                let ticker = &positions[i].get_string("ticker")?;
+                let diffstr = &positions[i].get_string("diff")?[1..];
                 cmdstruct.push_msg("\n");
                 if "0" == diffstr {
                     cmdstruct.push_msg(&format!("{} is balanced", ticker)).send_msg().await?;
@@ -2435,10 +2325,10 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             }
         }
         for i in 0..positions.len() {
-            if positions[i].get_str("diff")?.chars().nth(0).unwrap() != '-'  {
+            if positions[i].get_string("diff")?.chars().nth(0).unwrap() != '-'  {
                 info!("rebalance position {:?}", positions[i]);
-                let ticker = &positions[i].get_str("ticker")?;
-                let mut diffstr = positions[i].get_str("diff")?;
+                let ticker = &positions[i].get_string("ticker")?;
+                let mut diffstr = positions[i].get_string("diff")?;
                 if diffstr != "0" {
                     let bank_balance = { get_bank_balance(cmdstruct)?  };
                     // The last buy might be so off, so skip or adjust to account value
@@ -2514,8 +2404,8 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let time = row.get_i64("time").unwrap();
                 format!("`{}Z` `{}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
-                    row.get_str("name").unwrap(),
-                    row.get_str("cmd").unwrap())
+                    row.get_string("name").unwrap(),
+                    row.get_string("cmd").unwrap())
             } )
             .collect::<Vec<String>>()
             .join("\n");
@@ -2642,7 +2532,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
             .unwrap_or(&format!("{:?}", body)) );
 
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    info!("\x1b[1m{:?}", env.lock().unwrap());
+    //info!("\x1b[1m{:?}", env.lock().unwrap());
 
     std::thread::spawn( move || {
         let envc = env.clone();
@@ -2681,7 +2571,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
             for job in jobs {
                 let id = job.get_i64("id").unwrap();
                 let at = job.get_i64("at").unwrap();
-                let command = job.get_str("cmd").unwrap();
+                let command = job.get_string("cmd").unwrap();
                 let mut cmdstruct = match CmdStruct::new_cmdstruct(&env, now, id, at, at, 0, &command) {
                     Ok(cmdstruct) => cmdstruct,
                     e => { glog!(e); continue }
