@@ -60,8 +60,7 @@ macro_rules! glogd {
 ////////////////////////////////////////////////////////////////////////////////
 /// UTF-8
 
-//info!("HEARTS {}", &(-6..=14).map( num2heart ).collect::<Vec<&str>>().join(""));
-pub fn n2heart2 (n :usize) -> String {
+fn n2heart2 (n :usize) -> String {
     match n%2 {
         0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
         1 => from_utf8(b"\xF0\x9F\x92\x94"), // red broken heart
@@ -69,7 +68,7 @@ pub fn n2heart2 (n :usize) -> String {
     }.unwrap().to_string()
 }
 
-pub fn n2heart13 (n :usize) -> String {
+fn n2heart13 (n :usize) -> String {
     match n%13 {
         0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
         1 => from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F"), // red heart
@@ -88,6 +87,7 @@ pub fn n2heart13 (n :usize) -> String {
     }.unwrap().to_string()
 }
 
+//info!("HEARTS {}", &(-6..=14).map( num2heart ).collect::<Vec<&str>>().join(""));
 pub fn num2heart (mut n :i64) -> String {
     let mut sheart = String::new();
     if n < 0 {

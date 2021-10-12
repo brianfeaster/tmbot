@@ -14,8 +14,8 @@ pub struct Connection {
 impl Connection {
     pub fn new (filename:String) -> Bresult<Self> {
         ::sqlite::open(&filename)
-        .map_err( Box::from )
         .map( |conn| Connection{conn, filename} )
+        .map_err( Box::from )
     }
 }
 
@@ -96,6 +96,7 @@ macro_rules! getsqlquiet {
 
 pub trait GetI64    { fn get_i64 (&self, key:&str) -> Bresult<i64>; }
 pub trait GetF64    { fn get_f64 (&self, key:&str) -> Bresult<f64>; }
+pub trait GetStr    { fn get_str (&self, key:&str) -> Bresult<&str>; }
 pub trait GetString { fn get_string (&self, key:&str) -> Bresult<String>; }
 
 impl GetI64 for HashMap<String, ::sqlite::Value> {
@@ -114,6 +115,15 @@ impl GetF64 for HashMap<String, ::sqlite::Value> {
             ? /* sqlite::Value */
             .as_float() /* Option */
             .ok_or(format!("Not an integer '{}'", key).into()) /* Result */
+    }
+}
+
+impl GetStr for HashMap<String, ::sqlite::Value> {
+    fn get_str (&self, key:&str) -> Bresult<&str> {
+        self
+            .get(key).ok_or(format!("Can't find key '{}'", key))?
+            .as_string().ok_or(format!("Not a string '{}'", key))
+            .map_err( Box::from )
     }
 }
 
