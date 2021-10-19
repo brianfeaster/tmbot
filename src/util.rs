@@ -3,7 +3,11 @@ use ::std::{
     time::{Duration},
     str::{from_utf8},
     error::{Error},
+    collections::{HashMap,
+        //hash_map::Entry
+    }
 };
+use ::regex::{Regex};
 pub use ::serde_json::{Value};
 use log::*;
 
@@ -144,6 +148,101 @@ pub fn getin_str <'t> (json :&'t Value, keys :&[&str]) -> Result<String, String>
         Err(format!("Unable to parse {:?} as_str", keys)),
         |j| Ok(j.to_string()) )
 }
+
+////////////////////////////////////////////////////////////////////////////////
+/// Regex
+
+/*
+#[derive(Debug)]
+pub struct Regexes(HashMap<&'static str, Regex>);
+
+impl Regexes {
+    pub fn new () -> Regexes {
+        Regexes(HashMap::new())
+    }
+    pub fn get<'a> (&'a mut self, re: &'static str) -> Bresult<&'a Regex> {
+        Ok(match self.0.entry(re){
+            Entry::Occupied(entry) => entry.get(),
+            Entry::Vacant(entry) => {
+                entry.insert(Regex::new(re)?);
+                self.0.get(re).ok_or("Regexes contradiction")?
+            }
+        })
+    }
+}
+*/
+
+// Regex enhancements
+
+// Return hashmap of the regex capture groups, if any.
+pub fn regex_to_hashmap (re: &str, msg: &str) -> Bresult<HashMap<String, String>> {
+    let regex = Regex::new(re)?;
+    let captures = regex.captures(msg).ok_or("no regex captures found")?;
+    Ok(regex
+        .capture_names()
+        .enumerate()
+        .filter_map(|(i, capname)| { // Over capture group names (or indices)
+            capname.map_or(
+                captures
+                    .get(i) // Get match via index.  This could be null which is filter by filter_map
+                    .map(|capmatch| (i.to_string(), capmatch.as_str().into())),
+                |capname| {
+                    captures
+                        .name(capname) // Get match via capture name.  Could be null which is filter by filter_map
+                        .map(|capmatch| (capname.into(), capmatch.as_str().into()))
+                },
+            )
+        })
+        .collect())
+}
+
+// Return vector of the regex capture groups, if any.
+pub fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Regex::new(re)?
+    .captures(msg) // An Option<Captures>
+    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
+        |captures|          // ...or return Ok Vec of Option<Vec>
+        Ok(captures.iter() // Iterator over Option<Match>
+            .map( |o_match| // None or Some<String>
+                    o_match.map( |mtch| mtch.as_str().into() ) )
+            .collect()))
+}
+
+pub trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
+pub trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
+pub trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
+pub trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
+
+impl AsI64 for Vec<Option<String>> {
+    fn as_i64 (&self, i:usize) -> Bresult<i64> {
+        Ok(self.get(i).ok_or("Can't index vector")?
+           .as_ref().ok_or("Can't parse i64 from None")?
+           .parse::<i64>()?)
+    }
+}
+
+impl AsF64 for Vec<Option<String>> {
+    fn as_f64 (&self, i:usize) -> Bresult<f64> {
+        Ok(self.get(i).ok_or("Can't index vector")?
+           .as_ref().ok_or("Can't parse f64 from None")?
+           .parse::<f64>()?)
+    }
+}
+
+impl AsStr for Vec<Option<String>> {
+    fn as_str (&self, i:usize) -> Bresult<&str> {
+        Ok(self.get(i)
+            .ok_or("can't index vector")?.as_ref()
+            .ok_or("can't infer str from None")? )
+    }
+}
+
+impl AsString for Vec<Option<String>> {
+    fn as_string (&self, i:usize) -> Bresult<String> {
+        self.as_str(i).map( String::from )
+    }
+}
+
 
 
 ////////////////////////////////////////////////////////////////////////////////

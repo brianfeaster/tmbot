@@ -38,11 +38,15 @@ fn main () {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
     use std::collections::HashSet;
     #[test]
     fn it_works() {
         assert_eq!(
-            tmbot::extract_tickers("a$ b$"),
+            tmbot::doquotes_scan_tickers(
+                "a$ b$",
+                Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$").unwrap()
+            ).unwrap(),
             ["A","B"].iter().map(|e|e.to_string()).collect::<HashSet<String>>() );
     }
 }

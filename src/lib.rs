@@ -22,83 +22,9 @@ use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const QUOTE_DELAY_SECS :i64 = 60;
+const QUOTE_DELAY_SECS :i64 = 30;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
-
-////////////////////////////////////////////////////////////////////////////////
-// Regex enhancements
-////////////////////////////////////////////////////////////////////////////////
-
-// Return hashmap of the regex capture groups, if any.
-fn regex_to_hashmap (re: &str, msg: &str) -> Option<HashMap<String, String>> {
-    let regex = Regex::new(re).unwrap();
-    regex.captures(msg).map(|captures| { // Consider capture groups or return None
-        regex
-            .capture_names()
-            .enumerate()
-            .filter_map(|(i, capname)| { // Over capture group names (or indices)
-                capname.map_or(
-                    captures
-                        .get(i) // Get match via index.  This could be null which is filter by filter_map
-                        .map(|capmatch| (i.to_string(), capmatch.as_str().into())),
-                    |capname| {
-                        captures
-                            .name(capname) // Get match via capture name.  Could be null which is filter by filter_map
-                            .map(|capmatch| (capname.into(), capmatch.as_str().into()))
-                    },
-                )
-            })
-            .collect()
-    })
-}
-// Return vector of the regex capture groups, if any.
-fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re)?
-    .captures(msg) // An Option<Captures>
-    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
-        |captures|          // ...or return Ok Vec of Option<Vec>
-        Ok(captures.iter() // Iterator over Option<Match>
-            .map( |o_match| // None or Some<String>
-                    o_match.map( |mtch| mtch.as_str().into() ) )
-            .collect()))
-}
-
-trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
-trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
-trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
-trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
-
-impl AsI64 for Vec<Option<String>> {
-    fn as_i64 (&self, i:usize) -> Bresult<i64> {
-        Ok(self.get(i).ok_or("Can't index vector")?
-           .as_ref().ok_or("Can't parse i64 from None")?
-           .parse::<i64>()?)
-    }
-}
-
-impl AsF64 for Vec<Option<String>> {
-    fn as_f64 (&self, i:usize) -> Bresult<f64> {
-        Ok(self.get(i).ok_or("Can't index vector")?
-           .as_ref().ok_or("Can't parse f64 from None")?
-           .parse::<f64>()?)
-    }
-}
-
-impl AsStr for Vec<Option<String>> {
-    fn as_str (&self, i:usize) -> Bresult<&str> {
-        Ok(self.get(i)
-            .ok_or("can't index vector")?.as_ref()
-            .ok_or("can't infer str from None")? )
-    }
-}
-
-impl AsString for Vec<Option<String>> {
-    fn as_string (&self, i:usize) -> Bresult<String> {
-        self.as_str(i).map( String::from )
-    }
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Abstracted primitive types helpers
@@ -252,28 +178,23 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
 }
 
 // Transforms @user_nickname to {USER_ID}
-fn deref_ticker (dbconn:&Connection, s:&str) -> Option<String> {
+fn deref_ticker (dbconn:&Connection, s:&str) -> Bresult<String> {
     // Expects:  "@shrewm"   Returns: Some(308188500)
     if &s[0..1] == "@" {
-        // Quote is ID of whomever this nick matches
-        getsql!(dbconn, "SELECT id FROM entitys WHERE name=?", &s[1..])
-            .ok()
-            .filter( |v| 1 == v.len() )
-            .map( |v| v[0].get_string("id").unwrap() )
-    } else { None }
+        let rows = getsql!(dbconn, "SELECT id FROM entitys WHERE name=?", &s[1..])?;
+        if 1 != rows.len() { Err("deref_ticker() multiple names matched")? }
+        Ok(rows[0].get_string("id")?)
+    } else {
+        Err("deref_ticker expected form '@.*'".into())
+    }
 }
 
-// Transforms {USER_ID} to @user_nickname
-fn reference_ticker (dbconn:&Connection, t :&str) -> String {
-    if is_self_stonk(t) {
-        getsql!(dbconn, "SELECT name FROM entitys WHERE id=?", t) // Result<Vec, Err>
-        .map_err( |e| error!("{:?}", e) )
-        .ok()
-        .filter( |v| 1 == v.len() )
-        .map( |v| format!("@{}", v[0].get_string("name").unwrap()) )
-        .unwrap_or(t.to_string())
+// Transform a valid ticker/id into "@nickname", else leave as-is
+fn reference_ticker<'a> (envstruct: &'a EnvStruct, tkr: &'a str) -> &'a str {
+    if is_self_stonk(tkr) {
+        match envstruct.entity_ticker2name(tkr) { Ok(name) => name, Err(e) => { warn!("{:?}", e); tkr } }
     } else {
-        t.to_string()
+        tkr
     }
 }
 
@@ -392,7 +313,7 @@ pub struct Entity {
     balance: f64,
     echo: i64,
     likes: i64,
-    quote: String,
+    quote: String, // Format strings
     position: String
 }
 
@@ -403,7 +324,8 @@ pub struct EnvStruct {
     quote_delay_secs: i64,    // Delay between remote stock quote queries
     dst_hours_adjust: i8,     // 1 = DST, 0 = ST
     time_scheduler:   i64,    // Time the scheduler last ran
-    entitys:          HashMap<i64, Entity>
+    entitys:          HashMap<i64, Entity>,
+    //regexes:          Regexes
 }
 
 type Env = Arc<Mutex<EnvStruct>>;
@@ -423,8 +345,14 @@ impl EnvStruct {
         let s = &self.entitys.get(&id).unwrap().position;
         if s.is_empty() { FORMAT_STRING_POSITION } else { s }.to_string()
     }
-    fn entity_balance (&self, id:i64) -> f64 {
-        self.entitys.get(&id).unwrap().balance
+    fn entity_balance (&self, id:i64) -> Bresult<f64> {
+        Ok(self.entitys.get(&id).ok_or(format!("entity_balance() no id {}", id))?.balance)
+    }
+    fn entity_id2name (&self, id:i64) -> Bresult<&str> {
+        Ok(&self.entitys.get(&id).ok_or(format!("entity_name() no id {}", id))?.name)
+    }
+    fn entity_ticker2name (&self, tkr:&str) -> Bresult<&str> {
+        Ok(&self.entitys.get(&tkr.parse::<i64>()?).ok_or(format!("entity_name() no id {}", tkr))?.name)
     }
     fn entity_balance_set (&mut self, id:i64, new_balance:f64) -> Bresult<()> {
         getsql!(self.dbconn, "UPDATE accounts SET balance=? WHERE id=?", new_balance, id)?;
@@ -469,12 +397,14 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
                 quote:   hm.get_string_or("", "quote"),
                 position:hm.get_string_or("", "position")} );
     }
+    //let regexes = Regexes::new();
     Ok(Env::from(EnvStruct{
         url_api, dbconn,
         dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
-        entitys
+        entitys,
+        // regexes
     }))
 } }
 
@@ -483,7 +413,7 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
 #[derive(Debug)]
 pub struct CmdStruct { // Represents in incoming Telegram message and session/service state.
     env: Env,
-    telegram: Telegram,
+    telegram: Telegram, // Threads can't share this due to an internal Rc
     // Telegram incoming message details
     now: i64,
     id: i64, // Entity who sent msg                    message.from.id
@@ -556,8 +486,8 @@ impl CmdStruct {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().unwrap();
             (   Telegram::new(envstruct.url_api.to_string())?,
-                envstruct.entitys.get(&id).unwrap().echo,
-                envstruct.entitys.get(&at).unwrap().echo )
+                envstruct.entitys.get(&id).ok_or(format!("id {} missing from entitys", id))?.echo,
+                envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
         };
         Ok(CmdStruct{
             env, telegram, now, id, at, to, message_id,
@@ -597,12 +527,13 @@ impl CmdStruct {
 #[macro_export]
 macro_rules! getenvstruct {
     ( $cmdstruct:expr ) => {
-        &mut*$cmdstruct.env.try_lock()
+        &mut*$cmdstruct
+            .env.try_lock()
             .map_err( |e| {
                 let msg = format!("getenvstruct!({})  Mutex::try_lock  {:?} ", stringify!($cmdstruct), e);
                  error!("{}", msg);
-                 "mutex locked"
-            } )?
+                 "mutex locked" } )
+            ?
     }
 }
 
@@ -697,7 +628,7 @@ impl Quote { // Query internet for ticker details
 }
 
 impl Quote {// Query local cache or internet for ticker details
-    async fn get_market_quote (cmdstruct: &CmdStruct, ticker:&str, now:i64) -> Bresult<Self> {
+    async fn get_market_quote (cmdstruct: &CmdStruct, ticker:&str) -> Bresult<Self> {
         // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
         if &ticker[0..1] == "@" { Err("Illegal ticker")? }
         let is_self_stonk = is_self_stonk(ticker);
@@ -714,7 +645,7 @@ impl Quote {// Query local cache or internet for ticker details
                     let hm = &res[0];
                     let timesecs       = hm.get_i64("time")?;
                     let traded_all_day = 24 == hm.get_i64("hours")?;
-                    !update_ticker_p(&envstruct, timesecs, now, traded_all_day)?
+                    !update_ticker_p(&envstruct, timesecs, cmdstruct.now, traded_all_day)?
                 });
             (res, is_in_table, is_cache_valid)
         };
@@ -758,10 +689,10 @@ impl Quote {// Query local cache or internet for ticker details
             let dbconn = &getenvstruct!(cmdstruct).dbconn;
             if !is_in_table {
                 getsql!(dbconn, "INSERT INTO stonks VALUES(?,?,?,?,?,?,?,?)",
-                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, now, &*quote.title)?;
+                    &*quote.ticker, quote.price, quote.last, &*quote.market, quote.hours, &*quote.exchange, cmdstruct.now, &*quote.title)?;
             } else if !is_cache_valid {
                 getsql!(dbconn, "UPDATE stonks SET price=?, last=?, market=?, time=? WHERE ticker=?",
-                    quote.price, quote.last, &*quote.market, now, quote.ticker.as_str())?;
+                    quote.price, quote.last, &*quote.market, cmdstruct.now, quote.ticker.as_str())?;
             }
         }
 
@@ -805,7 +736,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
                     "C" => s.push_str(&percent_squish(self.percent.abs())), // inter-day percent
                     "D" => s.push_str(gain_glyphs.0), // red/green light
-                    "E" => s.push_str(&reference_ticker(&envstruct.dbconn, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
+                    "E" => s.push_str(&reference_ticker(envstruct, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
                     "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
@@ -827,8 +758,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
 
 
 #[derive(Debug)]
-struct Position { // Represent a ledgerer position, and optional quote
-    id:    i64,
+struct Position { // Represent a ledgered position, and optional quote
     ticker:String,
     qty:   f64,
     price: f64,
@@ -837,7 +767,7 @@ struct Position { // Represent a ledgerer position, and optional quote
 
 impl Position {
     async fn update_quote(&mut self, cmdstruct: &CmdStruct) -> Bresult<&Position> {
-        self.quote = Some(Quote::get_market_quote(cmdstruct, &self.ticker, cmdstruct.now).await?);
+        self.quote = Some(Quote::get_market_quote(cmdstruct, &self.ticker).await?);
         Ok(self)
     }
 }
@@ -850,7 +780,7 @@ impl Position {
         .iter()
         .map( |pos|
             Position {
-                id,
+                //id,
                 ticker: ticker.to_string(),
                 qty:    pos.get_f64("qty").unwrap(),
                 price:  pos.get_f64("price").unwrap(),
@@ -861,18 +791,18 @@ impl Position {
 }
 
 impl Position {
-    fn get_users_positions (cmdstruct: &CmdStruct) -> Bresult<Vec<Position>> {
+    fn get_users_positions (cmdstruct: &mut CmdStruct) -> Bresult<Vec<Position>> {
         let id = cmdstruct.id;
-        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let dbconn = &getenvstruct!(cmdstruct).dbconn; 
         Ok(getsql!(dbconn, "SELECT ticker, qty, price FROM positions WHERE id=?", id)?
         .iter()
         .map( |pos|
             Position {
-                id,
+                //id,
                 ticker: pos.get_string("ticker").unwrap(),
-                qty: pos.get_f64("qty").unwrap(),
-                price: pos.get_f64("price").unwrap(),
-                quote: None
+                qty:    pos.get_f64("qty").unwrap(),
+                price:  pos.get_f64("price").unwrap(),
+                quote:  None
             } )
         .collect())
     }
@@ -882,20 +812,20 @@ impl Position {
     async fn query(cmdstruct:&CmdStruct, id:i64, ticker:&str) -> Bresult<Position> {
         let mut hm = Position::get_position(cmdstruct, id, ticker)?;
 
-        if 2 <= hm.len() {
+        if 1 < hm.len() {
             Err(format!("For {} ticker {} has {} positions, expect 0 or 1", id, ticker, hm.len()))?
         }
 
         let mut hm = // Consider the quote or a 0 quantity quote
-            if 0 == hm.len() {
+            if 1 == hm.len() {
+                hm.pop().unwrap()
+            } else {
                 Position {
-                    id,
+                    //id,
                     ticker: ticker.to_string(),
                     qty: 0.0,
                     price: 0.0,
                     quote: None }
-            } else {
-                hm.pop().unwrap()
             };
         hm.update_quote(cmdstruct).await?;
         Ok(hm)
@@ -903,7 +833,7 @@ impl Position {
 }
 
 impl Position { // Format the position using its format string.
-    fn format_position (&mut self, envstruct:&EnvStruct) -> Bresult<String> {
+    fn format_position (&mut self, envstruct:&EnvStruct, id: i64) -> Bresult<String> {
         let qty = self.qty;
         let cost = self.price;
         let price = self.quote.as_ref().unwrap().price;
@@ -923,7 +853,7 @@ impl Position { // Format the position using its format string.
         let day_gain_glyphs = amt_as_glyph(price-last);
 
         Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
-        .captures_iter(&envstruct.fmt_str_position(self.id) )
+        .captures_iter(&envstruct.fmt_str_position(id) )
         .fold( String::new(), |mut s, cap| {
             if let Some(m) = cap.get(2) { match m.as_str() {
                 "A" => s.push_str( &format!("{:.2}", roundcents(value)) ), // value
@@ -931,7 +861,7 @@ impl Position { // Format the position using its format string.
                 "C" => s.push_str( gain_glyphs.1), // Arrow
                 "D" => s.push_str( &percent_squish(gain_percent)), // gain%
                 "E" => s.push_str( gain_glyphs.0 ), // Color
-                "F" => s.push_str( &reference_ticker(&envstruct.dbconn, &self.ticker).replacen("_", "\\_", 10000) ), // Ticker
+                "F" => s.push_str( &reference_ticker(envstruct, &self.ticker).replacen("_", "\\_", 10000) ), // Ticker
                 "G" => s.push_str( &money_pretty(price) ), // latet stonks value
                 "H" => s.push_str( &if 0.0 == qty { "0".to_string() } else { qty.to_string().trim_start_matches('0').to_string()} ), // qty
                 "I" => s.push_str( &roundkilofy(cost) ), // cost
@@ -982,12 +912,6 @@ impl<'a> Trade<'a> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Bot's Do Handler Helpers
-////////////////////////////////////////////////////////////////////////////////
-
-// Valid "ticker" strings:  GME, 308188500, @shrewm, local level 2 quotes.  Used by do_quotes only
-
-////////////////////////////////////////////////////////////////////////////////
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1027,7 +951,7 @@ pub async fn do_help (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     //let cmdl = cmd.lock().unwrap();
     //let cmdstruct = cmdl.deref();
     if regex_to_vec(r"/help", &cmdstruct.message)?.is_empty() { return Ok("SKIP") }
-    let delay = cmdstruct.env.lock().unwrap().quote_delay_secs;
+    let delay = getenvstruct!(cmdstruct).quote_delay_secs;
     let msg = format!(
 r#"`          ™Bot Commands          `
 `/echo 2` `Echo level (verbose 2…0 quiet)`
@@ -1082,9 +1006,8 @@ async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
                 else if &cap[1] == "+" { 1 } else { -1 }
     };
 
-
     let (fromname, likes, toname) = {
-        let mut envstruct = cmdstruct.env.lock().unwrap();
+        let envstruct = getenvstruct!(cmdstruct);
 
         let likes :i64 = {
           let entity = envstruct.entitys.get_mut(&cmdstruct.to).unwrap();
@@ -1110,7 +1033,7 @@ async fn do_like_info (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     if cmdstruct.message != "+?" { return Ok("SKIP"); }
 
     let mut likes :Vec<(i64, String)>=
-        cmdstruct.env.lock().unwrap().entitys.iter().map( |(_,e)| (e.likes, e.name.clone()) ).collect();
+        getenvstruct!(cmdstruct).entitys.iter().map( |(_,e)| (e.likes, e.name.clone()) ).collect();
     likes.sort_by(|a,b| b.0.cmp(&a.0));
 
     cmdstruct
@@ -1184,7 +1107,7 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     let rev = regex_to_vec("^(.*)ß$", &cmdstruct.message)?;
     let sqlexpr = if rev.is_empty() { return Ok("SKIP") } else { rev.as_str(1)? };
     let sqlres = {
-        let envstruct = cmdstruct.env.lock().unwrap();
+        let envstruct = getenvstruct!(cmdstruct);
         getsql!(&envstruct.dbconn, sqlexpr)
     };
     let results =
@@ -1215,9 +1138,10 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
 ////////////////////////////////////////
 // DO QUOTES
-pub fn extract_tickers (txt :&str) -> HashSet<String> {
+
+// Valid "ticker" strings:  GME, 308188500, @shrewm, local level 2 quotes
+pub fn doquotes_scan_tickers (txt :&str, re:Regex) -> Bresult<HashSet<String>> {
     let mut tickers = HashSet::new();
-    let re = Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$").unwrap(); // BRK.A ^GSPC BTC-USD don't end in - so a bad-$ trade doesn't trigger this
     for s in txt.split(" ") {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
@@ -1234,10 +1158,10 @@ pub fn extract_tickers (txt :&str) -> HashSet<String> {
             }
         }
     }
-    tickers
+    Ok(tickers)
 }
 
-async fn get_quote_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String> {
+async fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String> {
     let (ticker, bidask) = {
         let dbconn = &getenvstruct!(cmdstruct).dbconn;
         let ticker = deref_ticker(dbconn, ticker).unwrap_or(ticker.to_string());
@@ -1262,12 +1186,15 @@ async fn get_quote_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<Strin
         };
         (ticker, bidask)
     };
-    let quote = Quote::get_market_quote(cmdstruct, &ticker, cmdstruct.now).await?;
+    let quote = Quote::get_market_quote(cmdstruct, &ticker).await?;
     Ok(format!("{}{}", quote.format_quote(cmdstruct.id)?, bidask))
 }
 
 async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
-    let tickers = extract_tickers(&cmdstruct.message);
+    let tickers =
+        doquotes_scan_tickers(
+            &cmdstruct.message,
+            Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$")?)?;
     if tickers.is_empty() { return Ok("SKIP") }
 
     cmdstruct.msg_id = Some(cmdstruct.push_msg("…").send_msg().await?);
@@ -1276,13 +1203,13 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
     let mut found_tickers = false;
     for ticker in &tickers {
         // Catch error and continue looking up tickers
-        match get_quote_pretty(&cmdstruct, ticker).await {
+        match doquotes_pretty(&cmdstruct, ticker).await {
             Ok(res) => {
-                info!("get_quote_pretty => {:?}", res);
+                info!("doquotes_pretty => {:?}", res);
                 cmdstruct.push_msg(&format!("{}\n", res)).send_msg_markdown().await?;
                 found_tickers = true;
             },
-            e => { glogd!("get_quote_pretty => ", e); }
+            e => { glogd!("doquotes_pretty => ", e); }
         }
     }
 
@@ -1299,19 +1226,18 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     if caps.is_empty() { return Ok("SKIP"); }
 
     let dosort = !caps[1].is_none();
-    let positions = Position::get_users_positions(&cmdstruct)?;
+    let positions = Position::get_users_positions(cmdstruct)?;
 
     cmdstruct.msg_id = Some(cmdstruct.push_msg("…").send_msg().await?);
     cmdstruct.set_msg("");
 
-    let mut total = 0.0;
+    let mut value = 0.0;
     let mut positions_table :Vec<(f64,String)> = Vec::new();
     for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
             pos.update_quote(&cmdstruct).await?;
             info!("{} position {:?}", cmdstruct.id, &pos);
-            let pretty_position = pos.format_position(&getenvstruct!(cmdstruct))?;
-
+            let pretty_position = pos.format_position(&getenvstruct!(cmdstruct), cmdstruct.id)?;
             if dosort {
                 let qty = pos.qty;
                 let cost = pos.price;
@@ -1329,14 +1255,16 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 cmdstruct.push_msg(&pretty_position);
             }
 
-            total += pos.qty * pos.quote.unwrap().price;
+            value += pos.qty * pos.quote.unwrap().price;
             cmdstruct.send_msg_markdown().await?;
         }
     }
 
-    let cash = cmdstruct.env.lock().unwrap().entity_balance(cmdstruct.id);
+    let cash = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?;
+    let bp = value + cash*2.0;
     cmdstruct
-        .push_msg(&format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`\n", roundcents(cash), roundcents(total+cash)))
+        .push_msg(&format!("\n`{:.2}``CASH`  `{:.2}``BP`  `{:.2}``YOLO`\n",
+            roundcents(IF!(cash<0.0, 0.0, cash)), roundcents(bp), roundcents(value+cash)))
         .send_msg_markdown()
         .await?;
     Ok("COMPLETED.")
@@ -1350,7 +1278,8 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     cmdstruct.msg_id = Some(cmdstruct.push_msg("working...").send_msg().await?);
 
     let rows = {
-        let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
+        let envstruct = getenvstruct!(cmdstruct);
+        let dbconn = &envstruct.dbconn;
         getsql!(dbconn, "\
             SELECT ticker \
             FROM positions \
@@ -1374,7 +1303,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
         //working_message.push_str(ticker);
         //working_message.push_str("...");
         //send_edit_msg(cmd, message_id, &working_message).await?;
-        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker, cmdstruct.now).await?);
+        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker).await?);
     }
 
     /* Everyone's YOLO including non positioned YOLOers
@@ -1413,8 +1342,8 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
                ORDER BY yolo DESC";
 
     let sql_results = {
-        let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
-        getsql!(dbconn, &sql)?
+        let envstruct = getenvstruct!(cmdstruct);
+        getsql!(&envstruct.dbconn, &sql)?
     };
 
     // Build and send response string
@@ -1430,13 +1359,13 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 }
 
 // Returns quantiy and new bank balance if all good.  Otherwise an error string.
-fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'static str> {
+fn verify_qty (mut qty:f64, price:f64, maxamt:f64) -> Result<(f64,f64), &'static str> {
     qty = roundqty(qty);
     let basis  = qty * price;
-    let new_balance = bank_balance - basis;
-    info!("\x1b[1mbuy? {} @ {} = {}  BANK {} -> {}", qty, price, basis,  bank_balance, new_balance);
+    let new_balance = maxamt - basis;
+    info!("\x1b[1mbuy? {} @ {} = {}  BANK {} -> {}", qty, price, basis,  maxamt, new_balance);
     if qty < 0.0001 { return Err("Amount too low") }
-    if new_balance < 0.0 { return Err("Need more cash") }
+    if new_balance < 0.0 { return Err("Need more buying power") }
     Ok((qty, new_balance))
 }
 
@@ -1447,42 +1376,58 @@ fn verify_qty (mut qty:f64, price:f64, bank_balance:f64) -> Result<(f64,f64), &'
 struct TradeBuy<'a> {
     qty:f64, // actual qty to trade
     price:f64,
-    bank_balance: f64,
+    bp: f64,
     hours: i64,
     trade: Trade<'a>
 }
 
 impl<'a> TradeBuy<'a> {
     async fn new_tradebuy(trade: Trade<'a>) -> Bresult<TradeBuy<'a>> {
-        let quote = Quote::get_market_quote(trade.cmdstruct, &trade.ticker, trade.cmdstruct.now).await?;
+        let quote = Quote::get_market_quote(trade.cmdstruct, &trade.ticker).await?;
         if quote.exchange == "PNK" {
             trade.cmdstruct.push_msg("`OTC / PinkSheet untradeable`").send_msg_markdown().await?;
             Err("OTC / PinkSheet Verboten Stonken")?
         }
         let price = quote.price;
-        let bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id); //get_bank_balance( &trade.cmdstruct )?;
+        let bp = buying_power(trade.cmdstruct).await?; //get_bank_balance( &trade.cmdstruct )?;
         let hours = quote.hours;
         let qty = match trade.amt {
             Some(amt) => if trade.is_dollars { amt/price } else { amt },
-            None => roundqty(bank_balance / price) // Buy as much as possible
+            None => roundqty(bp / price) // Buy as much as possible
         };
-        Ok( TradeBuy{qty, price, bank_balance, hours, trade} )
+        Ok( TradeBuy{qty, price, bp, hours, trade} )
     }
 }
 
+async fn buying_power (cmdstruct: &mut CmdStruct) -> Bresult<f64> {
+    let positions = Position::get_users_positions(cmdstruct)?;
+    let mut value = 0.0;
+    for mut pos in positions {
+        if !is_self_stonk(&pos.ticker) {
+            pos.update_quote(&cmdstruct).await?;
+            value += pos.qty * pos.quote.unwrap().price;
+        }
+    }
+    let cash = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?*2.0;
+    let total = value + cash;
+    info!("buying_power => {:.2} + {:.2} = {:.2}", value, cash, total);
+    Ok(total)
+}
+
 #[derive(Debug)]
-struct TradeBuyCalc<'a> { qty:f64, new_balance:f64, new_qty:f64, new_basis:f64, position: Position, new_position_p:bool, tradebuy: TradeBuy<'a> }
+struct TradeBuyCalc<'a> { qty:f64, cost:f64, new_qty:f64, new_basis:f64, position: Position, new_position_p:bool, tradebuy: TradeBuy<'a> }
 
 impl<'a> TradeBuyCalc<'a> {
-    async fn compute_position (obj:TradeBuy<'a>) -> Bresult<TradeBuyCalc<'a>> {
-        let (qty, new_balance) =
+    async fn compute_position (obj: TradeBuy<'a>) -> Bresult<TradeBuyCalc<'a>> {
+        let maxamt = obj.bp; // obj.bank_balance
+        let (qty, _new_balance) =
             match
-                verify_qty(obj.qty, obj.price, obj.bank_balance)
-                .or_else( |_e| verify_qty(obj.qty-0.0001, obj.price, obj.bank_balance) )
-                .or_else( |_e| verify_qty(obj.qty-0.0002, obj.price, obj.bank_balance) )
-                .or_else( |_e| verify_qty(obj.qty-0.0003, obj.price, obj.bank_balance) )
-                .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, obj.bank_balance) )
-                .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, obj.bank_balance) ) {
+                verify_qty(obj.qty, obj.price, maxamt)
+                .or_else( |_e| verify_qty(obj.qty-0.0001, obj.price, maxamt) )
+                .or_else( |_e| verify_qty(obj.qty-0.0002, obj.price, maxamt) )
+                .or_else( |_e| verify_qty(obj.qty-0.0003, obj.price, maxamt) )
+                .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, maxamt) )
+                .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, maxamt) ) {
                 Err(e) => {  // Message user problem and log
                     obj.trade.cmdstruct.push_msg(&e).send_msg_markdown().await?;
                     return Err(e.into())
@@ -1496,6 +1441,7 @@ impl<'a> TradeBuyCalc<'a> {
         let qty_old = position.qty;
         let price_old = position.price;
         let price_new = position.quote.as_ref().unwrap().price;
+        let cost = qty * price_new;
 
         let (new_qty, new_basis) = {
             let new_basis = (qty * price_new + qty_old * price_old) / (qty + qty_old);
@@ -1503,7 +1449,7 @@ impl<'a> TradeBuyCalc<'a> {
             (new_qty, new_basis)
         };
 
-        Ok(Self{qty, new_balance, new_qty, new_basis, position, new_position_p, tradebuy:obj})
+        Ok(Self{qty, cost, new_qty, new_basis, position, new_position_p, tradebuy:obj})
     }
 }
 
@@ -1544,9 +1490,9 @@ impl<'a> ExecuteBuy<'a> {
 
             obj.position.qty = obj.new_qty; // TODO: Mutating previous monadic state
             obj.position.price = obj.new_basis;
-            envstruct.entity_balance_set(id, obj.new_balance)?;
+            envstruct.entity_balance_inc(id, -obj.cost)?;
 
-            msg + &obj.position.format_position(&envstruct)?
+            msg + &obj.position.format_position(&envstruct, id)?
         };
 
         Ok(Self{msg, tradebuycalc:obj})
@@ -1574,66 +1520,59 @@ async fn do_trade_buy (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 #[derive(Debug)]
 struct TradeSell<'a> {
     position: Position,
-    qty: f64,
-    price: f64,
+    qty: f64, // calculated quanity to sell
+    price: f64, // stonk price
     bank_balance: f64,
-    new_balance: f64,
-    new_qty: f64,
-    hours: i64,
+    new_balance: f64, // eventual bank balance
+    new_qty: f64,     // eventual position quantity
     trade: Trade<'a>
 }
 
 impl<'a> TradeSell<'a> {
-    async fn new (trade:Trade<'a>) -> Bresult<TradeSell<'a>> {
-        let id = trade.cmdstruct.id;
-        let ticker = &trade.ticker;
+    async fn new_tradesell (trade:Trade<'a>) -> Bresult<TradeSell<'a>> {
 
-        let mut positions = Position::get_position(&trade.cmdstruct, id, ticker)?;
-        if positions.is_empty() {
-            trade.cmdstruct.push_msg("You lack a valid position.").send_msg_markdown().await?;
-            Err("expect 1 position in table")?
-        }
-        let mut position = positions.pop().unwrap();
-        position.update_quote(&trade.cmdstruct).await?;
+        let mut positions = Position::get_users_positions(trade.cmdstruct)?;
+        let posidx = positions.iter().position( |p| p.ticker == trade.ticker );
+        if posidx.is_none() { Err("No existing position.")? }
 
-        let pos_qty = position.qty;
+        for p in &mut positions { p.update_quote(&trade.cmdstruct).await?; }
+        let position = positions.remove(posidx.unwrap());
         let quote = &position.quote.as_ref().unwrap();
-        let price = quote.price;
-        let hours = quote.hours;
 
         let mut qty =
             roundqty(match trade.amt {
-                Some(amt) => if trade.is_dollars { amt / price } else { amt }, // Convert dollars to shares maybe
-                None => pos_qty // no amount set, so set to entire qty
+                Some(amt) => if trade.is_dollars { amt / quote.price } else { amt }, // Convert dollars to shares maybe
+                None => position.qty // no amount set, so set to entire qty
             });
+
         if qty <= 0.0 {
+            // Short sale?
             trade.cmdstruct.push_msg("Quantity too low.").send_msg_markdown().await?;
             Err("sell qty too low")?
         }
 
-        //let bank_balance = get_bank_balance(&trade.cmdstruct)?;
-        let bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id);
-        let mut gain = qty*price;
+        let mut gain = qty*quote.price;
+        let bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id)?;
         let mut new_balance = bank_balance+gain;
 
-        info!("\x1b[1msell? {}/{} @ {} = {}  CASH {} -> {}", qty, pos_qty, price, gain,  bank_balance, new_balance);
+        info!("\x1b[1msell? {}/{} @ {} = {}  CASH {} -> {}", qty, position.qty, quote.price, gain,  bank_balance, new_balance);
 
         // If equal to the rounded position value, snap qty to exact position
-        if qty != pos_qty && roundcents(gain) == roundcents(pos_qty*price) {
-            qty = pos_qty;
-            gain = qty*price;
+        if qty != position.qty && roundcents(gain) == roundcents(position.qty*quote.price) {
+            qty = position.qty;
+            gain = qty*quote.price;
             new_balance = bank_balance + gain;
-            info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", qty, pos_qty, price, gain,  bank_balance, new_balance);
+            info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", qty, position.qty, quote.price, gain,  bank_balance, new_balance);
         }
 
-        if pos_qty < qty {
+        if position.qty < qty {
             trade.cmdstruct.push_msg("You can't sell more than you own.").send_msg_markdown().await?;
             return Err("not enough shares to sell".into());
         }
 
-        let new_qty = roundqty(pos_qty-qty);
-
-        Ok( Self{position, qty, price, bank_balance, new_balance, new_qty, hours, trade} )
+        let new_qty = roundqty(position.qty-qty);
+        let price = quote.price;
+        Ok( Self{ position, qty, price, bank_balance, new_balance, new_qty, trade} )
     }
 }
 
@@ -1647,7 +1586,7 @@ impl<'a> ExecuteSell<'a> {
     fn execute (mut obj:TradeSell<'a>) -> Bresult<Self> {
         let msg = {
             let now = obj.trade.cmdstruct.now;
-            if obj.hours!=24
+            if obj.position.quote.as_ref().unwrap().hours != 24
                 && !trading_hours_p(getenvstruct!(obj.trade.cmdstruct).dst_hours_adjust, now)? {
                 return Ok(Self{msg:format!("Unable to sell {} after hours", obj.position.ticker), tradesell:obj});
             }
@@ -1663,13 +1602,13 @@ impl<'a> ExecuteSell<'a> {
             let mut msg = format!("*Sold:*");
             if new_qty == 0.0 {
                 getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
-                msg += &obj.position.format_position(&envstruct)?;
+                msg += &obj.position.format_position(&envstruct, id)?;
             } else {
                 obj.position.qty = obj.new_qty; // so format_position is up to date
                 getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
                 msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                     qty*price, ticker, qty, price,
-                    &obj.position.format_position(&envstruct)?);
+                    &obj.position.format_position(&envstruct, id)?);
             }
             envstruct.entity_balance_set(id, obj.new_balance)?;
             msg
@@ -1683,7 +1622,7 @@ async fn do_trade_sell (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
     if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
 
     let res =
-        TradeSell::new(trade.unwrap()).await
+        TradeSell::new_tradesell(trade.unwrap()).await
         .map(ExecuteSell::execute)??;
 
     info!("\x1b[1;31mResult {:#?}", res);
@@ -1721,18 +1660,13 @@ impl<'a> ExQuote<'a> {
         let thing = caps.as_string(1)?;
         let ticker = {
             let dbconn = &getenvstruct!(cmdstruct).dbconn;
-            deref_ticker(dbconn, &thing)
+            deref_ticker(dbconn, &thing)?
         };
-        Ok(match ticker { // -> Option<String>
-            None => None,
-            Some(ticker) => {
-                let qty   = roundqty(caps.as_f64(2)?);
-                let price = caps.as_f64(4)?;
-                let now   = Instant::now().seconds();
-                let id    = cmdstruct.id;
-                Some(ExQuote {cmdstruct, id, thing, qty, price, ticker, now } )
-            }
-        })
+        let qty   = roundqty(caps.as_f64(2)?);
+        let price = caps.as_f64(4)?;
+        let now   = Instant::now().seconds();
+        let id    = cmdstruct.id;
+        Ok(Some(ExQuote {cmdstruct, id, thing, qty, price, ticker, now } ))
     }
 }
 
@@ -1874,17 +1808,17 @@ impl<'a> QuoteExecute<'a> {
                         envstruct.entity_balance_inc(id, value)?;
                         envstruct.entity_balance_inc(aid, -value)?;
 
-                        let dbconn = &envstruct.dbconn;
-                        let name = reference_ticker(dbconn, &id.to_string());
-                        let namea = reference_ticker(dbconn, &aid.to_string());
+                        let name = envstruct.entity_id2name(id);
+                        let namea = envstruct.entity_id2name(aid);
                         msg += &format!("\n*Settled:*\n{} `{}{:+}@{}` <-> `${}` {}",
-                                name,
+                                name.unwrap_or(&id.to_string()),
                                 obj.exquote.thing, xqty, aprice,
                                 value,
-                                namea);
+                                namea.unwrap_or(&aid.to_string()));
 
                         // Update my position
                         let newposqty = roundqty(posqty - xqty);
+                        let dbconn = &envstruct.dbconn;
                         if 0.0 == newposqty {
                             getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=? AND qty=?", id, &**ticker, posqty)?;
                         } else {
@@ -1905,7 +1839,7 @@ impl<'a> QuoteExecute<'a> {
                         }
 
                         // Update stonk exquote value
-    /**/                let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker, obj.exquote.cmdstruct.now).await?.price;
+    /**/                let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker).await?.price;
                         getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                         qty = roundqty(qty+xqty);
@@ -1936,7 +1870,7 @@ impl<'a> QuoteExecute<'a> {
                 // Limited by available cash but that's up to the current best ask price and sum of ask costs.
                 let basis = qty * price;
                 //let bank_balance = get_bank_balance(obj.exquote.cmdstruct)?;
-                let bank_balance = getenvstruct!(obj.exquote.cmdstruct).entity_balance(obj.exquote.id);
+                let bank_balance = getenvstruct!(obj.exquote.cmdstruct).entity_balance(obj.exquote.id)?;
                 let mybidsprice =
                     mybids.iter().map( |bid|
                         bid.get_f64("qty").unwrap()
@@ -1982,13 +1916,14 @@ impl<'a> QuoteExecute<'a> {
                             envstruct.entity_balance_inc(id, -value)?;
                             envstruct.entity_balance_inc(aid, value)?;
 
-                            let dbconn = &envstruct.dbconn;
-
                             msg += &format!("\n*Settled:*\n{} `${}` <-> `{}{:+}@{}` {}",
-                                    reference_ticker(dbconn, &id.to_string()), value,
-                                    obj.exquote.thing, xqty, aprice, reference_ticker(dbconn, &aid.to_string()));
+                                    envstruct.entity_id2name(id).unwrap_or(&id.to_string()),
+                                    value,
+                                    obj.exquote.thing, xqty, aprice,
+                                    envstruct.entity_id2name(aid).unwrap_or(&aid.to_string()));
 
                             // Update my position
+                            let dbconn = &envstruct.dbconn;
                             if 0.0 == posqty {
                                 getsql!(dbconn, "INSERT INTO positions values(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
                             } else {
@@ -2013,7 +1948,7 @@ impl<'a> QuoteExecute<'a> {
                         }
 
                         // Update self-stonk exquote value
-                        let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker, obj.exquote.cmdstruct.now).await?.price;
+                        let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker).await?.price;
                         let dbconn = &getenvstruct!(obj.exquote.cmdstruct).dbconn;
                         getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?",
                             aprice, last_price, now, &**ticker)?;
@@ -2076,11 +2011,12 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let mut asks = String::from("");
     let mut bids = String::from("");
     let rows = {
-        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let envstruct = getenvstruct!(cmdstruct);
+        let dbconn = &envstruct.dbconn;
         if Regex::new(r"(?i)/orders").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP"); }
         for order in getsql!(dbconn, "SELECT * FROM exchange WHERE id=?", id)? {
             let ticker = order.get_string("ticker")?;
-            let stonk = reference_ticker(dbconn, &ticker).replacen("_", "\\_", 10000);
+            let stonk = reference_ticker(envstruct, &ticker).replacen("_", "\\_", 10000);
             let qty = order.get_f64("qty")?;
             let price = order.get_f64("price")?;
             if qty < 0.0 {
@@ -2108,21 +2044,20 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         if is_self_stonk(&pos.get_string("ticker")?) {
             let mut pos = {
                 Position {
-                    id,
                     ticker: pos.get_string("ticker")?,
                     qty: pos.get_f64("qty")?,
                     price: pos.get_f64("price")?,
                     quote: None
                 }
             };
-            pos.update_quote(&cmdstruct).await?; // Locks cmdstruct.env
-            msg += &pos.format_position(&cmdstruct.env.lock().unwrap())?;
+            pos.update_quote(&cmdstruct).await?;
+            msg += &pos.format_position(getenvstruct!(cmdstruct), id)?;
             total += pos.qty * pos.quote.unwrap().price;
         }
     }
 
     //let cash = get_bank_balance(cmdstruct)?;
-    let cash = getenvstruct!(cmdstruct).entity_balance(id);
+    let cash = getenvstruct!(cmdstruct).entity_balance(id)?;
     msg += &format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`",
         roundcents(cash),
         roundcents(total+cash));
@@ -2284,7 +2219,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
     for ticker in percents.keys() { // Refresh stonk quotes
         if !is_self_stonk(&ticker) {
-            Quote::get_market_quote(cmdstruct, &ticker, cmdstruct.now).await.err().map_or(false, gwarn);
+            Quote::get_market_quote(cmdstruct, &ticker).await.err().map_or(false, gwarn);
             // Update feedback message with ticker symbol
             cmdstruct.push_msg(&format!(" {}", ticker)).send_msg().await?;
         }
@@ -2344,7 +2279,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let mut diffstr = positions[i].get_string("diff")?;
                 if diffstr != "0" {
                     //let bank_balance = { get_bank_balance(cmdstruct)?  };
-                    let bank_balance = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id);
+                    let bank_balance = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?;
                     // The last buy might be so off, so skip or adjust to account value
                     if bank_balance < diffstr.parse::<f64>()? {
                         if 0.01 <= bank_balance {
@@ -2519,6 +2454,63 @@ async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     Ok(())
 }
 
+async fn do_each_job (
+    jobs: Vec<HashMap<String, sqlite::Value>>,
+    env:  Env,
+    now:  i64
+) -> Bresult<()> {
+    for job in jobs {
+        let env = env.clone();
+        let id = job.get_i64("id")?;
+        let at = job.get_i64("at")?;
+        let command = job.get_str("cmd")?;
+        let mut cmdstruct =
+            match CmdStruct::new_cmdstruct(env, now, id, at, at, 0, command) {
+                Ok(cmdstruct) => cmdstruct,
+                e => { glog!(e); continue }
+            };
+        glog!(do_all(&mut cmdstruct).await);
+        let time = job.get_i64("time")?;
+        if 86400 <= time { // Delete the non-daily job
+            let cmdstruct = &getenvstruct!(cmdstruct).dbconn;
+            getsql!(
+                cmdstruct,
+                "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND cmd=?",
+                id, at, time, command)
+            .unwrap();
+        }
+    }
+    Ok(())
+}
+
+pub fn launch_scheduler(env:Env) -> Bresult<()> {
+    info!("Spawned Scheduler Event Thread, 10s delay");
+    std::thread::spawn( move ||
+    loop {
+        sleep_secs(10.0);
+        let now = Instant::now().seconds();
+        let jobs = {
+            let env = env.clone();
+            let envstruct = env.lock().unwrap();
+            let res = getsqlquiet!(&envstruct.dbconn,
+                "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
+                envstruct.time_scheduler, now, // one-time jobs
+                envstruct.time_scheduler % 86400, now % 86400); // daily jobs
+            if res.is_err() { glog!(res); continue }
+            res.unwrap()
+        };
+        if 0 < jobs.len() {
+            info!("\x1b[1mSchedules start...");
+            ginfo(&jobs);
+            let env = env.clone();
+            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_job(jobs, env, now).await } ); // for rows, async, block_on
+            info!("\x1b[1mSchedules end. {:?}", res);
+        }
+        env.lock().unwrap().time_scheduler = now;
+    } ); // loop, ||, thread
+    Ok(())
+}
+
 fn log_header () {
     info!("\x1b[0;31;40m _____ __  __ ____        _   ");
     info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
@@ -2559,51 +2551,6 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
         info!("\x1b[33m{:?}\n\x1b[0;1mEnd.", env.lock().unwrap());
     });
     "".into()
-}
-
-pub fn launch_scheduler(env:Env) -> Bresult<()> {
-    info!("Spawned Scheduler Event Thread, 10s delay");
-    std::thread::spawn( move ||
-    loop {
-        sleep_secs(10.0);
-        let now = Instant::now().seconds();
-        let jobs = {
-            let env = env.clone();
-            let envstruct = env.lock().unwrap();
-            let res = getsqlquiet!(&envstruct.dbconn,
-                "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
-                envstruct.time_scheduler, now, // one-time jobs
-                envstruct.time_scheduler % 86400, now % 86400); // daily jobs
-            if res.is_err() { glog!(res); continue }
-            res.unwrap()
-        };
-        if 0 < jobs.len() {
-            info!("\x1b[1mSchedules start...");
-            ginfo(&jobs);
-            let env = env.clone();
-            actix_web::rt::System::new("tmbot").block_on( async move {
-            for job in jobs {
-                let env = env.clone();
-                let id = job.get_i64("id").unwrap();
-                let at = job.get_i64("at").unwrap();
-                let command = job.get_str("cmd").unwrap();
-                let mut cmdstruct =
-                    match CmdStruct::new_cmdstruct(env, now, id, at, at, 0, command) {
-                        Ok(cmdstruct) => cmdstruct,
-                        e => { glog!(e); continue }
-                    };
-                glog!(do_all(&mut cmdstruct).await);
-                let time = job.get_i64("time").unwrap();
-                if 86400 <= time { // Delete the non-daily job
-                    let dbconn = &cmdstruct.env.lock().unwrap().dbconn;
-                    getsql!(dbconn, "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND cmd=?", id, at, time, command).unwrap();
-                }
-            } } ); // for rows, async, block_on
-            info!("\x1b[1mSchedules end.");
-        }
-        env.lock().unwrap().time_scheduler = now;
-    } ); // loop, ||, thread
-    Ok(())
 }
 
 pub fn launch_server(env:Env) -> Bresult<()> {
