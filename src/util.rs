@@ -9,7 +9,6 @@ use ::std::{
 };
 use ::regex::{Regex};
 pub use ::serde_json::{Value};
-use log::*;
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Types
@@ -19,9 +18,9 @@ pub type Bresult<T> = Result<T, Box<dyn Error>>;
 ////////////////////////////////////////////////////////////////////////////////
 /// Logging
 
-pub fn ginfo<T:  std::fmt::Debug>(e: T) -> bool { info!("{:?}",  e); true }
-pub fn gwarn<T:  std::fmt::Debug>(e: T) -> bool { warn!("{:?}",  e); true }
-pub fn gerror<T: std::fmt::Debug>(e: T) -> bool { error!("{:?}", e); true }
+//pub fn infoi<T:  std::fmt::Debug>(e: T) -> T { info!("{:?}",  e); e }
+//pub fn warni<T:  std::fmt::Debug>(e: T) -> T { warn!("{:?}",  e); e }
+//pub fn errori<T: std::fmt::Debug>(e: T) -> T { error!("{:?}", e); e }
 
 #[macro_export(local_inner_macros)]
 macro_rules! ginfod {
@@ -40,6 +39,14 @@ macro_rules! gerrord {
             std::format!("{:?}", $arg).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\""))
     )
 }
+
+//// Log error with debug formatting and return it
+//#[macro_export(local_inner_macros)]
+//macro_rules! errori {
+//    ($o:expr) => {
+//        error!("{:?}", $o)
+//    }
+//}
 
 #[macro_export(local_inner_macros)]
 macro_rules! glog {

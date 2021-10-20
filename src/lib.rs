@@ -81,7 +81,7 @@ fn update_ticker_p (
 
     if traded_all_day { return Ok(cached+(envstruct.quote_delay_secs) < now) }
 
-    let lookup_throttle_duration = Duration::of( 60 * envstruct.quote_delay_secs ); // Lookup tickers every 2 minutes
+    let lookup_throttle_duration = Duration::of(envstruct.quote_delay_secs); // Lookup tickers every 2 minutes
 
     // Do everything in DateTime
     let cached = LocalDateTime::at(cached);
@@ -192,7 +192,10 @@ fn deref_ticker (dbconn:&Connection, s:&str) -> Bresult<String> {
 // Transform a valid ticker/id into "@nickname", else leave as-is
 fn reference_ticker<'a> (envstruct: &'a EnvStruct, tkr: &'a str) -> &'a str {
     if is_self_stonk(tkr) {
-        match envstruct.entity_ticker2name(tkr) { Ok(name) => name, Err(e) => { warn!("{:?}", e); tkr } }
+        match envstruct.entity_ticker2name(tkr) {
+            Ok(name) => name,
+            Err(e) => { warn!("{:?}", e); tkr }
+        }
     } else {
         tkr
     }
@@ -513,13 +516,13 @@ impl CmdStruct {
     async fn send_msg_id (&self) -> Bresult<i64> {
         self.telegram.send_msg( MsgCmd::from(self).dm(self.id) ).await
     }
-    async fn send_msg_markdown (&self) -> Bresult<i64> {
+    async fn send_markdown (&self) -> Bresult<i64> {
         self.telegram.send_msg( MsgCmd::from(self).markdown() ).await
     }
-    async fn send_msg_id_markdown (&self) -> Bresult<i64> {
+    async fn send_id_markdown (&self) -> Bresult<i64> {
         self.telegram.send_msg( MsgCmd::from(self).dm(self.id).markdown() ).await
     }
-    async fn _send_msg_dm_markdown (&self, id:i64) -> Bresult<i64> {
+    async fn _send_dm_markdown (&self, id:i64) -> Bresult<i64> {
         self.telegram.send_msg( MsgCmd::from(self).dm(id).markdown() ).await
     }
 } // CmdStruct
@@ -977,7 +980,7 @@ r#"`          ™Bot Commands          `
 `/fmt [qp] ...` `Set quote/position fmt str`
 `/schedule [time]` `List jobs, delete job at time`
 `/schedule [ISO-8601] [1h][2m][3][*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, * repeat daily`"#, delay);
-    cmdstruct.push_msg(&msg).send_msg_markdown().await?;
+    cmdstruct.push_msg(&msg).send_markdown().await?;
     Ok("COMPLETED.")
 }
 
@@ -1062,7 +1065,7 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     if defs.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* def is empty", &word))
-            .send_msg_id_markdown()
+            .send_id_markdown()
             .await?;
     } else {
         msg.push_str( &format!("*{}", &word) );
@@ -1083,7 +1086,7 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     if syns.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* syns is empty", &word))
-            .send_msg_id_markdown()
+            .send_id_markdown()
             .await?;
     } else {
         if msg.is_empty() {
@@ -1097,7 +1100,7 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     }
 
     if !msg.is_empty() {
-        cmdstruct.push_msg(&msg).send_msg_markdown().await?;
+        cmdstruct.push_msg(&msg).send_markdown().await?;
     }
     Ok("COMPLETED.")
 }
@@ -1206,7 +1209,7 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
         match doquotes_pretty(&cmdstruct, ticker).await {
             Ok(res) => {
                 info!("doquotes_pretty => {:?}", res);
-                cmdstruct.push_msg(&format!("{}\n", res)).send_msg_markdown().await?;
+                cmdstruct.push_msg(&format!("{}\n", res)).send_markdown().await?;
                 found_tickers = true;
             },
             e => { glogd!("doquotes_pretty => ", e); }
@@ -1214,7 +1217,7 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
     }
 
     if !found_tickers {
-        cmdstruct.set_msg(&"No quotes found").send_msg_markdown().await?;
+        cmdstruct.set_msg(&"No quotes found").send_markdown().await?;
     }
     Ok("COMPLETED.")
 }
@@ -1256,7 +1259,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             }
 
             value += pos.qty * pos.quote.unwrap().price;
-            cmdstruct.send_msg_markdown().await?;
+            cmdstruct.send_markdown().await?;
         }
     }
 
@@ -1265,7 +1268,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     cmdstruct
         .push_msg(&format!("\n`{:.2}``CASH`  `{:.2}``BP`  `{:.2}``YOLO`\n",
             roundcents(IF!(cash<0.0, 0.0, cash)), roundcents(bp), roundcents(value+cash)))
-        .send_msg_markdown()
+        .send_markdown()
         .await?;
     Ok("COMPLETED.")
 }
@@ -1354,7 +1357,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
             row.get_f64("yolo")?,
             row.get_string("name")?) );
     }
-    cmdstruct.set_msg(&msg).send_msg_markdown().await?;
+    cmdstruct.set_msg(&msg).send_markdown().await?;
     Ok("COMPLETED.")
 }
 
@@ -1402,7 +1405,7 @@ impl<'a> TradeBuy<'a> {
     async fn new_tradebuy(trade: Trade<'a>) -> Bresult<TradeBuy<'a>> {
         let quote = Quote::get_market_quote(trade.cmdstruct, &trade.ticker).await?;
         if quote.exchange == "PNK" {
-            trade.cmdstruct.push_msg("`OTC / PinkSheet untradeable`").send_msg_markdown().await?;
+            trade.cmdstruct.push_msg("`OTC / PinkSheet untradeable`").send_markdown().await?;
             Err("OTC / PinkSheet Verboten Stonken")?
         }
         let price = quote.price;
@@ -1431,7 +1434,7 @@ impl<'a> TradeBuyCalc<'a> {
                 .or_else( |_e| verify_qty(obj.qty-0.0004, obj.price, maxamt) )
                 .or_else( |_e| verify_qty(obj.qty-0.0005, obj.price, maxamt) ) {
                 Err(e) => {  // Message user problem and log
-                    obj.trade.cmdstruct.push_msg(&e).send_msg_markdown().await?;
+                    obj.trade.cmdstruct.push_msg(&e).send_markdown().await?;
                     return Err(e.into())
                 },
                 Ok(r) => r
@@ -1512,7 +1515,7 @@ async fn do_trade_buy (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     info!("\x1b[1;31mResult {:#?}", &res);
 
-    res.tradebuycalc.tradebuy.trade.cmdstruct.push_msg(&res.msg).send_msg_markdown().await?; // Report to group
+    res.tradebuycalc.tradebuy.trade.cmdstruct.push_msg(&res.msg).send_markdown().await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -1549,7 +1552,7 @@ impl<'a> TradeSell<'a> {
 
         if qty <= 0.0 {
             // Short sale?
-            trade.cmdstruct.push_msg("Quantity too low.").send_msg_markdown().await?;
+            trade.cmdstruct.push_msg("Quantity too low.").send_markdown().await?;
             Err("sell qty too low")?
         }
 
@@ -1568,7 +1571,7 @@ impl<'a> TradeSell<'a> {
         }
 
         if position.qty < qty {
-            trade.cmdstruct.push_msg("You can't sell more than you own.").send_msg_markdown().await?;
+            trade.cmdstruct.push_msg("You can't sell more than you own.").send_markdown().await?;
             return Err("not enough shares to sell".into());
         }
 
@@ -1628,7 +1631,7 @@ async fn do_trade_sell (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
         .map(ExecuteSell::execute)??;
 
     info!("\x1b[1;31mResult {:#?}", res);
-    res.tradesell.trade.cmdstruct.push_msg(&res.msg).send_msg_markdown().await?; // Report to group
+    res.tradesell.trade.cmdstruct.push_msg(&res.msg).send_markdown().await?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -2000,7 +2003,7 @@ async fn do_exchange_bidask (cmdstruct :&mut CmdStruct) -> Bresult<&'static str>
                 &ret.msg
                 .replacen("_", "\\_", 1000)
                 .replacen(">", "\\>", 1000))
-            .send_msg_markdown()
+            .send_markdown()
             .await?;
     } // Report to group
     Ok("COMPLETED.")
@@ -2081,14 +2084,14 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         }
     }
 
-    cmdstruct.push_msg(&msg).send_msg_markdown().await?;
+    cmdstruct.push_msg(&msg).send_markdown().await?;
     Ok("COMPLETED.")
 }
 
 async fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<i64> {
     cmdstruct
         .push_msg(FORMAT_STRINGS_HELP)
-        .send_msg_markdown()
+        .send_markdown()
         .await
 }
 
@@ -2219,9 +2222,12 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
     for ticker in percents.keys() { // Refresh stonk quotes
         if !is_self_stonk(&ticker) {
-            Quote::get_market_quote(cmdstruct, &ticker).await.err().map_or(false, gwarn);
-            // Update feedback message with ticker symbol
-            cmdstruct.push_msg(&format!(" {}", ticker)).send_msg().await?;
+            if Quote::get_market_quote(cmdstruct, &ticker).await.map_err( |e|warn!("ticker {} invalid {}", ticker, e) ).is_err() {
+                cmdstruct.push_msg(&format!(" ~{}~", ticker)).send_markdown().await?;
+            } else {
+                // Update feedback message with ticker symbol
+                cmdstruct.push_msg(&format!(" {}", ticker)).send_markdown().await?;
+            }
         }
     }
 
@@ -2247,7 +2253,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     info!("rebalance total {}", total);
 
     if 0==positions.len() {
-        cmdstruct.push_msg("no valid tickers").send_msg().await?;
+        cmdstruct.push_msg("no valid tickers").send_markdown().await?;
     } else {
         for i in 0..positions.len() {
             let ticker = positions[i].get_string("ticker")?;
@@ -2263,13 +2269,13 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let diffstr = &positions[i].get_string("diff")?[1..];
                 cmdstruct.push_msg("\n");
                 if "0" == diffstr {
-                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).send_msg().await?;
+                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).send_markdown().await?;
                 } else {
                     let message = format!("{}-${}", ticker, &diffstr);
                     cmdstruct.message = message;
                     glogd!(" do_trade_sell =>", do_trade_sell(cmdstruct).await); // Recurse on same cmsstruct but mutated message
                 }
-                //cmdstruct.send_msg_markdown().await?;
+                //cmdstruct.send_markdown().await?;
             }
         }
         for i in 0..positions.len() {
@@ -2291,14 +2297,14 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 }
                 cmdstruct.push_msg("\n");
                 if "0" == diffstr {
-                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).send_msg().await?;
+                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).send_markdown().await?;
                 } else {
                     let message = format!("{}+${}", ticker, &diffstr);
                     //cmdstruct.push_msg(&format!("\n{}\n", message));
                     cmdstruct.message = message;
                     glogd!(" do_trade_buy =>", do_trade_buy(cmdstruct).await); // Recurse on same cmsstruct but mutated message
                 }
-                //cmdstruct.send_msg_markdown().await?;
+                //cmdstruct.send_markdown().await?;
             }
         }
     }
@@ -2341,7 +2347,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             getsql!(dbconn, "SELECT name, time, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
         };
         if res.is_empty() {
-            cmdstruct.push_msg("No Scheduled Jobs").send_msg_markdown().await?;
+            cmdstruct.push_msg("No Scheduled Jobs").send_markdown().await?;
             return Ok("COMPLETED.")
         }
         res.sort_by( |a,b| a.get_i64("time").unwrap().cmp(&b.get_i64("time").unwrap()) );
@@ -2357,7 +2363,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             } )
             .collect::<Vec<String>>()
             .join("\n");
-        cmdstruct.push_msg(&buff).send_msg_markdown().await?;
+        cmdstruct.push_msg(&buff).send_markdown().await?;
         return Ok("COMPLETED.")
     }
 
@@ -2412,7 +2418,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         }
     };
 
-    cmdstruct.push_msg(&msg).send_msg_markdown().await?;
+    cmdstruct.push_msg(&msg).send_markdown().await?;
 
     Ok("COMPLETED.")
 }
@@ -2499,8 +2505,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
             res.unwrap()
         };
         if 0 < jobs.len() {
-            info!("\x1b[1mSchedules start...");
-            ginfo(&jobs);
+            info!("\x1b[1mSchedules start\x1b[0m {:?}", &jobs);
             let env = env.clone();
             let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_job(jobs, env, now).await } ); // for rows, async, block_on
             info!("\x1b[1mSchedules end. {:?}", res);
