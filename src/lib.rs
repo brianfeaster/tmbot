@@ -1372,6 +1372,23 @@ fn verify_qty (mut qty:f64, price:f64, maxamt:f64) -> Result<(f64,f64), &'static
 ////////////////////////////////////////////////////////////////////////////////
 /// Stonk Buy
 
+// Buying power is summed position values plus double the bank balance (which
+// could be negative).  Invariant:  -2*bankBalance < SummedPositionsValue
+async fn buying_power (cmdstruct: &mut CmdStruct) -> Bresult<f64> {
+    let positions = Position::get_users_positions(cmdstruct)?;
+    let mut value = 0.0;
+    for mut pos in positions {
+        if !is_self_stonk(&pos.ticker) {
+            pos.update_quote(&cmdstruct).await?;
+            value += pos.qty * pos.quote.unwrap().price;
+        }
+    }
+    let cash = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?*2.0;
+    let total = value + cash;
+    info!("buying_power => {:.2} + {:.2} = {:.2}", value, cash, total);
+    Ok(total)
+}
+
 #[derive(Debug)]
 struct TradeBuy<'a> {
     qty:f64, // actual qty to trade
@@ -1389,7 +1406,7 @@ impl<'a> TradeBuy<'a> {
             Err("OTC / PinkSheet Verboten Stonken")?
         }
         let price = quote.price;
-        let bp = buying_power(trade.cmdstruct).await?; //get_bank_balance( &trade.cmdstruct )?;
+        let bp = buying_power(trade.cmdstruct).await?;
         let hours = quote.hours;
         let qty = match trade.amt {
             Some(amt) => if trade.is_dollars { amt/price } else { amt },
@@ -1399,27 +1416,12 @@ impl<'a> TradeBuy<'a> {
     }
 }
 
-async fn buying_power (cmdstruct: &mut CmdStruct) -> Bresult<f64> {
-    let positions = Position::get_users_positions(cmdstruct)?;
-    let mut value = 0.0;
-    for mut pos in positions {
-        if !is_self_stonk(&pos.ticker) {
-            pos.update_quote(&cmdstruct).await?;
-            value += pos.qty * pos.quote.unwrap().price;
-        }
-    }
-    let cash = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?*2.0;
-    let total = value + cash;
-    info!("buying_power => {:.2} + {:.2} = {:.2}", value, cash, total);
-    Ok(total)
-}
-
 #[derive(Debug)]
 struct TradeBuyCalc<'a> { qty:f64, cost:f64, new_qty:f64, new_basis:f64, position: Position, new_position_p:bool, tradebuy: TradeBuy<'a> }
 
 impl<'a> TradeBuyCalc<'a> {
     async fn compute_position (obj: TradeBuy<'a>) -> Bresult<TradeBuyCalc<'a>> {
-        let maxamt = obj.bp; // obj.bank_balance
+        let maxamt = obj.bp;
         let (qty, _new_balance) =
             match
                 verify_qty(obj.qty, obj.price, maxamt)
@@ -1869,7 +1871,6 @@ impl<'a> QuoteExecute<'a> {
             } else if 0.0 < qty { // This is a bid exquote (want to buy someone)
                 // Limited by available cash but that's up to the current best ask price and sum of ask costs.
                 let basis = qty * price;
-                //let bank_balance = get_bank_balance(obj.exquote.cmdstruct)?;
                 let bank_balance = getenvstruct!(obj.exquote.cmdstruct).entity_balance(obj.exquote.id)?;
                 let mybidsprice =
                     mybids.iter().map( |bid|
@@ -2056,7 +2057,6 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         }
     }
 
-    //let cash = get_bank_balance(cmdstruct)?;
     let cash = getenvstruct!(cmdstruct).entity_balance(id)?;
     msg += &format!("\n`{:7.2}``Cash`    `YOLO``{:.2}`",
         roundcents(cash),
@@ -2278,12 +2278,11 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let ticker = &positions[i].get_string("ticker")?;
                 let mut diffstr = positions[i].get_string("diff")?;
                 if diffstr != "0" {
-                    //let bank_balance = { get_bank_balance(cmdstruct)?  };
-                    let bank_balance = getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?;
+                    let bp = buying_power(cmdstruct).await?;
                     // The last buy might be so off, so skip or adjust to account value
-                    if bank_balance < diffstr.parse::<f64>()? {
-                        if 0.01 <= bank_balance {
-                            diffstr = format!("{}", (bank_balance*100.0) as i64 as f64 / 100.0);
+                    if bp < diffstr.parse::<f64>()? {
+                        if 0.01 <= bp {
+                            diffstr = format!("{}", (bp*100.0) as i64 as f64 / 100.0);
                         } else {
                             diffstr = format!("0");
                         }
