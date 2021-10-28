@@ -2393,7 +2393,8 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         let id = cmdstruct.id;
         let at = cmdstruct.at;
         let now = cmdstruct.now;
-        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let envstruct = &getenvstruct!(cmdstruct);
+        let dbconn = &envstruct.dbconn;
 
         let mut daily = caps.as_str(8).map_or(false,|_|true);
         let mut time =
@@ -2414,7 +2415,8 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 caps.as_i64(5).unwrap_or(0) * 60 * 60
                 + caps.as_i64(6).unwrap_or(0) * 60
                 + caps.as_i64(7).unwrap_or(0)
-            ) * caps.as_str(4).map_or(1,|_|-1);
+            ) * caps.as_str(4).map_or(1,|_|-1)
+            + 60 * 60 * envstruct.dst_hours_adjust as i64;
 
         if daily { time = time.rem_euclid(86400)}
 
@@ -2519,10 +2521,11 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
         let jobs = {
             let env = env.clone();
             let envstruct = env.lock().unwrap();
+            let dstsecs = 60 * 60 * envstruct.dst_hours_adjust as i64;
             let res = getsqlquiet!(&envstruct.dbconn,
                 "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
-                envstruct.time_scheduler, now, // one-time jobs
-                envstruct.time_scheduler % 86400, now % 86400); // daily jobs
+                envstruct.time_scheduler+dstsecs, now+dstsecs, // one-time jobs
+                (envstruct.time_scheduler+dstsecs) % 86400, (now+dstsecs) % 86400); // daily jobs
             if res.is_err() { glog!(res); continue }
             res.unwrap()
         };
@@ -2615,5 +2618,6 @@ fn fun (argv: std::env::Args) -> Bresult<()>  {
     let _env = EnvStruct::new(argv)?;
     //info!("{:#?}", env);
     (-6..=28).for_each( |c| info!("{}", num2heart(c)) );
+    println!("{:?}", LocalDateTime::from_instant(Instant::now()));
     Ok(())
 }
