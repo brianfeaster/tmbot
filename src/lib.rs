@@ -156,7 +156,7 @@ fn percent_squish (num:f64) -> String {
 // where it's 4 decimal places with trailing 0s truncate.
 fn money_pretty (n:f64) -> String {
     if n < 0.0001 {
-        format!("0.0")
+        format!("{}", n)
     } else if n < 1.0 {
         let mut np = format!("{:.4}", n);
         np = regex_to_hashmap(r"^0(.*)$", &np).map_or(np, |c| c["1"].to_string() ); // strip leading 0
@@ -1539,7 +1539,8 @@ struct TradeSell<'a> {
     bank_balance: f64,
     new_balance: f64, // eventual bank balance
     new_qty: f64,     // eventual position quantity
-    trade: Trade<'a>
+    trade: Trade<'a>,
+    bp: f64
 }
 
 impl<'a> TradeSell<'a> {
@@ -1590,8 +1591,9 @@ impl<'a> TradeSell<'a> {
         }
 
         let new_qty = roundqty(position.qty-qty);
+        let bp = trade.cmdstruct.buying_power().await?;
 
-        Ok( Self{ position, short, qty, price, bank_balance, new_balance, new_qty, trade} )
+        Ok( Self{ position, short, qty, price, bank_balance, new_balance, new_qty, trade, bp} )
     }
 }
 
@@ -1602,7 +1604,7 @@ struct ExecuteSell<'a> {
 }
 
 impl<'a> ExecuteSell<'a> {
-    fn execute (mut obj:TradeSell<'a>) -> Bresult<Self> {
+    fn execute (mut obj: TradeSell<'a>) -> Bresult<Self> {
         let msg = {
             let now = obj.trade.cmdstruct.now;
             if obj.position.quote.as_ref().unwrap().hours != 24
@@ -1624,20 +1626,31 @@ impl<'a> ExecuteSell<'a> {
                 getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
                 msg += &obj.position.format_position(&envstruct, id)?;
             } else if obj.position.qty == 0.0 {
-                getsql!(dbconn, "INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.price)?;
-                obj.position.qty = obj.new_qty; // so format_position is up to date
-                obj.position.price = obj.price; // Update previous monad so position is printed correctly
-                msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
-                    qty*price, ticker, qty, price,
-                    &obj.position.format_position(&envstruct, id)?);
+                let amt = qty*price;
+                if obj.bp < amt {
+                    msg = format!("${} of {} exceeds buying power of ${}", money_pretty(amt), ticker, money_pretty(obj.bp));
+                } else {
+                    getsql!(dbconn, "INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.price)?;
+                    obj.position.qty = obj.new_qty; // so format_position is up to date
+                    obj.position.price = obj.price; // Update previous monad so position is printed correctly
+                    msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
+                        amt, ticker, qty, price,
+                        &obj.position.format_position(&envstruct, id)?);
+                    envstruct.entity_balance_set(id, obj.new_balance)?;
+                }
             } else {
-                getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
-                obj.position.qty = obj.new_qty; // so format_position is up to date
-                msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
-                    qty*price, ticker, qty, price,
-                    &obj.position.format_position(&envstruct, id)?);
+                let amt = qty*price;
+                if obj.bp < amt {
+                    msg = format!("${} of {} exceeds buying power of ${}", money_pretty(amt), ticker, money_pretty(obj.bp));
+                } else {
+                    getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
+                    obj.position.qty = obj.new_qty; // so format_position is up to date
+                    msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
+                        amt, ticker, qty, price,
+                        &obj.position.format_position(&envstruct, id)?);
+                    envstruct.entity_balance_set(id, obj.new_balance)?;
+                }
             }
-            envstruct.entity_balance_set(id, obj.new_balance)?;
             msg
         };
         Ok(Self{msg, tradesell:obj})
