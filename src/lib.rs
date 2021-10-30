@@ -1558,7 +1558,7 @@ impl<'a> TradeSell<'a> {
             roundqty(match trade.amt {
                 Some(amt) => IF!(trade.is_dollars, amt/price, amt), // Convert dollars to shares
                 None =>
-                    if position.qty == 0.0 {
+                    if position.qty <= 0.0 {
                         trade.cmdstruct.buying_power().await? / price // Short entire bying power
                     } else {
                         position.qty // no amount set, so set to entire qty
@@ -1619,10 +1619,10 @@ impl<'a> ExecuteSell<'a> {
             let price = obj.price;
 
             let mut msg = IF!(obj.short, format!("*Short:*"), format!("*Sold:*"));
-            sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
 
             let new_qty = obj.new_qty;
             if new_qty == 0.0 {
+                sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
                 getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
                 msg += &obj.position.format_position(&envstruct, id)?;
             } else if obj.position.qty == 0.0 {
@@ -1630,6 +1630,7 @@ impl<'a> ExecuteSell<'a> {
                 if obj.bp < amt {
                     msg = format!("${} of {} exceeds buying power of ${}", money_pretty(amt), ticker, money_pretty(obj.bp));
                 } else {
+                    sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
                     getsql!(dbconn, "INSERT INTO positions VALUES (?, ?, ?, ?)", id, &**ticker, obj.new_qty, obj.price)?;
                     obj.position.qty = obj.new_qty; // so format_position is up to date
                     obj.position.price = obj.price; // Update previous monad so position is printed correctly
@@ -1643,8 +1644,11 @@ impl<'a> ExecuteSell<'a> {
                 if obj.bp < amt {
                     msg = format!("${} of {} exceeds buying power of ${}", money_pretty(amt), ticker, money_pretty(obj.bp));
                 } else {
-                    getsql!(dbconn, "UPDATE positions SET qty=? WHERE id=? AND ticker=?", new_qty, id, &**ticker)?;
+                    sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
+                    let new_basis = (amt + -obj.position.qty * obj.position.price) / -new_qty;
+                    getsql!(dbconn, "UPDATE positions SET qty=?, price=? WHERE id=? AND ticker=?", new_qty, new_basis, id, &**ticker)?;
                     obj.position.qty = obj.new_qty; // so format_position is up to date
+                    obj.position.price = new_basis;
                     msg += &format!("  `{:.2}``{}` *{}*_@{}_{}",
                         amt, ticker, qty, price,
                         &obj.position.format_position(&envstruct, id)?);
