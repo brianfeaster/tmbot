@@ -84,7 +84,7 @@ pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
+pub async fn get_ticker_raw_1 (ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
@@ -108,5 +108,28 @@ pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
         Err("Unable to find json string in HTML.")?
     }
     bytes2json(&cap.unwrap()[1].as_bytes())
+} // get_ticker_raw_1
 
-} // get_ticker_quote
+pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
+    info!("get_ticker_quote <- {}", ticker);
+    let body =
+        Client::builder()
+        .connector( Connector::new()
+                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
+                    .timeout( std::time::Duration::new(90,0) )
+                    .finish() )
+        .finish() // -> Client
+        .get("https://query1.finance.yahoo.com/v7/finance/quote".to_string())
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/95.0.4638.69 Safari/537.36")
+        .header("Referer", "https://finance.yahoo.com/__finStreamer-worker.js")
+        .timeout(std::time::Duration::new(90,0))
+        .query(&[["symbols", ticker]]).unwrap()
+        .send()
+        .await?
+        .body().limit(1_000_000).await;
+
+    let body = body.or_else( |r| Err(format!("get_ticker_raw for {:?}  {:?}", ticker, r)) )?;
+    let jsonstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_raw http body2str {:?} {:?}"#, ticker, r)) )?;
+
+    bytes2json(jsonstr.as_bytes())
+} // get_ticker_raw

@@ -12,9 +12,9 @@ pub struct MsgCmd<'a> {
     pub at: i64,
     pub id_level: i64,
     pub at_level: i64,
-    pub dm_id: Option<i64>, // Unoverideable un-overridable destination chat_id
+    pub dm_id: Option<i64>, // Non-overridable destination chat_id
     pub markdown: bool,
-    pub msg_id: Option<i64>, // message_id to send as, set on return to message_id written
+    pub msg_id: Option<i64>, // message_id to update instead of sending a new message, set to the message_id actually written
     pub msg: &'a str
 }
 
@@ -25,10 +25,6 @@ impl<'a> MsgCmd<'a> {
     }
     pub fn dm(mut self, id:i64) -> Self {
         self.dm_id = Some(id);
-        self
-    }
-    pub fn _message_id(mut self, id:i64) -> Self {
-        self.msg_id = Some(id);
         self
     }
 }
@@ -58,7 +54,7 @@ impl Telegram {
 }
 
 impl Telegram {
-    pub async fn send_msg<'a> (&self, mut mc: MsgCmd<'a>) -> Bresult<i64> {
+    pub async fn send_msg<'a> (&self, mc: MsgCmd<'a>) -> Bresult<i64> {
         info!("Telegram {:?}", mc);
         let chat_id =
             if let Some(dm_id) = mc.dm_id {
@@ -125,10 +121,8 @@ impl Telegram {
         let body = send_client_request.body().await;
         ginfod!("Telegram => \x1b[36m", body);
 
-        // Return the message id so it may be edited/updated
-        let message_id = getin_i64(&bytes2json(&body?)?, &["result", "message_id"])?;
-        mc.msg_id = Some(message_id);
-        Ok(message_id)
+        // Return the MsgCmd
+        Ok(getin_i64( &bytes2json(&body?)?, &["result", "message_id"] )?)
     }
 }
 

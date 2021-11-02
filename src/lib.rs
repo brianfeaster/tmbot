@@ -428,35 +428,21 @@ pub struct CmdStruct { // Represents in incoming Telegram message and session/se
     id_level: i64, // Echo level [0,1,2] for each id.  Higher can't write to lower.
     at_level: i64,
     // Telegram outgoing response message details
-    msg_id: Option<i64>, // previous message_id (for response updating/editing)
+    msg_id: Option<i64>, // previous message_id (for previous message updating/editing)
     msg: String
 }
 
 impl<'a> From<&'a CmdStruct> for MsgCmd<'a> {
-    fn from (cmdstruct:&'a CmdStruct) -> MsgCmd<'a> {
+    fn from (cmdstruct: &'a CmdStruct) -> MsgCmd<'a> {
         MsgCmd {
             id:       cmdstruct.id,
             at:       cmdstruct.at,
             id_level: cmdstruct.id_level,
             at_level: cmdstruct.at_level,
-            dm_id:  None,
+            dm_id:    None,
             markdown: false,
-            msg_id: cmdstruct.msg_id,
-            msg: &cmdstruct.msg
-        }
-    }
-}
-impl<'a> From<&'a mut CmdStruct> for MsgCmd<'a> {
-    fn from (cmdstruct:&'a mut CmdStruct) -> MsgCmd<'a> {
-        MsgCmd{
-            id:       cmdstruct.id,
-            at:       cmdstruct.at,
-            id_level: cmdstruct.id_level,
-            at_level: cmdstruct.at_level,
-            dm_id:  None,
-            markdown: false,
-            msg_id: cmdstruct.msg_id,
-            msg: &cmdstruct.msg
+            msg_id:   cmdstruct.msg_id,
+            msg:      &cmdstruct.msg
         }
     }
 }
@@ -511,23 +497,31 @@ impl CmdStruct {
         self.msg.push_str(s);
         self
     }
-    async fn send_msg (&self) -> Bresult<i64> {
-        self.telegram.send_msg(self.into()).await
+    async fn send_msg (&mut self) -> Bresult<()> {
+        self.msg_id = Some(self.telegram.send_msg( (&*self).into() ).await?);
+        Ok(())
     }
-    async fn send_msg_id (&self) -> Bresult<i64> {
-        self.telegram.send_msg( MsgCmd::from(self).dm(self.id) ).await
+    async fn send_msg_id (&mut self) -> Bresult<()> {
+        self.msg_id = Some(self.telegram.send_msg( MsgCmd::from(&*self).dm(self.id) ).await?);
+        Ok(())
     }
-    async fn send_markdown (&self) -> Bresult<i64> {
-        self.telegram.send_msg( MsgCmd::from(self).markdown() ).await
+    async fn send_markdown (&mut self) -> Bresult<()> {
+        self.msg_id = Some(self.telegram.send_msg( MsgCmd::from(&*self).markdown() ).await?);
+        Ok(())
     }
-    async fn send_id_markdown (&self) -> Bresult<i64> {
-        self.telegram.send_msg( MsgCmd::from(self).dm(self.id).markdown() ).await
+    async fn send_id_markdown (&mut self) -> Bresult<()> {
+        self.msg_id = Some(self.telegram.send_msg( MsgCmd::from(&*self).dm(self.id).markdown() ).await?);
+        Ok(())
     }
-    async fn _send_dm_markdown (&self, id:i64) -> Bresult<i64> {
-        self.telegram.send_msg( MsgCmd::from(self).dm(id).markdown() ).await
+    async fn _send_dm_markdown (&mut self, id:i64) -> Bresult<()> {
+        self.msg_id = Some(self.telegram.send_msg( MsgCmd::from(&*self).dm(id).markdown() ).await?);
+        Ok(())
     }
-    // Buying power is summed position values plus double the bank balance (which
-    // could be negative).  Invariant:  -2*bankBalance < SummedPositionsValue
+    // Buying power is summed long positions (positive) plus double the bank
+    // balance (pos or neg) plus 3 times summed short positions (negative).
+    // Buying long decreased cash while selling short increases cash.
+    // Thus the invariant/buying-power is (otherwise the margin is exceeded/called):
+    // 0 < 3*ShortPositions + LongPositions + 2*CashBalance
     async fn buying_power (&mut self) -> Bresult<f64> {
         let positions = Position::get_users_positions(self)?;
         let mut long = 0.0;
@@ -582,9 +576,82 @@ pub struct Quote {
     pub updated: bool // Was this generated or pulled from cache
 }
 
+
 impl Quote { // Query internet for ticker details
     async fn new_market_quote (env:Env, ticker: &str) -> Bresult<Self> {
         let json = srvs::get_ticker_raw(ticker).await?;
+        let details =
+            getin(&json, &["quoteResponse", "result"])
+            .get(0)
+            .ok_or_else( || format!("quoteResponse.Result.0 failed on json response: {}", json) )?;
+        info!("{}", details);
+
+        let title_raw =
+            &getin_str(&details, &["longName"])
+            .or_else( |_e| getin_str(&details, &["shortName"]) )?;
+        let mut title :&str = title_raw;
+        let title = loop { // Repeatedly strip title of useless things
+            let title_new = title
+                .trim_end_matches(".")
+                .trim_end_matches(" ")
+                .trim_end_matches(",")
+                .trim_end_matches("Inc")
+                .trim_end_matches("Corp")
+                .trim_end_matches("Corporation")
+                .trim_end_matches("Holdings")
+                .trim_end_matches("Brands")
+                .trim_end_matches("Company")
+                .trim_end_matches("USD");
+            if title == title_new { break title_new.to_string() }
+            title = title_new;
+        };
+        info!("cleane title: '{}' => '{}'", title_raw, &title);
+
+        let exchange = getin_str(&details, &["exchange"])?;
+
+        let hours = getin(&details, &["volume24Hr"]);
+        let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
+
+        let previous_close   = getin_f64(&details, &["regularMarketPreviousClose"]).unwrap_or(0.0);
+        let pre_market_price = getin_f64(&details, &["preMarketPrice"]).unwrap_or(0.0);
+        let reg_market_price = getin_f64(&details, &["regularMarketPrice"]).unwrap_or(0.0);
+        let pst_market_price = getin_f64(&details, &["postMarketPrice"]).unwrap_or(0.0);
+
+        // This array will be sorted on market time for the latest market data.  Prices
+        // are relative to the previous day's market close, including pre and post markets,
+        // because most online charts I've come across ignore previous day's after market
+        // closing price for next day deltas.  Non-regular markets are basically forgotten
+        // after the fact.
+        let mut details = [
+            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["preMarketTime"]).unwrap_or(0)),
+            (reg_market_price, previous_close,   "r", getin_i64(&details, &["regularMarketTime"]).unwrap_or(0)),
+            (pst_market_price, previous_close,   "a", getin_i64(&details, &["postMarketTime"]).unwrap_or(0))];
+
+        /* // Log all prices for sysadmin requires "use ::datetime::ISO"
+        use ::datetime::ISO;
+        error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
+            ticker, title, exchange, hours,
+            LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
+            LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
+            LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2); */
+
+        details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
+
+        let price = details[0].0;
+        let last = details[0].1;
+        Ok(Quote{
+            env,
+            ticker:  ticker.to_string(),
+            price, last,
+            amount:  roundqty(price-last),
+            percent: percentify(last,price),
+            market:  details[0].2.to_string(),
+            hours, exchange, title,
+            updated: true})
+    } // Quote::new_market_quote
+
+    async fn _new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
+        let json = srvs::get_ticker_raw_1(ticker).await?;
 
         let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
         if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
@@ -652,7 +719,7 @@ impl Quote { // Query internet for ticker details
             market:  details[0].2.to_string(),
             hours, exchange, title,
             updated: true})
-    } // Quote::new_market_quote
+    } // Quote::_new_market_quote_1
 }
 
 impl Quote {// Query local cache or internet for ticker details
@@ -801,23 +868,6 @@ impl Position {
 }
 
 impl Position {
-    // Return vector instead of option (maybe support more of the same position?)
-    fn get_position (cmdstruct:&CmdStruct, id: i64, ticker: &str) -> Bresult<Vec<Position>> {
-        let dbconn = &getenvstruct!(cmdstruct).dbconn;
-        Ok(getsql!(dbconn, "SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?
-        .iter()
-        .map( |pos|
-            Position {
-                ticker: ticker.to_string(),
-                qty:    pos.get_f64("qty").unwrap(),
-                price:  pos.get_f64("price").unwrap(),
-                quote:  None
-            } )
-        .collect())
-    }
-}
-
-impl Position {
     fn get_users_positions (cmdstruct: &mut CmdStruct) -> Bresult<Vec<Position>> {
         let id = cmdstruct.id;
         let dbconn = &getenvstruct!(cmdstruct).dbconn; 
@@ -836,8 +886,22 @@ impl Position {
 }
 
 impl Position {
+    // Return vector instead of option (maybe support more of the same position?)
+    fn cached_position (cmdstruct:&CmdStruct, id: i64, ticker: &str) -> Bresult<Vec<Position>> {
+        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        Ok(getsql!(dbconn, "SELECT qty,price FROM positions WHERE id=? AND ticker=?", id, ticker )?
+        .iter()
+        .map( |pos|
+            Position {
+                ticker: ticker.to_string(),
+                qty:    pos.get_f64("qty").unwrap(),
+                price:  pos.get_f64("price").unwrap(),
+                quote:  None
+            } )
+        .collect())
+    }
     async fn query_position(cmdstruct:&CmdStruct, id:i64, ticker:&str) -> Bresult<Position> {
-        let mut vec = Position::get_position(cmdstruct, id, ticker)?;
+        let mut vec = Position::cached_position(cmdstruct, id, ticker)?;
         let mut pos = // Consider the quote or a 0 quantity quote
             match vec.len() {
                 0 => Position { ticker: ticker.to_string(), qty: 0.0, price: 0.0, quote: None },
@@ -1216,7 +1280,7 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
             Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$")?)?;
     if tickers.is_empty() { return Ok("SKIP") }
 
-    cmdstruct.msg_id = Some(cmdstruct.push_msg("…").send_msg().await?);
+    cmdstruct.push_msg("…").send_msg().await?;
     cmdstruct.set_msg("");
 
     let mut found_tickers = false;
@@ -1247,7 +1311,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let dosort = !caps[1].is_none();
     let positions = Position::get_users_positions(cmdstruct)?;
 
-    cmdstruct.msg_id = Some(cmdstruct.push_msg("…").send_msg().await?);
+    cmdstruct.push_msg("…").send_msg().await?;
     cmdstruct.set_msg("");
 
     let mut long = 0.0;
@@ -1295,7 +1359,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     if regex_to_vec(r"/yolo", &cmdstruct.message)?.is_empty() { return Ok("SKIP"); }
 
-    cmdstruct.msg_id = Some(cmdstruct.push_msg("working...").send_msg().await?);
+    cmdstruct.push_msg("working...").send_msg().await?;
 
     let rows = {
         let envstruct = getenvstruct!(cmdstruct);
@@ -1554,12 +1618,14 @@ impl<'a> TradeSell<'a> {
             Err("OTC / PinkSheet Verboten Stonken")?
         }
 
+        let bp = trade.cmdstruct.buying_power().await?;
+
         let mut qty =
             roundqty(match trade.amt {
                 Some(amt) => IF!(trade.is_dollars, amt/price, amt), // Convert dollars to shares
                 None =>
                     if position.qty <= 0.0 {
-                        trade.cmdstruct.buying_power().await? / price // Short entire bying power
+                        bp / price // Short entire bying power
                     } else {
                         position.qty // no amount set, so set to entire qty
                     }
@@ -1591,7 +1657,6 @@ impl<'a> TradeSell<'a> {
         }
 
         let new_qty = roundqty(position.qty-qty);
-        let bp = trade.cmdstruct.buying_power().await?;
 
         Ok( Self{ position, short, qty, price, bank_balance, new_balance, new_qty, trade, bp} )
     }
@@ -1625,6 +1690,7 @@ impl<'a> ExecuteSell<'a> {
                 sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
                 getsql!(dbconn, "DELETE FROM positions WHERE id=? AND ticker=?", id, &**ticker)?;
                 msg += &obj.position.format_position(&envstruct, id)?;
+                envstruct.entity_balance_set(id, obj.new_balance)?;
             } else if obj.position.qty == 0.0 {
                 let amt = qty*price;
                 if obj.bp < amt {
@@ -1641,7 +1707,7 @@ impl<'a> ExecuteSell<'a> {
                 }
             } else {
                 let amt = qty*price;
-                if obj.bp < amt {
+                if obj.short && obj.bp < amt {
                     msg = format!("${} of {} exceeds buying power of ${}", money_pretty(amt), ticker, money_pretty(obj.bp));
                 } else {
                     sql_table_order_insert(dbconn, id, ticker, -qty, price, now)?;
@@ -2127,11 +2193,12 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-async fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<i64> {
+async fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<()> {
     cmdstruct
         .push_msg(FORMAT_STRINGS_HELP)
         .send_markdown()
-        .await
+        .await?;
+    Ok(())
 }
 
 const FORMAT_STRINGS_HELP: &str =
@@ -2230,11 +2297,8 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         &cmdstruct.message)?;
     if caps.is_empty() { return Ok("SKIP") }
 
-    cmdstruct.msg_id = Some(
-        cmdstruct
-            .push_msg(&format!("Rebalancing:"))
-            .send_msg()
-            .await?);
+    
+    cmdstruct.push_msg(&format!("Rebalancing:")).send_msg().await?;
 
     let percents = // HashMap of Ticker->Percent
         Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) (([0-9]*[.][0-9]+)|([0-9]+[.]?))")?
@@ -2631,10 +2695,18 @@ pub fn main_launch() -> Bresult<()> {
     }
 }
 
-fn fun (argv: std::env::Args) -> Bresult<()>  {
-    let _env = EnvStruct::new(argv)?;
+fn fun (_argv: std::env::Args) -> Bresult<()>  {
+    //let env = EnvStruct::new(argv)?;
     //info!("{:#?}", env);
-    (-6..=28).for_each( |c| info!("{}", num2heart(c)) );
-    println!("{:?}", LocalDateTime::from_instant(Instant::now()));
-    Ok(())
+    //(-6..=28).for_each( |c| info!("{}", num2heart(c)) );
+    //println!("{:?}", LocalDateTime::from_instant(Instant::now()));
+    actix_web::rt::System::new("tmbot").block_on(async move {
+        let json = srvs::get_ticker_raw("AMC").await?;
+        let details =
+            getin(&json, &["quoteResponse", "result"])
+            .get(0)
+            .ok_or_else( || format!("quoteResponse.Result.0 failed on json response: {}", json) )?;
+        error!("{}", details);
+        Ok(())
+    }) // This should never return
 }
