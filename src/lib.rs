@@ -610,7 +610,7 @@ impl Quote { // Query internet for ticker details
         let exchange = getin_str(&details, &["exchange"])?;
 
         let hours = getin(&details, &["volume24Hr"]);
-        let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
+        let hours :i64 = if !hours.is_null() { 24 } else { 16 };
 
         let previous_close   = getin_f64(&details, &["regularMarketPreviousClose"]).unwrap_or(0.0);
         let pre_market_price = getin_f64(&details, &["preMarketPrice"]).unwrap_or(0.0);
@@ -650,7 +650,7 @@ impl Quote { // Query internet for ticker details
             updated: true})
     } // Quote::new_market_quote
 
-    async fn _new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
+    async fn new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
         let json = srvs::get_ticker_raw_1(ticker).await?;
 
         let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
@@ -719,7 +719,7 @@ impl Quote { // Query internet for ticker details
             market:  details[0].2.to_string(),
             hours, exchange, title,
             updated: true})
-    } // Quote::_new_market_quote_1
+    } // Quote::new_market_quote_1
 }
 
 impl Quote {// Query local cache or internet for ticker details
@@ -2695,18 +2695,14 @@ pub fn main_launch() -> Bresult<()> {
     }
 }
 
-fn fun (_argv: std::env::Args) -> Bresult<()>  {
-    //let env = EnvStruct::new(argv)?;
-    //info!("{:#?}", env);
+fn fun (argv: std::env::Args) -> Bresult<()>  {
+    let env = EnvStruct::new(argv)?;
+    info!("{:#?}", env);
     //(-6..=28).for_each( |c| info!("{}", num2heart(c)) );
     //println!("{:?}", LocalDateTime::from_instant(Instant::now()));
     actix_web::rt::System::new("tmbot").block_on(async move {
-        let json = srvs::get_ticker_raw("AMC").await?;
-        let details =
-            getin(&json, &["quoteResponse", "result"])
-            .get(0)
-            .ok_or_else( || format!("quoteResponse.Result.0 failed on json response: {}", json) )?;
-        error!("{}", details);
+        let q = Quote::new_market_quote_1(env, "AMC").await?;
+        warn!("{:?}", q);
         Ok(())
     }) // This should never return
 }
