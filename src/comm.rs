@@ -6,27 +6,19 @@ use ::openssl::ssl::{SslConnector, SslMethod};
 use ::actix_web::{ client::{Client, Connector} };
 
 
+pub trait MsgDetails {
+    fn at (&self) -> i64;
+    fn markdown (&self) -> bool;
+    fn msg_id (&self) -> Option<i64>;
+    fn msg (&self) -> &str;
+}
+
 #[derive(Debug)]
 pub struct MsgCmd<'a> {
-    pub id: i64,
     pub at: i64,
-    pub id_level: i64,
-    pub at_level: i64,
-    pub dm_id: Option<i64>, // Non-overridable destination chat_id
     pub markdown: bool,
     pub msg_id: Option<i64>, // message_id to update instead of sending a new message, set to the message_id actually written
     pub msg: &'a str
-}
-
-impl<'a> MsgCmd<'a> {
-    pub fn markdown(mut self) -> Self {
-        self.markdown = true;
-        self
-    }
-    pub fn dm(mut self, id:i64) -> Self {
-        self.dm_id = Some(id);
-        self
-    }
 }
 
 ////////////////////////////////////////
@@ -41,7 +33,7 @@ impl Telegram {
         let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
         ssl_connector_builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
         ssl_connector_builder.set_certificate_chain_file("cert.pem")?;
-        let client = 
+        let client =
             Client::builder()
                 .connector(
                     Connector::new()
@@ -54,16 +46,15 @@ impl Telegram {
 }
 
 impl Telegram {
-    pub async fn send_msg<'a> (&self, mc: MsgCmd<'a>) -> Bresult<i64> {
+    pub async fn send_msg<'a> (&self, obj: &'a impl MsgDetails) -> Bresult<MsgCmd<'a>> {
+        let mut mc = MsgCmd {
+            at:       obj.at(),
+            markdown: obj.markdown(),
+            msg_id:   obj.msg_id(),
+            msg:      obj.msg()
+        };
         info!("Telegram {:?}", mc);
-        let chat_id =
-            if let Some(dm_id) = mc.dm_id {
-                dm_id // Forced message to id
-            } else if mc.id_level <= mc.at_level {
-                mc.at // Message the channel if sender has better/equal privs than channel
-            } else {
-                mc.id // Message the "id" channel
-            }.to_string();
+        let chat_id = mc.at.to_string();
         let text = if mc.markdown {
             mc.msg // Quick and dirty uni/url decode
             .replacen("%20", " ", 10000)
@@ -101,17 +92,17 @@ impl Telegram {
 
         if mc.markdown { query.push(["parse_mode", "MarkdownV2"]) }
 
-        info!("Telegram <= \x1b[1;36m{:?}", query);
-
         let theurl =
             format!("{}/{}",
                 self.url_api,
                 if mc.msg_id.is_some() { "editmessagetext" } else { "sendmessage"} );
 
+        info!("Telegram <= \x1b[1;36m{:?} {:?}", theurl, query);
+
         let mut send_client_request =
             self.client
                 .get(theurl)
-                .header("User-Agent", "Actix-web")
+                .header("User-Agent", "Actix-web TMBot/0.1.0")
                 .timeout(Duration::new(90,0))
                 .query(&query)
                 .unwrap()
@@ -121,8 +112,11 @@ impl Telegram {
         let body = send_client_request.body().await;
         ginfod!("Telegram => \x1b[36m", body);
 
-        // Return the MsgCmd
-        Ok(getin_i64( &bytes2json(&body?)?, &["result", "message_id"] )?)
+        // Return the new message's id
+        mc.msg_id = Some( getin_i64(
+            &bytes2json(&body?)?,
+            &["result", "message_id"])? );
+        Ok(mc) 
     }
 }
 
