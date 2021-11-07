@@ -76,6 +76,7 @@ impl Telegram {
             .replacen("#", "\\#", 10000)
             .replacen("'", "\\'", 10000)
             .replacen("!", "\\!", 10000)
+            .replacen("|", "\\|", 10000)
         } else { mc.msg.to_string() };
 
         let mut query = vec![

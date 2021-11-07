@@ -2551,6 +2551,39 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
+
+    let caps = regex_to_vec(r"(?i)^=([-+*/0-9. ]+)",&cmdstruct.message)?;
+    if caps.is_empty() { return Ok("SKIP") }
+
+    warn!("{:?}", caps);
+    cmdstruct.push_msg(&format!("...")).send_msg().await?;
+
+    let mut stack = Vec::new();
+
+    for caps in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([-+*/])")?.captures_iter(&caps.as_string(1)?) {
+        warn!("{:?}", caps);
+        if let Some(num) = caps.get(1) { stack.push(num.as_str().parse::<f64>()?); }
+        if let Some(op) = caps.get(4) {
+            let b = stack.pop().ok_or("stack empty")?;
+            let a = stack.pop().ok_or("stack empty")?;
+            match op.as_str() {
+                "+" => stack.push(a+b),
+                "-" => stack.push(a-b),
+                "*" => stack.push(a*b),
+                "/" => stack.push(a/b),
+                _ => ()
+            };
+        }
+    }
+    cmdstruct
+        .set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") )
+        .edit_msg()
+        .await?;
+
+    Ok("COMPLETED.")
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
@@ -2584,6 +2617,7 @@ async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     glogd!("do_orders =>",     do_orders(cmdstruct).await);
     glogd!("do_fmt =>",        do_fmt(cmdstruct).await);
     glogd!("do_rebalance =>",  do_rebalance(cmdstruct).await);
+    glogd!("do_rpn =>",        do_rpn(cmdstruct).await);
     Ok(())
 }
 
