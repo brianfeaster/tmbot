@@ -2552,19 +2552,21 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 }
 
 async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-
-    let caps = regex_to_vec(r"(?i)^=([-+*/0-9. ]+)",&cmdstruct.message)?;
-    if caps.is_empty() { return Ok("SKIP") }
-
-    warn!("{:?}", caps);
-    cmdstruct.push_msg(&format!("...")).send_msg().await?;
-
+    let expr = regex_to_vec(r"(?i)^=([-+*/0-9. ]+)", &cmdstruct.message)?;
+    if expr.is_empty() { return Ok("SKIP") }
     let mut stack = Vec::new();
+    for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([-+*/])")?.captures_iter(&expr.as_string(1)?) {
+        if let Some(num) = toks.get(1) { // Push numbers
+            stack.push(num.as_str().parse::<f64>()?)
+        } else if let Some(op) = toks.get(4) { // Compute a mathematical operation on top most numbers in stack
+            cmdstruct
+                .set_msg(&(
+                    stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ")
+                    + " "
+                    + op.as_str()))
+                .edit_msg().await?;
 
-    for caps in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([-+*/])")?.captures_iter(&caps.as_string(1)?) {
-        warn!("{:?}", caps);
-        if let Some(num) = caps.get(1) { stack.push(num.as_str().parse::<f64>()?); }
-        if let Some(op) = caps.get(4) {
+            if stack.len() < 2 { cmdstruct.push_msg(" stack is lacking").edit_msg().await? }
             let b = stack.pop().ok_or("stack empty")?;
             let a = stack.pop().ok_or("stack empty")?;
             match op.as_str() {
@@ -2573,13 +2575,10 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 "*" => stack.push(a*b),
                 "/" => stack.push(a/b),
                 _ => ()
-            };
+            }
         }
+        cmdstruct.set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") ).edit_msg().await?;
     }
-    cmdstruct
-        .set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") )
-        .edit_msg()
-        .await?;
 
     Ok("COMPLETED.")
 }
