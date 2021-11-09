@@ -10,7 +10,9 @@ log = "*"
 env_logger = "*"
 regex = "*"
 tokio = { version = "0.2", features = ["full"] }
+actix = "*"
 actix-web = { version = "*", features = ["openssl"] }
+actix-web-actors = "*"
 openssl = { version = "0.10" }
 serde_json = "*"
 serde_urlencoded = "*"

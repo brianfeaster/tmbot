@@ -16,8 +16,10 @@ use ::regex::{Regex};
 use ::datetime::{
     Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::{*} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
+use ::actix::{Actor, StreamHandler};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
-    client::{Client, Connector} };
+    client::{Client, Connector} }; // Error
+use ::actix_web_actors::ws;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1397,9 +1399,6 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     // Update all user-positioned tickers
     for row in rows {
         let ticker = row.get_string("ticker")?;
-        //working_message.push_str(ticker);
-        //working_message.push_str("...");
-        //edit_edit_msg(cmd, message_id, &working_message).await?;
         info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker).await?);
     }
 
@@ -2477,7 +2476,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             &res.iter()
             .map( |row| {
                 let time = row.get_i64("time").unwrap();
-                format!("`{}Z` `{}` `{}` `{}`",
+                format!("`{}Z {}` `{}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
                     row.get_string("days").unwrap(),
                     row.get_string("name").unwrap(),
@@ -2497,7 +2496,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         let dbconn = &envstruct.dbconn;
 
         let duration_caps =
-            regex_to_vec(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d+)", caps.as_str(4).unwrap_or(""))?;
+            regex_to_vec(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d*)", caps.as_str(4).unwrap_or(""))?;
         //duration_caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
         let neg = IF!(duration_caps.as_str(1).is_ok(),-1,1);
         let hours = duration_caps.as_i64(2).unwrap_or(0);
@@ -2541,7 +2540,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     now, id, at, time, days, command);
                 glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?, ?)",
                     id, at, time, days, command));
-                format!("Scheduled: `{}Z` `{}` `{}`",
+                format!("Scheduled: `{}Z {}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
                     days,
                     command)
@@ -2757,6 +2756,91 @@ pub fn launch_server(env:Env) -> Bresult<()> {
     })) // This should never return
 }
 
+////////////////////////////////////////
+/// 
+fn web_yolo (env: Env) -> Bresult<String> {
+    let envstruct = env.lock().unwrap();
+    let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
+               FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
+                     FROM positions \
+                     LEFT JOIN stonks ON stonks.ticker = positions.ticker \
+                     WHERE positions.ticker NOT LIKE '0%' \
+                       AND positions.ticker NOT LIKE '1%' \
+                       AND positions.ticker NOT LIKE '2%' \
+                       AND positions.ticker NOT LIKE '3%' \
+                       AND positions.ticker NOT LIKE '4%' \
+                       AND positions.ticker NOT LIKE '5%' \
+                       AND positions.ticker NOT LIKE '6%' \
+                       AND positions.ticker NOT LIKE '7%' \
+                       AND positions.ticker NOT LIKE '8%' \
+                       AND positions.ticker NOT LIKE '9%' \
+                       AND positions.ticker NOT LIKE '@%' \
+                     GROUP BY id) \
+               NATURAL JOIN accounts \
+               NATURAL JOIN entitys \
+               ORDER BY yolo DESC";
+
+    let sql_results = {
+        getsql!(&envstruct.dbconn, &sql)?
+    };
+
+    // Build and send response string
+
+    let mut msg = "*YOLOlians*".to_string();
+    for row in sql_results {
+        msg.push_str( &format!(" `{:.2}@{}`",
+            row.get_f64("yolo")?,
+            row.get_string("name")?) );
+    }
+    Ok(msg)
+}
+/// Define HTTP actor
+
+struct MyWs { env: Env }
+
+impl Actor for MyWs { type Context = ws::WebsocketContext<Self>; }
+
+/// Handler for ws::Message message
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
+    fn handle(
+        &mut self,
+        msg: Result<ws::Message, ws::ProtocolError>,
+        ctx: &mut Self::Context,
+    ) {
+        match msg {
+            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
+            Ok(ws::Message::Text(_text)) => ctx.text(web_yolo(self.env.clone()).unwrap_or("error".into())),
+            Ok(ws::Message::Binary(_bin)) => ctx.binary("binary woof"),
+            _ => (),
+        }
+    }
+}
+
+async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
+    let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
+    let resp = ws::start(MyWs {env}, &req, stream);
+    println!("ws_handler: resp => {:?}", resp);
+    resp
+}
+
+pub fn main_websocket(env:Env) -> Bresult<()> {
+    std::thread::spawn( move || {
+        let srv =
+            HttpServer::new(
+                move || App::new()
+                    .data(env.clone())
+                    .route("*", web::get().to(ws_handler)))
+            .bind("0.0.0.0:7190").unwrap();
+        let res = actix_web::rt::System::new("tmbot").block_on(async move {
+            println!("launch() => {:?}", srv.run().await)
+        }); // This should never return
+        error!("main_websocket => {:?}", res);
+    });
+    Ok(())
+}
+
+////////////////////////////////////////
+
 pub fn main_launch() -> Bresult<()> {
     let argv = env::args();
     if 1 == argv.len() {
@@ -2766,6 +2850,7 @@ pub fn main_launch() -> Bresult<()> {
     if !true { fun(argv) } // Hacks and other test code
     else {
         let env = EnvStruct::new(argv)?;
+        glogd!("websocket() =>", main_websocket(env.clone()));
         glogd!("scheduler() =>", launch_scheduler(env.clone()));
         launch_server(env)
     }
@@ -2773,6 +2858,8 @@ pub fn main_launch() -> Bresult<()> {
 
 fn fun (argv: std::env::Args) -> Bresult<()>  {
     let env = EnvStruct::new(argv)?;
+    let dt = LocalTime::from_seconds_since_midnight(75000);
     info!("{:#?}", env);
+    info!("{:#?}", dt);
     Ok(())
 }
