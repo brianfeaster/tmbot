@@ -14,8 +14,7 @@ use ::std::{
 use ::log::*;
 use ::regex::{Regex};
 use ::datetime::{
-    Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece,
-    Weekday::{Sunday, Saturday} };
+    Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::{*} };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
 use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
     client::{Client, Connector} };
@@ -296,6 +295,7 @@ fn create_schema() -> Bresult<()> {
             id   INTEGER NOT NULL,
             at   INTEGER NOT NULL,
             time INTEGER NOT NULL,
+            days    TEXT NOT NULL,
             cmd     TEXT NOT NULL);")?;
 
     getsql!(&conn,"
@@ -666,8 +666,8 @@ impl Quote { // Query internet for ticker details
             updated: true})
     } // Quote::new_market_quote
 
-    async fn new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
-        let json = srvs::get_ticker_raw_1(ticker).await?;
+    async fn _new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
+        let json = srvs::_get_ticker_raw_1(ticker).await?;
 
         let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
         if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
@@ -735,7 +735,7 @@ impl Quote { // Query internet for ticker details
             market:  details[0].2.to_string(),
             hours, exchange, title,
             updated: true})
-    } // Quote::new_market_quote_1
+    } // Quote::_new_market_quote_1
 }
 
 impl Quote {// Query local cache or internet for ticker details
@@ -1075,7 +1075,7 @@ r#"`          ™Bot Commands          `
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`
 `/schedule [time]` `List jobs, delete job at time`
-`/schedule [ISO-8601] [1h][2m][3][*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, * repeat daily`"#, delay);
+`/schedule [ISO-8601] | [1h][2m][3][mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`"#, delay);
     cmdstruct.markdown().push_msg(&msg).send_msg().await?;
     Ok("COMPLETED.")
 }
@@ -2440,26 +2440,21 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         regex_to_vec(
             r"(?xi)^/schedule
             (
-                \ +
                 (?: ### Fixed GMT
+                    \ +
                     ( \d+ - \d{1,2} - \d{1,2} T )?
                     ( \d{1,2} : \d{1,2} : \d{1,2} )
                     (?: Z | [-+]0{1,4})
                 )?
                 (?: ### Duration
-                    \ *
-                    (-)?
-                    (?: (\d+)h)?
-                    (?: (\d+)m)?
-                    (\d+)?
-                    ([*])?
+                    \ + (-?  \d+ (?: h (?: \d+ m)? | m)? \d*)
+                )?
+                (?: ### days
+                    \ + ([*]|[mtwhfsu]+)
                 )?
                 #### Command
-                (?:
-                    \ *
-                    (.+)
-                )?
-            )?",
+                (?: \ + (.+))?
+            )",
             &cmdstruct.message )?;
     //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
     if caps.is_empty() { return Ok("SKIP") }
@@ -2467,10 +2462,10 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     cmdstruct.markdown();
 
     // "/schedule" Show all jobs
-    if caps.get(1).unwrap().is_none() {
+    if caps.as_str(1)?.is_empty() {
         let mut res = {
             let dbconn = &getenvstruct!(cmdstruct).dbconn;
-            getsql!(dbconn, "SELECT name, time, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
+            getsql!(dbconn, "SELECT name, time, days, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
         };
         if res.is_empty() {
             cmdstruct.push_msg("No Scheduled Jobs").send_msg().await?;
@@ -2482,8 +2477,9 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             &res.iter()
             .map( |row| {
                 let time = row.get_i64("time").unwrap();
-                format!("`{}Z` `{}` `{}`",
+                format!("`{}Z` `{}` `{}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
+                    row.get_string("days").unwrap(),
                     row.get_string("name").unwrap(),
                     row.get_string("cmd").unwrap())
             } )
@@ -2500,7 +2496,14 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         let envstruct = &getenvstruct!(cmdstruct);
         let dbconn = &envstruct.dbconn;
 
-        let mut daily = caps.as_str(8).map_or(false,|_|true);
+        let duration_caps =
+            regex_to_vec(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d+)", caps.as_str(4).unwrap_or(""))?;
+        //duration_caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
+        let neg = IF!(duration_caps.as_str(1).is_ok(),-1,1);
+        let hours = duration_caps.as_i64(2).unwrap_or(0);
+        let mins = duration_caps.as_i64(3).unwrap_or(0);
+        let secs = duration_caps.as_i64(4).unwrap_or(0);
+
         let mut time =
             if let Ok(datestr) = caps.as_str(2) {
                 LocalDateTime
@@ -2508,40 +2511,51 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     .to_instant()
                     .seconds()
             } else if let Ok(timestr) = caps.as_str(3) {
-                daily = true;
                 LocalTime
                     ::from_str( timestr )?
                     .to_seconds()
             } else {
                 now
             }
-            + (
-                caps.as_i64(5).unwrap_or(0) * 60 * 60
-                + caps.as_i64(6).unwrap_or(0) * 60
-                + caps.as_i64(7).unwrap_or(0)
-            ) * caps.as_str(4).map_or(1,|_|-1)
+            + neg*(hours*60*60 + mins*60 + secs)
             + 60 * 60 * envstruct.dst_hours_adjust as i64;
+        //error!("n{} h{} m{} s{} {}", neg, hours, mins, secs, time);
 
-        if daily { time = time.rem_euclid(86400)}
+        let daily = caps.as_str(5);
+        if daily.is_ok() { time = time.rem_euclid(86400)}
+
+        let mut days =
+            match daily {
+                Err(_) | Ok("*") => "",
+                Ok(days) => days
+            };
+        if 7 == days.find("m").map_or(0, |_| 1) + days.find("t").map_or(0, |_| 1)
+            + days.find("w").map_or(0, |_| 1) + days.find("h").map_or(0, |_| 1)
+            + days.find("f").map_or(0, |_| 1) + days.find("s").map_or(0, |_| 1)
+            + days.find("u").map_or(0, |_| 1)
+        { days = ""; }
 
         // Save job
-        if let Ok(command) = caps.as_str(9) {
-                info!("now:{} [id:{} at:{} time:{} cmd:{:?}]",
-                    now, id, at, time, command);
-                glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?)",
-                    id, at, time, command));
-                format!("Scheduled: `{}Z` `{}`",
+        if let Ok(command) = caps.as_str(6) {
+                info!("now:{} [id:{} at:{} time:{} days:{} cmd:{:?}]",
+                    now, id, at, time, days, command);
+                glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?, ?)",
+                    id, at, time, days, command));
+                format!("Scheduled: `{}Z` `{}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
+                    days,
                     command)
         } else { // Delete job
-            if getsql!(dbconn, "SELECT * FROM schedules WHERE time=?", time)?.len()
-                != getsql!(dbconn, "DELETE FROM schedules WHERE time=?", time)?.len()
+            if getsql!(dbconn, "SELECT * FROM schedules WHERE time=? AND days=?", time, days)?.len()
+                != getsql!(dbconn, "DELETE FROM schedules WHERE time=? AND days=?", time, days)?.len()
             {
-                format!("`{}Z` removed",
-                    if time < 86400 { time2timestr } else { time2datetimestr }(time))
+                format!("`{}Z` `{}` removed",
+                    if time < 86400 { time2timestr } else { time2datetimestr }(time),
+                    days)
             } else {
-                format!("`{}Z` not found",
-                    if time < 86400 { time2timestr } else { time2datetimestr }(time))
+                format!("`{}Z` `{}` not found",
+                    if time < 86400 { time2timestr } else { time2datetimestr }(time),
+                    days)
             }
         }
     };
@@ -2556,7 +2570,7 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     if expr.is_empty() { return Ok("SKIP") }
     let mut stack = Vec::new();
     for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([-+*/])")?.captures_iter(&expr.as_string(1)?) {
-        if let Some(num) = toks.get(1) { // Push numbers
+        if let Some(num) = toks.get(1) { // Push a number
             stack.push(num.as_str().parse::<f64>()?)
         } else if let Some(op) = toks.get(4) { // Compute a mathematical operation on top most numbers in stack
             cmdstruct
@@ -2565,7 +2579,6 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     + " "
                     + op.as_str()))
                 .edit_msg().await?;
-
             if stack.len() < 2 { cmdstruct.push_msg(" stack is lacking").edit_msg().await? }
             let b = stack.pop().ok_or("stack empty")?;
             let a = stack.pop().ok_or("stack empty")?;
@@ -2626,22 +2639,28 @@ async fn do_each_job (
     now:  i64
 ) -> Bresult<()> {
     for job in jobs {
+        let day = match LocalDateTime::at(now).weekday() {
+            Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
+            Friday => "f" , Saturday => "s", Sunday => "s" };
         let env = env.clone();
         let id = job.get_i64("id")?;
         let at = job.get_i64("at")?;
+        let days = job.get_str("days")?;
         let command = job.get_str("cmd")?;
         let mut cmdstruct =
             match CmdStruct::new_cmdstruct(env, now, id, at, at, 0, command) {
                 Ok(cmdstruct) => cmdstruct,
                 e => { glog!(e); continue }
             };
-        glog!(do_all(&mut cmdstruct).await);
+        if days.is_empty() || days.find(day).is_some() {
+            glog!(do_all(&mut cmdstruct).await);
+        }
         let time = job.get_i64("time")?;
         if 86400 <= time { // Delete the non-daily job
             let cmdstruct = &getenvstruct!(cmdstruct).dbconn;
             getsql!(
                 cmdstruct,
-                "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND cmd=?",
+                "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND days='' AND cmd=?",
                 id, at, time, command)
             .unwrap();
         }
@@ -2660,7 +2679,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
             let envstruct = env.lock().unwrap();
             let dstsecs = 60 * 60 * envstruct.dst_hours_adjust as i64;
             let res = getsqlquiet!(&envstruct.dbconn,
-                "SELECT id, at, time, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
+                "SELECT id, at, time, days, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
                 envstruct.time_scheduler+dstsecs, now+dstsecs, // one-time jobs
                 (envstruct.time_scheduler+dstsecs) % 86400, (now+dstsecs) % 86400); // daily jobs
             if res.is_err() { glog!(res); continue }
@@ -2755,11 +2774,5 @@ pub fn main_launch() -> Bresult<()> {
 fn fun (argv: std::env::Args) -> Bresult<()>  {
     let env = EnvStruct::new(argv)?;
     info!("{:#?}", env);
-    //(-6..=28).for_each( |c| info!("{}", num2heart(c)) );
-    //println!("{:?}", LocalDateTime::from_instant(Instant::now()));
-    actix_web::rt::System::new("tmbot").block_on(async move {
-        let q = Quote::new_market_quote_1(env, "AMC").await?;
-        warn!("{:?}", q);
-        Ok(())
-    }) // This should never return
+    Ok(())
 }

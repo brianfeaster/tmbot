@@ -84,7 +84,7 @@ pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub async fn get_ticker_raw_1 (ticker: &str) -> Bresult<Value> {
+pub async fn _get_ticker_raw_1 (ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
     let body =
         Client::builder()
@@ -108,7 +108,7 @@ pub async fn get_ticker_raw_1 (ticker: &str) -> Bresult<Value> {
         Err("Unable to find json string in HTML.")?
     }
     bytes2json(&cap.unwrap()[1].as_bytes())
-} // get_ticker_raw_1
+} // _get_ticker_raw_1
 
 pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
