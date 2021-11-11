@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+ <title>Stonk™BotPortal</title>
+ <link rel="stylesheet" href="index.css" type="text/css" media="screen" title="Shrewm"/>
+</head><body>
+
+<h1 class="header">
+  <img class="headerimage" src="thumbmoney.jpg"/>
+  &nbsp; Stonk™BotPortalWorld <i>0.0.0𝛼</i>
+</h1>
+
+<table border="1" class="yololians">
+<tr><td>
+  <b>YOLOLIANS</b>
+</td></tr><tr><td>
+  <pre id="yololians"></pre>
+</td></tr></table>
+
+<table border="1" class="mainbody">
+<tr><td>
+  <h2>Welcome To ™Bot's Stonk Portal World!!!</h2>
+<hr/>
+  <p>
+    Welcome to your one stop shop for all things YOLO.  Here you will enjoy your one stop shop portal to all your ™Bot trading needs and desires.  Lick.
+  </p>
+</td></tr>
+</table>
+
+<script type="text/javascript">//<![CDATA[
+"use strict"
+
+/******************************************************************************
+  Useful aliases and objects
+******************************************************************************/
+var Floor = Math.floor;
+var Ceil  = Math.ceil;
+var Pow   = Math.pow;
+var Abs   = Math.abs;
+var Rnd   = Math.random;
+var Mod   = function (n,d) { return n - d * Math.floor(n/d); }
+var CreateAppendChild = function (name, element) { return element.appendChild(document.createElement(name)); }
+var CreateInsertBefore = function (name, element) { return element.insertBefore(document.createElement(name), element.firstChild); }
+var ToggleElementDisplay = function (e1, e2) {
+  var off = e1.style.display == "none"; // 'none' implies not displayed.  '' implies the default CSS value.
+  e1.style.display = off ? "" : "none"; // Toggle e1's display state.
+  if (e2) { e2.style.display = off ? "none" : ""; } // e2's style is opposite e1.
+}
+var ElementById = function(id) { return document.getElementById(id); }
+
+/******************************************************************************
+  Debug message console and error checking
+
+  DOM requirements::
+    <p id="DB"></p>        -- If nonexistent, the DB object will revert to using the browser's console.
+
+  Usage::
+    DB("string")           -- Send string to info window.  Behaves like a pre element.
+    DB.log("string")       -- Send string to console.log.
+    DB.post(type, string)  -- Send string to info window band keeps track of type.  Subsequent typed messages replace the last.
+    DB.post(type, string)  -- Send string to info window band keeps track of type.  Subsequent typed messages replace the last.
+    DB.clear()             -- Empty the entire DB element.
+    DB.check(expr, string) -- If expr is false, send string to console.  status() will then always return false.
+    DB.status()            -- Returns false if check ever failed.
+******************************************************************************/
+var DB = (function () {
+  var consoleElement = document.getElementById('DB');
+  var self;
+  var status = true;
+  var shouldNewline = true; // Want to prepend a newline when the last message was plain text.
+  var lastPostType = false, lastPost = false;
+  var repeatCount = 0;
+
+  var setStyles = function (e) {
+    return;
+    e.style.border = "solid 1px green";
+    e.style.whiteSpace = "pre";
+    e.style.overflow = "auto";
+    e.style.maxHeight = "20em";
+  }
+
+  // Create the instance which is a function.  Also create the clear function.
+  if (!consoleElement) {
+    self = function (s) { console.log(s); lastPostType = false;}
+    self.log = self;
+    self.post  = function (t, s) { // For the console, only the first post type is displayed.
+      if (t != lastPostType) {
+        console.log("[" + t + "]" + s);
+        lastPostType = t;
+      }
+    }
+    self.clear = function () { lastPostType = false; }
+  } else {
+    setStyles(consoleElement);
+    self = function (s) {
+      if (lastPost == s) { 
+       ++repeatCount;
+        s = repeatCount + s;
+      } else {
+        repeatCount = 0; 
+      }
+      consoleElement.innerHTML += (shouldNewline ? "" : "\n") + s;
+      consoleElement.scrollTop = consoleElement.scrollHeight;
+      shouldNewline = lastPostType = false;
+    }
+    self.log = function (s) { console.log(s); }
+    self.post = function (t, s) {
+      if (t == lastPostType) {
+        if (lastPost == s) { ++repeatCount; }
+        consoleElement.lastChild.innerText = (0<repeatCount ? repeatCount : "") + "[" + t + "]" + s;
+      } else {
+        consoleElement.appendChild(document.createElement('p')).innerText = "[" + t + "]" + s; 
+        consoleElement.scrollTop = consoleElement.scrollHeight;
+        lastPostType = t;
+        repeatCount = 0;
+      }
+      lastPost = s;
+      shouldNewline = true;
+    }
+    self.clear = function () {
+       consoleElement.innerHTML = "";
+      shouldNewline = lastPostType = true;
+    }
+  }
+
+  self.check = function (expr, msg) {
+    status = status && expr;
+    return expr || self(msg) && false;
+  }
+
+  self.status = function () { return status; }
+
+  return self;
+})(); // DB
+
+var hyphen =
+(function () {
+   DB ("Connecting to Hyphen...");
+   var url = (document.location.href.substr(0,5) == "file:") ? "localhost" : "stonkbot.xyz";
+   DB ("Hyphen url=" + url);
+
+   var server = new WebSocket( window.location.protocol=="https:" ? `wss://${url}:7189` : `ws://${url}:7190`);
+
+   var get = function (cmd, callback) {
+      if (server.readyState != 1) {
+         DB.post("hyphen", "Waiting for connection readyState...");
+         setTimeout(get.bind(0, cmd, callback), 200);
+      } else {
+         server.onmessage = function (e) {
+           if (typeof(e.data) == "string") {
+             callback(e.data);
+           } else {
+              DB("hyphen binary message ignoring [" + e.data + "]");
+             callback("error")
+           }
+         }
+         DB("hyphen requesting [" + cmd + "] => " + server.send(cmd));
+      }
+   }
+
+   return get
+
+})();
+
+hyphen("yolo", msg => {
+  let m = JSON.parse(msg);
+  let keys = Object.keys(m);
+  keys.sort( (a,b) => m[a] > m[b] );
+  document.getElementById("yololians").innerHTML =
+    Object.keys(m).map( k => `${k} ${m[k]}` ).join("\n");
+});
+
+
+//]]></script></body></html>

@@ -2,9 +2,19 @@
 use crate::*;
 //use util::*;
 use ::std::{fmt, time::{Duration} };
-use ::openssl::ssl::{SslConnector, SslMethod};
+use ::openssl::ssl::{SslConnector, SslMethod, SslConnectorBuilder};
 use ::actix_web::{ client::{Client, Connector} };
 
+const TELEGRAM_KEY_PEM: &str = "tmbot/key.pem";
+const TELEGRAM_CERT_PEM: &str = "tmbot/cert.pem";
+
+pub fn new_ssl_connector_builder() -> Bresult<SslConnectorBuilder> {
+    let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
+    ssl_connector_builder.set_private_key_file(TELEGRAM_KEY_PEM, openssl::ssl::SslFiletype::PEM)?;
+    ssl_connector_builder.set_certificate_chain_file(TELEGRAM_CERT_PEM)?;
+    Ok(ssl_connector_builder)
+
+}
 
 pub trait MsgDetails {
     fn at (&self) -> i64;
@@ -30,9 +40,7 @@ pub struct Telegram {
 
 impl Telegram {
     pub fn new (url_api: String) -> Bresult<Self> {
-        let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
-        ssl_connector_builder.set_private_key_file("key.pem", openssl::ssl::SslFiletype::PEM)?;
-        ssl_connector_builder.set_certificate_chain_file("cert.pem")?;
+        let ssl_connector_builder = new_ssl_connector_builder()?;
         let client =
             Client::builder()
                 .connector(

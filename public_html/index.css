@@ -1,0 +1,28 @@
+body {
+  background-image: url('moneybg.jpg')
+}
+
+.header {
+  background-color: green;
+  padding: .2em;
+}
+
+.headerimage {
+  float: left;
+  height: 1.5em;
+}
+
+.mainbody {
+  font-size: larger;
+  background-color: lightgray;
+}
+
+.mainbody td p {
+  padding: 1ex;
+}
+
+.yololians {
+  margin: 1em;
+  float: right;
+  background-color: #d0e0d0;
+}

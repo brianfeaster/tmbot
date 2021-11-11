@@ -12,13 +12,11 @@ use ::std::{
     sync::{Arc, Mutex},
  };
 use ::log::*;
-use ::regex::{Regex};
-use ::datetime::{
-    Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::{*} };
-use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod};
-use ::actix::{Actor, StreamHandler};
-use ::actix_web::{web, App, HttpRequest, HttpServer, HttpResponse, Route,
-    client::{Client, Connector} }; // Error
+use ::regex::Regex;
+use ::datetime::{ Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::* };
+use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod, SslAcceptorBuilder};
+use ::actix::{ Actor, StreamHandler };
+use ::actix_web::{ web, App, HttpRequest, HttpServer, HttpResponse, Route, client::{Client, Connector} };
 use ::actix_web_actors::ws;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -26,10 +24,21 @@ use ::actix_web_actors::ws;
 const QUOTE_DELAY_SECS :i64 = 30;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
+const WEB_KEY_PEM: &str = "key.pem";
+const WEB_CERT_PEM: &str = "cert.pem";
+
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Abstracted primitive types helpers
 ////////////////////////////////////////////////////////////////////////////////
+
+pub fn new_ssl_acceptor_builder() -> Bresult<SslAcceptorBuilder> {
+    let mut ssl_acceptor_builder =
+        SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl_acceptor_builder.set_private_key_file(WEB_KEY_PEM, SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_certificate_chain_file(WEB_CERT_PEM)?;
+    Ok(ssl_acceptor_builder)
+}
 
 /// Decide if a ticker's price should be refreshed given its last lookup time.
 ///  PacificTZ  PreMarket  Regular  AfterHours  Closed
@@ -2739,9 +2748,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 }
 
 pub fn launch_server(env:Env) -> Bresult<()> {
-    let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    ssl_acceptor_builder.set_private_key_file("key.pem", SslFiletype::PEM)?;
-    ssl_acceptor_builder.set_certificate_chain_file("cert.pem")?;
+    let ssl_acceptor_builder = new_ssl_acceptor_builder()?;
     let srv =
         HttpServer::new( move ||
             App::new()
@@ -2757,7 +2764,7 @@ pub fn launch_server(env:Env) -> Bresult<()> {
 }
 
 ////////////////////////////////////////
-/// 
+
 fn web_yolo (env: Env) -> Bresult<String> {
     let envstruct = env.lock().unwrap();
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
@@ -2786,15 +2793,16 @@ fn web_yolo (env: Env) -> Bresult<String> {
 
     // Build and send response string
 
-    let mut msg = "*YOLOlians*".to_string();
+    let mut res: HashMap::<String, f64> = HashMap::new();
     for row in sql_results {
-        msg.push_str( &format!(" `{:.2}@{}`",
-            row.get_f64("yolo")?,
-            row.get_string("name")?) );
+        warn!("{:?}", res.insert(
+            row.get_string("name")?,
+            row.get_f64("yolo")?));
     }
+    let msg = serde_json::to_string(&res)?;
+    info!("created json: {:?}", &msg);
     Ok(msg)
 }
-/// Define HTTP actor
 
 struct MyWs { env: Env }
 
@@ -2805,11 +2813,20 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
     fn handle(
         &mut self,
         msg: Result<ws::Message, ws::ProtocolError>,
-        ctx: &mut Self::Context,
+        ctx: &mut Self::Context
     ) {
+        warn!("{:?}", msg);
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
-            Ok(ws::Message::Text(_text)) => ctx.text(web_yolo(self.env.clone()).unwrap_or("error".into())),
+            Ok(ws::Message::Text(text)) => {
+                ctx.text(match text.split(" ").nth(0).unwrap_or("") {
+                    "yolo" =>
+                        web_yolo(self.env.clone())
+                        .unwrap_or_else( |e| { error!("{:?}", e); "error".into() } ),
+                    _ =>
+                        format!("69.42@{}", text)
+                })
+            },
             Ok(ws::Message::Binary(_bin)) => ctx.binary("binary woof"),
             _ => (),
         }
@@ -2826,12 +2843,42 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpRespon
 pub fn main_websocket(env:Env) -> Bresult<()> {
     std::thread::spawn( move || {
         let srv =
-            HttpServer::new(
-                move || App::new()
-                    .data(env.clone())
-                    .route("*", web::get().to(ws_handler)))
-            .bind("0.0.0.0:7190").unwrap();
-        let res = actix_web::rt::System::new("tmbot").block_on(async move {
+            match HttpServer::new( move ||
+                App::new()
+                .data(env.clone())
+                .route("*", web::get().to(ws_handler)) )
+                .bind("0.0.0.0:7190")
+            {
+                Ok(srv) => srv,
+                Err(err) => {
+                    error!("HttpServer => {:?}", err);
+                    return;
+                }
+            };
+        let res = actix_web::rt::System::new("websocket").block_on(async move {
+            println!("launch() => {:?}", srv.run().await)
+        }); // This should never return
+        error!("main_websocket => {:?}", res);
+    });
+    Ok(())
+}
+pub fn main_websocket_ssl(env:Env) -> Bresult<()> {
+    let ssl_acceptor_builder = new_ssl_acceptor_builder()?;
+    std::thread::spawn( move || {
+        let srv =
+            match HttpServer::new( move ||
+                App::new()
+                .data(env.clone())
+                .route("*", web::get().to(ws_handler)) )
+                .bind_openssl("0.0.0.0:7189", ssl_acceptor_builder)
+            {
+                Ok(srv) => srv,
+                Err(err) => {
+                    error!("HttpServer => {:?}", err);
+                    return;
+                }
+            };
+        let res = actix_web::rt::System::new("websocket").block_on(async move {
             println!("launch() => {:?}", srv.run().await)
         }); // This should never return
         error!("main_websocket => {:?}", res);
@@ -2851,6 +2898,7 @@ pub fn main_launch() -> Bresult<()> {
     else {
         let env = EnvStruct::new(argv)?;
         glogd!("websocket() =>", main_websocket(env.clone()));
+        glogd!("websocketssl() =>", main_websocket_ssl(env.clone()));
         glogd!("scheduler() =>", launch_scheduler(env.clone()));
         launch_server(env)
     }
