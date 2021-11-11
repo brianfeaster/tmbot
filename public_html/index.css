@@ -4,12 +4,24 @@ body {
 
 .header {
   background-color: green;
-  padding: .2em;
 }
 
 .headerimage {
-  float: left;
+  float:left; 
   height: 1.5em;
+}
+
+h1.header {
+  position: relative;
+  margin: 0 0 1em 0;
+  padding: .2em;
+}
+
+.login {
+  display: inline-block;
+  position: absolute;
+  right: 1em;
+  bottom: 1em;
 }
 
 .mainbody {

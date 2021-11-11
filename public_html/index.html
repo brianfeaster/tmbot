@@ -8,7 +8,8 @@
 
 <h1 class="header">
   <img class="headerimage" src="thumbmoney.jpg"/>
-  &nbsp; Stonk™BotPortalWorld <i>0.0.0𝛼</i>
+  &nbsp; Stonk™BotPortalWorld<i> 0.0.2𝛼</i>
+  <input class="login" name="login" type="search" placeholder="username"/>
 </h1>
 
 <table border="1" class="yololians">
@@ -134,41 +135,41 @@ var DB = (function () {
   return self;
 })(); // DB
 
-var hyphen =
-(function () {
-   DB ("Connecting to Hyphen...");
+var hyphen = (function () {
    var url = (document.location.href.substr(0,5) == "file:") ? "localhost" : "stonkbot.xyz";
-   DB ("Hyphen url=" + url);
+   DB (`Connecting to websocket "${url}"...`);
 
    var server = new WebSocket( window.location.protocol=="https:" ? `wss://${url}:7189` : `ws://${url}:7190`);
 
-   var get = function (cmd, callback) {
-      if (server.readyState != 1) {
-         DB.post("hyphen", "Waiting for connection readyState...");
-         setTimeout(get.bind(0, cmd, callback), 200);
+   return function get (cmd, callback) {
+      if (server.readyState != WebSocket.OPEN) {
+         DB.post("hyphen", "Waiting for connection readyState == OPEN...");
+         if (server.readyState == WebSocket.CLOSED) {
+           server = new WebSocket( window.location.protocol=="https:" ? `wss://${url}:7189` : `ws://${url}:7190`);
+         }
+         setTimeout(get.bind(0, cmd, callback), 1000);
       } else {
          server.onmessage = function (e) {
            if (typeof(e.data) == "string") {
              callback(e.data);
            } else {
-              DB("hyphen binary message ignoring [" + e.data + "]");
+              DB("hyphen binary message ignored [" + e.data + "]");
              callback("error")
            }
          }
          DB("hyphen requesting [" + cmd + "] => " + server.send(cmd));
       }
    }
-
-   return get
-
 })();
 
 hyphen("yolo", msg => {
   let m = JSON.parse(msg);
-  let keys = Object.keys(m);
-  keys.sort( (a,b) => m[a] > m[b] );
   document.getElementById("yololians").innerHTML =
-    Object.keys(m).map( k => `${k} ${m[k]}` ).join("\n");
+    Object
+      .keys(m)
+      .sort( (a,b) => m[b]-m[a] )
+      .map( k => `<b>${k}</b> ${m[k]}` )
+      .join("\n");
 });
 
 

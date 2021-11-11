@@ -2748,7 +2748,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 }
 
 pub fn launch_server(env:Env) -> Bresult<()> {
-    let ssl_acceptor_builder = new_ssl_acceptor_builder()?;
+    let ssl_acceptor_builder = comm::new_ssl_acceptor_builder()?;
     let srv =
         HttpServer::new( move ||
             App::new()

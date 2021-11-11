@@ -8,6 +8,14 @@ use ::actix_web::{ client::{Client, Connector} };
 const TELEGRAM_KEY_PEM: &str = "tmbot/key.pem";
 const TELEGRAM_CERT_PEM: &str = "tmbot/cert.pem";
 
+pub fn new_ssl_acceptor_builder() -> Bresult<SslAcceptorBuilder> {
+    let mut ssl_acceptor_builder =
+        SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl_acceptor_builder.set_private_key_file(TELEGRAM_KEY_PEM, SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_certificate_chain_file(TELEGRAM_CERT_PEM)?;
+    Ok(ssl_acceptor_builder)
+}
+
 pub fn new_ssl_connector_builder() -> Bresult<SslConnectorBuilder> {
     let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
     ssl_connector_builder.set_private_key_file(TELEGRAM_KEY_PEM, openssl::ssl::SslFiletype::PEM)?;
