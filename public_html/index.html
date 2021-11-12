@@ -8,8 +8,8 @@
 
 <h1 class="header">
   <img class="headerimage" src="thumbmoney.jpg"/>
-  &nbsp; Stonk™BotPortalWorld<i> 0.0.2𝛼</i>
-  <input class="login" name="login" type="search" placeholder="username"/>
+  &nbsp; Stonk™BotPortalWorld<i> 0.0.3𝛼</i>
+  <input id="login" class="login" name="login" type="search" placeholder="username" onkeydown="login(event)"/>
 </h1>
 
 <table border="1" class="yololians">
@@ -28,6 +28,15 @@
   </p>
 </td></tr>
 </table>
+
+<p style="
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  background-color: black;
+  color: white;
+  font-family: monospace;
+">000001</p>
 
 <script type="text/javascript">//<![CDATA[
 "use strict"
@@ -172,5 +181,14 @@ hyphen("yolo", msg => {
       .join("\n");
 });
 
+function login (event) {
+  if (event.code == "Enter") {
+    hyphen(`login ${event.target.value}`, msg => {
+      document.getElementById("login").value = "";
+      document.getElementById("login").placeholder = msg;
+    }
+    );
+  }
+}
 
 //]]></script></body></html>

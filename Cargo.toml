@@ -13,6 +13,7 @@ tokio = { version = "0.2", features = ["full"] }
 actix = "0.10"
 actix-web = { version = "3", features = ["openssl"] }
 actix-web-actors = "3"
+actix-http = "2.2.1"
 openssl = { version = "0.10" }
 serde_json = "*"
 serde_urlencoded = "*"

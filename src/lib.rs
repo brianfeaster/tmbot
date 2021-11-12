@@ -52,7 +52,7 @@ fn most_recent_trading_hours (
     // Absolute time (UTC) when US pre-markets open 1AMPT / 0900Z|0800Z
     let start_time = LocalTime::hm(9 - dst_hours_adjust, 0)?;  // TODO create function describing the hour maths
     let start_duration = Duration::of(start_time.to_seconds());
-    let market_hours_duration = Duration::of( LocalTime::hm(16, 30)?.to_seconds() ); // Add 30 minutes for delayed orders
+    let market_hours_duration = Duration::of( LocalTime::hm(16, 5)?.to_seconds() ); // Add 5 minutes for delayed orders
 
     // Consider the current trading date relative to now. Since pre-markets
     // start at 0900Z (0800Z during daylight savings) treat that as the
@@ -393,7 +393,7 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
             .ok_or("can't resolve telegram api key")?
             .to_str()
             .unwrap());
-    let dbconn = Connection::new(argv.next().ok_or("args[2] missing")?)?; 
+    let dbconn = Connection::new(argv.next().ok_or("args[2] missing")?)?;
     let mut entitys = HashMap::new();
     for hm in
         getsql!(dbconn,
@@ -897,7 +897,7 @@ impl Position {
 impl Position {
     fn get_users_positions (cmdstruct: &mut CmdStruct) -> Bresult<Vec<Position>> {
         let id = cmdstruct.id;
-        let dbconn = &getenvstruct!(cmdstruct).dbconn; 
+        let dbconn = &getenvstruct!(cmdstruct).dbconn;
         Ok(getsql!(dbconn, "SELECT ticker, qty, price FROM positions WHERE id=?", id)?
         .iter()
         .map( |pos|
@@ -2765,6 +2765,42 @@ pub fn launch_server(env:Env) -> Bresult<()> {
 
 ////////////////////////////////////////
 
+fn web_login (env: Env, words: &Vec<&str>) -> Bresult<i64> {
+    let name = words.get(1).ok_or("missing login name")?;
+    let id = {
+        let envstruct = env.lock().unwrap();
+        envstruct.entitys
+        .iter()
+        .find_map( |(id,entity)|
+            if name == &entity.name { Some(*id) }
+            else { None } )
+
+    }.ok_or("missing user")?;
+
+    std::thread::spawn( move || {
+        warn!("Created new thread in web_login to msg user the secret code... ");
+        let res =
+            actix_web::rt::System::new("websocketlogin")
+            .block_on(async move {
+                match CmdStruct::new_cmdstruct(env, 0, id, id, id, 0, "") {
+                    Ok(mut cmdstruct) => {
+                        let pw = 42;
+                        warn!("In new thread calling block_on... ");
+                        let res = cmdstruct.push_msg(&pw.to_string()).send_msg().await;
+                        info!("ws login msg {} to {} => {:?}", pw, id, res);
+                        pw.to_string()
+                    },
+                    Err(e) => {
+                        error!("new_cmdstruct => {:?}", e);
+                        "who?".to_string()
+                    }
+                }
+            });
+        info!("ws login res => {}", res);
+    });
+    Ok(id)
+}
+
 fn web_yolo (env: Env) -> Bresult<String> {
     let envstruct = env.lock().unwrap();
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
@@ -2815,14 +2851,24 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
         msg: Result<ws::Message, ws::ProtocolError>,
         ctx: &mut Self::Context
     ) {
-        warn!("{:?}", msg);
+        warn!("WS handle() <= {:?}", msg);
         match msg {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
-                ctx.text(match text.split(" ").nth(0).unwrap_or("") {
+                let words = text.split(" ").collect::<Vec<&str>>();
+                ctx.text(match *words.get(0).unwrap_or(&"") {
                     "yolo" =>
                         web_yolo(self.env.clone())
                         .unwrap_or_else( |e| { error!("{:?}", e); "error".into() } ),
+                    "login" => {
+                        let id = web_login(self.env.clone(), &words).unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
+                        warn!("login id is {}", id);
+                        if 0 == id {
+                            "unimplemented".to_string()
+                        } else {
+                            format!("code for {}", id).to_string()
+                        }
+                    },
                     _ =>
                         format!("69.42@{}", text)
                 })
@@ -2856,7 +2902,7 @@ pub fn main_websocket(env:Env) -> Bresult<()> {
                 }
             };
         let res = actix_web::rt::System::new("websocket").block_on(async move {
-            println!("launch() => {:?}", srv.run().await)
+        warn!("launch() => {:?}", srv.run().await)
         }); // This should never return
         error!("main_websocket => {:?}", res);
     });
