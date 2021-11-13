@@ -329,7 +329,9 @@ pub struct Entity {
     likes: i64,
     // format strings
     quote: String,
-    position: String
+    position: String,
+    // web portal
+    uuid: String
 }
 
 #[derive(Debug)]
@@ -383,6 +385,11 @@ impl EnvStruct {
         getsql!(self.dbconn, "INSERT OR REPLACE INTO likes VALUES (?, ?)", at, likes)?;
         Ok(likes)
     }
+    fn entity_uuid_set (&mut self, id: i64, pw: usize) -> Bresult<()> {
+        self.entitys
+            .get_mut(&id)
+            .map_or(Err("no such entity for uuid".into()), |e| { e.uuid = pw.to_string(); Ok(()) } )
+    }
 } // impl EnvStruct
 
 impl EnvStruct {
@@ -414,7 +421,9 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
                 echo:    hm.get_i64_or(2, "echo"),
                 likes:   hm.get_i64_or(0, "likes"),
                 quote:   hm.get_string_or("", "quote"),
-                position:hm.get_string_or("", "position")} );
+                position:hm.get_string_or("", "position"),
+                uuid:    String::new()
+            });
     }
     Ok(Env::from(EnvStruct{
         url_api, dbconn,
@@ -2778,14 +2787,16 @@ fn web_login (env: Env, words: &Vec<&str>) -> Bresult<i64> {
     }.ok_or("missing user")?;
 
     std::thread::spawn( move || {
-        warn!("Created new thread in web_login to msg user the secret code... ");
         let res =
             actix_web::rt::System::new("websocketlogin")
             .block_on(async move {
                 match CmdStruct::new_cmdstruct(env, 0, id, id, id, 0, "") {
                     Ok(mut cmdstruct) => {
-                        let pw = 42;
-                        warn!("In new thread calling block_on... ");
+                        let pw = ::rand::random::<usize>()%1000000;
+                        match cmdstruct.env.try_lock() {
+                            Ok(mut envstruct) => glog!(envstruct.entity_uuid_set(id, pw)),
+                            Err(e) => error!("websocketlogin {:?}", e)
+                        };
                         let res = cmdstruct.push_msg(&pw.to_string()).send_msg().await;
                         info!("ws login msg {} to {} => {:?}", pw, id, res);
                         pw.to_string()
@@ -2802,7 +2813,6 @@ fn web_login (env: Env, words: &Vec<&str>) -> Bresult<i64> {
 }
 
 fn web_yolo (env: Env) -> Bresult<String> {
-    let envstruct = env.lock().unwrap();
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
                FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
                      FROM positions \
@@ -2822,22 +2832,16 @@ fn web_yolo (env: Env) -> Bresult<String> {
                NATURAL JOIN accounts \
                NATURAL JOIN entitys \
                ORDER BY yolo DESC";
-
-    let sql_results = {
-        getsql!(&envstruct.dbconn, &sql)?
-    };
-
-    // Build and send response string
-
-    let mut res: HashMap::<String, f64> = HashMap::new();
-    for row in sql_results {
-        warn!("{:?}", res.insert(
-            row.get_string("name")?,
-            row.get_f64("yolo")?));
-    }
-    let msg = serde_json::to_string(&res)?;
-    info!("created json: {:?}", &msg);
-    Ok(msg)
+    let dbconn = &env.lock().unwrap().dbconn;
+    let yololians = serde_json::to_string(
+        &getsql!(dbconn, &sql)?
+            .iter()
+            .map( |row| (
+                row.get_string("name").unwrap_or("?".to_string()),
+                row.get_f64("yolo").unwrap_or(0.0) ) )
+            .collect::<HashMap<String, f64>>())?;
+    info!("created json: {:?}", &yololians);
+    Ok(yololians)
 }
 
 struct MyWs { env: Env }
@@ -2880,6 +2884,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
 }
 
 async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
+    warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
     let resp = ws::start(MyWs {env}, &req, stream);
     println!("ws_handler: resp => {:?}", resp);

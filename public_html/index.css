@@ -38,3 +38,45 @@ h1.header {
   float: right;
   background-color: #d0e0d0;
 }
+
+.counter {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  background-color: black;
+  color: white;
+  font-family: monospace;
+}
+
+.cookies {
+  display: none;
+  max-width: 20em;
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -60%);
+  background-color: red;
+  color: yellow;
+  font-family: monospace;
+  font-size: 200%
+}
+
+.cookies > p ~ p {
+  text-align: center;
+  color: blue;
+}
+
+#DB {
+    width:24em;
+    background:black;
+    color: #0f0;
+    z-index:1;
+    border:solid 1px green;
+    margin:0;
+    white-space:pre;
+    overflow:auto;
+    max-height:40em;
+    position:fixed;
+    right:0;
+    bottom:0;
+}

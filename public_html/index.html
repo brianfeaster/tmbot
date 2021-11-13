@@ -9,7 +9,7 @@
 <h1 class="header">
   <img class="headerimage" src="thumbmoney.jpg"/>
   &nbsp; Stonk™BotPortalWorld<i> 0.0.3𝛼</i>
-  <input id="login" class="login" name="login" type="search" placeholder="username" onkeydown="login(event)"/>
+  <input id="login" class="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </h1>
 
 <table border="1" class="yololians">
@@ -29,17 +29,17 @@
 </td></tr>
 </table>
 
-<p style="
-  position: fixed;
-  left: 50%;
-  bottom: 0;
-  background-color: black;
-  color: white;
-  font-family: monospace;
-">000001</p>
+<p class="counter">000001</p>
 
+<div class="cookies" onmousedown="event.target.style.display='none'">
+  <p>This site uses COOKIES and may TRACK and SELL your PRIVATE PERSONAL DATA.</p>
+  <p><i>I agree to these terms</i></p>
+</div>
+
+<p id="DB"></p>
 <script type="text/javascript">//<![CDATA[
 "use strict"
+
 
 /******************************************************************************
   Useful aliases and objects
@@ -58,6 +58,7 @@ var ToggleElementDisplay = function (e1, e2) {
   if (e2) { e2.style.display = off ? "none" : ""; } // e2's style is opposite e1.
 }
 var ElementById = function(id) { return document.getElementById(id); }
+if (document.location.href.substr(0,5) == "file:") { ElementById('DB').style.display="none" }
 
 /******************************************************************************
   Debug message console and error checking
@@ -144,6 +145,10 @@ var DB = (function () {
   return self;
 })(); // DB
 
+
+/******************************************************************************
+  Hyphen - Websocket
+******************************************************************************/
 var hyphen = (function () {
    var url = (document.location.href.substr(0,5) == "file:") ? "localhost" : "stonkbot.xyz";
    DB (`Connecting to websocket "${url}"...`);
@@ -181,14 +186,31 @@ hyphen("yolo", msg => {
       .join("\n");
 });
 
-function login (event) {
-  if (event.code == "Enter") {
-    hyphen(`login ${event.target.value}`, msg => {
-      document.getElementById("login").value = "";
-      document.getElementById("login").placeholder = msg;
-    }
-    );
-  }
-}
+var Username=""
 
-//]]></script></body></html>
+function login (event) {
+  if (event.code != "Enter") { return; }
+
+  let E = document.getElementById("login");
+
+  if (event.target.placeholder == "login") {
+      Username = event.target.value;
+      document.cookies=`username=${Username}`;
+      hyphen(`login ${Username}`, msg => {
+          E.value = "";
+          E.placeholder = "code";
+      });
+  } else if (event.target.placeholder == "code") {
+      let code=event.target.value;
+      hyphen(`code ${Username} ${code}`, msg => {
+          E.value = "";
+          if (msg!="") {
+              E.placeholder = `welcome ${msg}`;
+          }
+      });
+  }
+
+  DB("Username="+Username)
+}
+//]]>
+</script></body></html>
