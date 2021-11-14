@@ -2799,7 +2799,7 @@ fn web_login (env: Env, name: &str) -> Bresult<i64> {
             .block_on(async move {
                 match CmdStruct::new_cmdstruct(env, 0, id, id, id, 0, "") {
                     Ok(mut cmdstruct) => {
-                        let pw = ::rand::random::<usize>()%1000000;
+                        let pw = ::rand::random::<usize>();
                         match cmdstruct.env.try_lock() {
                             Ok(mut envstruct) => glog!(envstruct.entity_uuid_set(id, pw)),
                             Err(e) => error!("websocketlogin {:?}", e)
@@ -2904,7 +2904,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                                 match entity {
                                     Ok(entity) => {
                                         self.id = entity.id;
-                                        IF!(words[2] == entity.uuid, words[1], "")
+                                        IF!(words[2]!="" && entity.uuid!="" && words[2] == entity.uuid, words[1], "")
                                     },
                                     Err(e) => { error!("code result {:?}", e); "" }
                                 }
