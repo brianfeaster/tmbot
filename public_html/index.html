@@ -8,7 +8,7 @@
 
 <h1 class="header">
   <img class="headerimage" src="thumbmoney.jpg"/>
-  &nbsp; Stonk™BotPortalWorld<i> 0.0.3𝛼</i>
+  &nbsp; Stonk™BotPortalWorld<i> 0.0.4𝛼</i>
   <input id="login" class="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </h1>
 
@@ -214,18 +214,17 @@ var Cookies = new Map(document.cookie.split(";").map( p => p.split("=").map( s =
 
 ////////////////////////////////////////
 
-var Username = "";
-
-function wslogin (code) {
+function wslogin (username, code) {
   let E = document.getElementById("login");
   E.value = "";
   E.placeholder = "verifying";
-  hyphen(`login ${Username} ${code}`, msg => {
+  hyphen(`login ${username} ${code}`, msg => {
       if (msg=="") {
           E.placeholder = "login";
           E.value = "";
       } else {
-          document.cookie=`username=${Username}; uuid=${code}`
+          document.cookie=`username=${username}`
+          document.cookie=`uuid=${code}`
           E.placeholder = `welcome ${msg}`;
           stats();
       }
@@ -233,23 +232,23 @@ function wslogin (code) {
 }
 
 // Try to login with stored credentials
-if (Cookies["username"] && Cookies["uuid"]) {
-    wslogin(`login ${Cookies["username"]} ${Cookies["uuid"]}`)
+if (Cookies.get("username") && Cookies.get("uuid")) {
+    wslogin(`login ${Cookies.get("username")} ${Cookies.get("uuid")}`)
 }
 
+var Username = "";
 function login (event) {
   if (event.code != "Enter") { return; }
-
-  let E = document.getElementById("login");
-
-  if (event.target.placeholder == "login") {
+  let state = event.target.placeholder;
+  if (state == "login") {
+     let E = document.getElementById("login");
       Username = event.target.value;
       hyphen(`login ${Username}`, msg => {
           E.value = "";
           E.placeholder = "code";
       });
-  } else if (event.target.placeholder == "code") {
-      wslogin(event.target.value)
+  } else if (state == "code") {
+      wslogin(Username, event.target.value)
   }
 
   DB("Username="+Username)
