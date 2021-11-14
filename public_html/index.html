@@ -194,7 +194,7 @@ hyphen("yolo", msg => {
       .join("\n");
     // Try to login with stored credentials
     if (Cookies.get("username") && Cookies.get("uuid")) {
-        wslogin(`login ${Cookies.get("username")} ${Cookies.get("uuid")}`)
+        wslogin(Cookies.get("username"), Cookies.get("uuid"));
     }
 });
 
