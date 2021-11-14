@@ -19,6 +19,13 @@
   <pre id="yololians"></pre>
 </td></tr></table>
 
+<table border="1" class="yololians">
+<tr><td>
+  <b id="username">User</b>
+</td></tr><tr><td>
+  <pre id="stats"></pre>
+</td></tr></table>
+
 <table border="1" class="mainbody">
 <tr><td>
   <h2>Welcome To ™Bot's Stonk Portal World!!!</h2>
@@ -58,7 +65,6 @@ var ToggleElementDisplay = function (e1, e2) {
   if (e2) { e2.style.display = off ? "none" : ""; } // e2's style is opposite e1.
 }
 var ElementById = function(id) { return document.getElementById(id); }
-if (document.location.href.substr(0,5) == "file:") { ElementById('DB').style.display="none" }
 
 /******************************************************************************
   Debug message console and error checking
@@ -176,6 +182,8 @@ var hyphen = (function () {
    }
 })();
 
+////////////////////////////////////////
+
 hyphen("yolo", msg => {
   let m = JSON.parse(msg);
   document.getElementById("yololians").innerHTML =
@@ -186,7 +194,48 @@ hyphen("yolo", msg => {
       .join("\n");
 });
 
-var Username=""
+function stats () {
+    hyphen("stats", msg => {
+    let m = JSON.parse(msg);
+    document.getElementById("username").innerHTML = m.name;
+    document.getElementById("stats").innerHTML =
+        Object
+        .keys(m)
+        .sort( (a,b) => m[b]-m[a] )
+        .map( k => `<b>${k}</b> ${m[k]}` )
+        .join("\n");
+    });
+}
+
+////////////////////////////////////////
+
+if (document.location.href.substr(0,5) != "file:") { ElementById('DB').style.display="none" }
+var Cookies = new Map(document.cookie.split(";").map( p => p.split("=").map( s => s.trim() ) ))
+
+////////////////////////////////////////
+
+var Username = "";
+
+function wslogin (code) {
+  let E = document.getElementById("login");
+  E.value = "";
+  E.placeholder = "verifying";
+  hyphen(`login ${Username} ${code}`, msg => {
+      if (msg=="") {
+          E.placeholder = "login";
+          E.value = "";
+      } else {
+          document.cookie=`username=${Username}; uuid=${code}`
+          E.placeholder = `welcome ${msg}`;
+          stats();
+      }
+  });
+}
+
+// Try to login with stored credentials
+if (Cookies["username"] && Cookies["uuid"]) {
+    wslogin(`login ${Cookies["username"]} ${Cookies["uuid"]}`)
+}
 
 function login (event) {
   if (event.code != "Enter") { return; }
@@ -195,19 +244,12 @@ function login (event) {
 
   if (event.target.placeholder == "login") {
       Username = event.target.value;
-      document.cookies=`username=${Username}`;
       hyphen(`login ${Username}`, msg => {
           E.value = "";
           E.placeholder = "code";
       });
   } else if (event.target.placeholder == "code") {
-      let code=event.target.value;
-      hyphen(`code ${Username} ${code}`, msg => {
-          E.value = "";
-          if (msg!="") {
-              E.placeholder = `welcome ${msg}`;
-          }
-      });
+      wslogin(event.target.value)
   }
 
   DB("Username="+Username)

@@ -37,6 +37,7 @@ h1.header {
   margin: 1em;
   float: right;
   background-color: #d0e0d0;
+  clear: both;
 }
 
 .counter {

@@ -2774,18 +2774,25 @@ pub fn launch_server(env:Env) -> Bresult<()> {
 
 ////////////////////////////////////////
 
-fn web_login (env: Env, words: &Vec<&str>) -> Bresult<i64> {
-    let name = words.get(1).ok_or("missing login name")?;
+fn envstruct_get_entity<'e> (
+    envstruct: &'e EnvStruct,
+    name: &str
+) -> Bresult<&'e Entity> {
+    envstruct.entitys
+    .iter()
+    .find_map( |(_id,entity)|
+        if name == &entity.name { Some(entity) }
+        else { None } )
+    .ok_or("missing user".into())
+}
+
+fn web_login (env: Env, name: &str) -> Bresult<i64> {
     let id = {
+        let env = env.clone();
         let envstruct = env.lock().unwrap();
-        envstruct.entitys
-        .iter()
-        .find_map( |(id,entity)|
-            if name == &entity.name { Some(*id) }
-            else { None } )
-
-    }.ok_or("missing user")?;
-
+        envstruct_get_entity(&envstruct, name)?.id
+    };
+    warn!("web_login id = {:?}", id);
     std::thread::spawn( move || {
         let res =
             actix_web::rt::System::new("websocketlogin")
@@ -2812,7 +2819,7 @@ fn web_login (env: Env, words: &Vec<&str>) -> Bresult<i64> {
     Ok(id)
 }
 
-fn web_yolo (env: Env) -> Bresult<String> {
+fn web_yolo (envstruct: &EnvStruct) -> Bresult<String> {
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
                FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
                      FROM positions \
@@ -2832,7 +2839,7 @@ fn web_yolo (env: Env) -> Bresult<String> {
                NATURAL JOIN accounts \
                NATURAL JOIN entitys \
                ORDER BY yolo DESC";
-    let dbconn = &env.lock().unwrap().dbconn;
+    let dbconn = &envstruct.dbconn;
     let yololians = serde_json::to_string(
         &getsql!(dbconn, &sql)?
             .iter()
@@ -2844,7 +2851,7 @@ fn web_yolo (env: Env) -> Bresult<String> {
     Ok(yololians)
 }
 
-struct MyWs { env: Env }
+struct MyWs { id: i64, env: Env }
 
 impl Actor for MyWs { type Context = ws::WebsocketContext<Self>; }
 
@@ -2860,33 +2867,67 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
                 let words = text.split(" ").collect::<Vec<&str>>();
-                ctx.text(match *words.get(0).unwrap_or(&"") {
-                    "yolo" =>
-                        web_yolo(self.env.clone())
-                        .unwrap_or_else( |e| { error!("{:?}", e); "error".into() } ),
-                    "login" => {
-                        let id = web_login(self.env.clone(), &words).unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
-                        warn!("login id is {}", id);
-                        if 0 == id {
-                            "unimplemented".to_string()
-                        } else {
-                            format!("code for {}", id).to_string()
-                        }
-                    },
-                    _ =>
-                        format!("69.42@{}", text)
-                })
+                warn!("WS handle() words = {:?}", words);
+                let txt = if words.len() < 1 || 3 < words.len() {
+                    "".to_string()
+                } else {
+                    match words[0] {
+                        "stats" => {
+                            let envstruct = self.env.lock().unwrap();
+                            let mut hm = HashMap::new();
+                            match envstruct.entitys.get(&self.id) {
+                                Some(entity) => {
+                                    hm.insert("name", entity.name.to_string());
+                                    hm.insert("balance", roundcents(entity.balance).to_string());
+                                    hm.insert("likes", entity.likes.to_string());
+                                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
+                                },
+                                None => {
+                                    error!("whoam bad id {}", self.id);
+                                    hm.insert("name", "nobody".to_string());
+                                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
+                                }
+                            }
+                        },
+                        "yolo" => {
+                            let envstruct = self.env.lock().unwrap();
+                            web_yolo(&envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+                        },
+                        "login" => {
+                            if 2 == words.len() { // Message user privately their login code
+                                web_login(self.env.clone(), words[1])
+                                    .unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
+                                ""
+                            } else if 3 == words.len() { // Accept or reject passocode
+                                let envstruct = self.env.lock().unwrap();
+                                let entity = envstruct_get_entity(&envstruct, words[1]);
+                                match entity {
+                                    Ok(entity) => {
+                                        self.id = entity.id;
+                                        IF!(words[2] == entity.uuid, words[1], "")
+                                    },
+                                    Err(e) => { error!("code result {:?}", e); "" }
+                                }
+                            } else {
+                                ""
+                            }
+                        }.to_string(),
+                        _ => format!("69.42@{}", text)
+                    }
+                };
+                ctx.text(txt);
             },
             Ok(ws::Message::Binary(_bin)) => ctx.binary("binary woof"),
             _ => (),
         }
+        warn!("WS handle() returning");
     }
 }
 
 async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
     warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    let resp = ws::start(MyWs {env}, &req, stream);
+    let resp = ws::start(MyWs {id:0, env}, &req, stream);
     println!("ws_handler: resp => {:?}", resp);
     resp
 }
