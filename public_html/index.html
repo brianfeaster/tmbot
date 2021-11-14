@@ -7,8 +7,9 @@
 </head><body>
 
 <h1 class="header">
-  <img class="headerimage" src="thumbmoney.jpg"/>
-  &nbsp; Stonk™BotPortalWorld<i> 0.0.4𝛼</i>
+  <!-- img class="headerimage" src="thumbmoney.jpg"/ -->
+  <canvas id="stonkgraph" width="50%" height="40%" style="border:0; margin:0; padding:0"></canvas>
+  Stonk™BotPortalWorld<i> 0.0.4𝛼</i>
   <input id="login" class="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </h1>
 
@@ -51,11 +52,15 @@
 /******************************************************************************
   Useful aliases and objects
 ******************************************************************************/
+var PI  = Math.PI;
+var PI2  = PI*2;
 var Floor = Math.floor;
 var Ceil  = Math.ceil;
 var Pow   = Math.pow;
 var Abs   = Math.abs;
 var Rnd   = Math.random;
+var Cos   = Math.cos;
+var Sin   = Math.sin;
 var Mod   = function (n,d) { return n - d * Math.floor(n/d); }
 var CreateAppendChild = function (name, element) { return element.appendChild(document.createElement(name)); }
 var CreateInsertBefore = function (name, element) { return element.insertBefore(document.createElement(name), element.firstChild); }
@@ -252,5 +257,86 @@ function login (event) {
 
   DB("Username="+Username)
 }
+
+(function fakegraph () {
+  //
+  //  Setup canvas
+  DB("::fourier");
+  var canvas = document.getElementsByTagName('canvas')[0];
+  var pcanvas = canvas; // window.pcanvas;
+  var context = canvas.getContext('2d');
+
+  var width = canvas.width = parseInt(window.getComputedStyle(pcanvas,"").getPropertyValue("width"));
+  var height = canvas.height = parseInt(window.getComputedStyle(pcanvas,"").getPropertyValue("height"));
+  DB(`width ${width} height ${height}`)
+
+  var transX = 0;
+  var transY = Floor(height/2);
+  var field = new Array();
+  var idx = width-1;
+
+  context.translate(transX, transY); // Set canvas's origin to center
+  context.strokeStyle = "rgb(0,0,0)";
+
+  //context.clearRect(-transX, -transY, width-transX, height-transY);
+  function clearContext () { // Translucent-fill entire context (slow erase)
+    context.fillStyle="rgba(255,255,255, 1.00)";
+    context.beginPath();
+    context.moveTo(-transX, -transY);
+    context.lineTo(width-transX, -transY);
+    context.lineTo(width-transX, height-transY);
+    context.lineTo(-transX, height-transY);
+    context.fill();
+  }
+
+  function createField () { for (let x=0; x<width ;++x) { field[x] = 0; } }
+
+  let tick = 0.0;
+  function plotField () {
+      for (let x=0; x<(width-1) ;++x) {
+        let a = field[ (x+idx) % width];
+        let b = field[ (x+idx+1) % width];
+        context.strokeStyle =
+            (a < b) ? "rgb(128,0,0)"
+            : (b < a) ? "rgb(0,128,0)"
+            : "rgb(0,0,0)";
+        context.beginPath();
+        context.moveTo( x+.5,   a+.5);
+        context.lineTo( x+1+.5, b+.5);
+        context.stroke();
+      }
+  }
+
+  var price=0;
+  function mutateField () {
+    price += Rnd()*8-4;
+    if (price < -height/2) { price = 0; }
+    if (height/2 < price) { price = 0; }
+    field[idx] = price;
+    idx = (idx+1) % width;
+  }
+
+  function init () {
+    createField();
+  }
+
+  function forever () {
+    clearContext();
+    plotField();
+    mutateField();
+    setTimeout(function(){forever()}, 100);
+  }
+
+  document.body.onkeypress = function () {
+    if (event.keyCode == 'c'.charCodeAt()) ;
+  }
+
+
+  // main
+  init();
+  setTimeout(function(){forever()}, 50);
+
+})();
+
 //]]>
 </script></body></html>

@@ -2658,7 +2658,7 @@ async fn do_each_job (
     for job in jobs {
         let day = match LocalDateTime::at(now).weekday() {
             Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
-            Friday => "f" , Saturday => "s", Sunday => "s" };
+            Friday => "f" , Saturday => "s", Sunday => "u" };
         let env = env.clone();
         let id = job.get_i64("id")?;
         let at = job.get_i64("at")?;
