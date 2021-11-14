@@ -192,19 +192,23 @@ hyphen("yolo", msg => {
       .sort( (a,b) => m[b]-m[a] )
       .map( k => `<b>${k}</b> ${m[k]}` )
       .join("\n");
+    // Try to login with stored credentials
+    if (Cookies.get("username") && Cookies.get("uuid")) {
+        wslogin(`login ${Cookies.get("username")} ${Cookies.get("uuid")}`)
+    }
 });
 
 function stats () {
     hyphen("stats", msg => {
-    let m = JSON.parse(msg);
-    document.getElementById("username").innerHTML = m.name;
-    document.getElementById("stats").innerHTML =
-        Object
-        .keys(m)
-        .sort( (a,b) => m[b]-m[a] )
-        .map( k => `<b>${k}</b> ${m[k]}` )
-        .join("\n");
-    });
+        let m = JSON.parse(msg);
+        document.getElementById("username").innerHTML = m.name;
+        document.getElementById("stats").innerHTML =
+            Object
+            .keys(m)
+            .sort( (a,b) => m[b]-m[a] )
+            .map( k => `<b>${k}</b> ${m[k]}` )
+            .join("\n");
+        });
 }
 
 ////////////////////////////////////////
@@ -229,11 +233,6 @@ function wslogin (username, code) {
           stats();
       }
   });
-}
-
-// Try to login with stored credentials
-if (Cookies.get("username") && Cookies.get("uuid")) {
-    wslogin(`login ${Cookies.get("username")} ${Cookies.get("uuid")}`)
 }
 
 var Username = "";
