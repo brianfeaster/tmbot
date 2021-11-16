@@ -2650,26 +2650,26 @@ async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     Ok(())
 }
 
-async fn do_each_job (
+async fn do_each_scheduled_job (
     jobs: Vec<HashMap<String, sqlite::Value>>,
     env:  Env,
     now:  i64
 ) -> Bresult<()> {
     for job in jobs {
-        let day = match LocalDateTime::at(now).weekday() {
-            Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
-            Friday => "f" , Saturday => "s", Sunday => "u" };
         let env = env.clone();
         let id = job.get_i64("id")?;
         let at = job.get_i64("at")?;
-        let days = job.get_str("days")?;
         let command = job.get_str("cmd")?;
         let mut cmdstruct =
             match CmdStruct::new_cmdstruct(env, now, id, at, at, 0, command) {
                 Ok(cmdstruct) => cmdstruct,
                 e => { glog!(e); continue }
             };
-        if days.is_empty() || days.find(day).is_some() {
+        let days = job.get_str("days")?;
+        let day_now = match LocalDateTime::at(now).weekday() {
+            Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
+            Friday => "f" , Saturday => "s", Sunday => "u" };
+        if days.is_empty() || days.find(day_now).is_some() {
             glog!(do_all(&mut cmdstruct).await);
         }
         let time = job.get_i64("time")?;
@@ -2705,7 +2705,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
         if 0 < jobs.len() {
             info!("\x1b[1mSchedules start\x1b[0m {:?}", &jobs);
             let env = env.clone();
-            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_job(jobs, env, now).await } ); // for rows, async, block_on
+            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_scheduled_job(jobs, env, now).await } ); // for rows, async, block_on
             info!("\x1b[1mSchedules end. {:?}", res);
         }
         env.lock().unwrap().time_scheduler = now;
@@ -2998,8 +2998,10 @@ pub fn main_launch() -> Bresult<()> {
 
 fn fun (argv: std::env::Args) -> Bresult<()>  {
     let env = EnvStruct::new(argv)?;
-    let dt = LocalTime::from_seconds_since_midnight(75000);
+    let now = Instant::now().seconds();
+    let dt = LocalDateTime::at(now);
+    let wd = dt.weekday();
     info!("{:#?}", env);
-    info!("{:#?}", dt);
+    info!("now {:#?} dt {:#?} wd {:#?}", now, dt, wd);
     Ok(())
 }

@@ -59,11 +59,12 @@ h1.header {
   background-color: red;
   color: yellow;
   font-family: monospace;
-  font-size: 200%
+  font-size: 200%;
+  text-align: center;
 }
 
-.cookies > p ~ p {
-  text-align: center;
+.cookies > p > i {
+  font-size: 200%;
   color: blue;
 }
 

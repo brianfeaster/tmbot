@@ -9,7 +9,7 @@
 <h1 class="header">
   <!-- img class="headerimage" src="thumbmoney.jpg"/ -->
   <canvas id="stonkgraph" width="50%" height="40%" style="border:0; margin:0; padding:0"></canvas>
-  Stonk™BotPortalWorld<i> 0.0.4𝛼</i>
+  Stonk™BotPortalWorld<i> 0.0.7𝛼</i>
   <input id="login" class="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </h1>
 
@@ -29,22 +29,23 @@
 
 <table border="1" class="mainbody">
 <tr><td>
-  <h2>Welcome To ™Bot's Stonk Portal World!!!</h2>
+  <h2>Welcome To ™Bot's Web Portal</h2>
 <hr/>
   <p>
-    Welcome to your one stop shop for all things YOLO.  Here you will enjoy your one stop shop portal to all your ™Bot trading needs and desires.  Lick.
+    For now, all trading is currently supported in Telegram only.
   </p>
 </td></tr>
 </table>
 
 <p class="counter">000001</p>
 
-<div class="cookies" onmousedown="event.target.style.display='none'">
-  <p>This site uses COOKIES and may TRACK and SELL your PRIVATE PERSONAL DATA.</p>
+<div id="cookies" class="cookies" onmousedown="ElementById('cookies').style.display='none'">
+  <p>This site uses COOKIES thus will TRACK and SELL every and all of your PRIVATE PERSONAL INFORMATION any chance it gets to the full extent of the law and free capitalism.</p>
   <p><i>I agree to these terms</i></p>
+  <i style="font-size:xx-small">(Don't hate the browser, hate the game.)</i>
 </div>
 
-<p id="DB"></p>
+<p id="xDB"></p>
 <script type="text/javascript">//<![CDATA[
 "use strict"
 
@@ -55,6 +56,7 @@
 var PI  = Math.PI;
 var PI2  = PI*2;
 var Floor = Math.floor;
+var Round = Math.round;
 var Ceil  = Math.ceil;
 var Pow   = Math.pow;
 var Abs   = Math.abs;
@@ -218,8 +220,11 @@ function stats () {
 
 ////////////////////////////////////////
 
-if (document.location.href.substr(0,5) != "file:") { ElementById('DB').style.display="none" }
 var Cookies = new Map(document.cookie.split(";").map( p => p.split("=").map( s => s.trim() ) ))
+//var Cookies = new Map([["username",""],["uuid",""]]);
+
+if (document.location.href.substr(0,5) != "file:") { ElementById('DB').style.display="none" }
+if (Cookies.get("username")) { ElementById('cookies').style.display = "none"; }
 
 ////////////////////////////////////////
 
@@ -235,6 +240,7 @@ function wslogin (username, code) {
           document.cookie=`username=${username}`
           document.cookie=`uuid=${code}`
           E.placeholder = `welcome ${msg}`;
+          ElementById('cookies').style.display = "none";
           stats();
       }
   });
@@ -258,85 +264,34 @@ function login (event) {
   DB("Username="+Username)
 }
 
-(function fakegraph () {
-  //
-  //  Setup canvas
-  DB("::fourier");
-  var canvas = document.getElementsByTagName('canvas')[0];
-  var pcanvas = canvas; // window.pcanvas;
-  var context = canvas.getContext('2d');
-
-  var width = canvas.width = parseInt(window.getComputedStyle(pcanvas,"").getPropertyValue("width"));
-  var height = canvas.height = parseInt(window.getComputedStyle(pcanvas,"").getPropertyValue("height"));
-  DB(`width ${width} height ${height}`)
-
-  var transX = 0;
-  var transY = Floor(height/2);
-  var field = new Array();
-  var idx = width-1;
-
-  context.translate(transX, transY); // Set canvas's origin to center
-  context.strokeStyle = "rgb(0,0,0)";
-
-  //context.clearRect(-transX, -transY, width-transX, height-transY);
-  function clearContext () { // Translucent-fill entire context (slow erase)
-    context.fillStyle="rgba(255,255,255, 1.00)";
-    context.beginPath();
-    context.moveTo(-transX, -transY);
-    context.lineTo(width-transX, -transY);
-    context.lineTo(width-transX, height-transY);
-    context.lineTo(-transX, height-transY);
-    context.fill();
+// Fake stonk graph animation
+let canvas = document.getElementsByTagName('canvas')[0];
+let ctx = canvas.getContext('2d');
+let [width,height] = [canvas.width, canvas.height];
+let me = new Array(width+1).fill(0);
+me.stroke = (s)=>((ctx.strokeStyle=s), ctx.stroke(), me);
+me.begin = ()=>(ctx.beginPath(), me);
+me.line = function (a,b,x,y) {
+  let [m,n] = (a<x)?[-.5,.5]:[.5,-.5];
+  let [o,p] = (b<y)?[0,0]:[0,0];
+  ctx.moveTo(a,b+o); ctx.lineTo(x,y+p); return me;
+}
+me.rect = (s,a,b,w,h)=>((ctx.fillStyle=s),ctx.fillRect( Floor(a)-1, Floor(b)-1, w, h), me);
+ctx.setTransform(1, 0, 0, -1, 0, height/2);
++function forever (price, idx) {
+  me.rect("rgb(0,0,0)", 0, -height/2+1, width, height) // Clear
+  .begin().line(-.5,-.5,width,-.5).stroke("rgb(128,128,128)"); // axis
+  for (let x=0; x<width; ++x) { // graph
+    let [a,b] = [me[(x+idx) % me.length], me[(x+idx+1) % me.length]];
+    me
+    .begin().line(x-.5,Round(a),x-.5,Round(b))
+    .stroke((a < b)?"rgb(0,255,0)":(b < a)?"rgb(255,0,0)":"rgb(128,128,128)");
   }
-
-  function createField () { for (let x=0; x<width ;++x) { field[x] = 0; } }
-
-  let tick = 0.0;
-  function plotField () {
-      for (let x=0; x<(width-1) ;++x) {
-        let a = field[ (x+idx) % width];
-        let b = field[ (x+idx+1) % width];
-        context.strokeStyle =
-            (a < b) ? "rgb(128,0,0)"
-            : (b < a) ? "rgb(0,128,0)"
-            : "rgb(0,0,0)";
-        context.beginPath();
-        context.moveTo( x+.5,   a+.5);
-        context.lineTo( x+1+.5, b+.5);
-        context.stroke();
-      }
-  }
-
-  var price=0;
-  function mutateField () {
-    price += Rnd()*8-4;
-    if (price < -height/2) { price = 0; }
-    if (height/2 < price) { price = 0; }
-    field[idx] = price;
-    idx = (idx+1) % width;
-  }
-
-  function init () {
-    createField();
-  }
-
-  function forever () {
-    clearContext();
-    plotField();
-    mutateField();
-    setTimeout(function(){forever()}, 100);
-  }
-
-  document.body.onkeypress = function () {
-    if (event.keyCode == 'c'.charCodeAt()) ;
-  }
-
-
-  // main
-  init();
-  setTimeout(function(){forever()}, 50);
-
-})();
+  setTimeout(forever.bind(0,
+    me[idx] = (height/2 < Abs(price)) ? price*=.5 : price + Round(Rnd()*10)-5,
+    (idx+1)%me.length
+  ), 100);
+}(0,0);
 
 //]]>
 </script></body></html>
