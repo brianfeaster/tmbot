@@ -3,49 +3,58 @@
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
 <head>
  <title>Stonk™BotPortal</title>
- <link rel="stylesheet" href="index.css" type="text/css" media="screen" title="Shrewm"/>
+ <link rel="stylesheet" href="index.css" type="text/css" media="screen" title="Stonk™BotPortal"/>
 </head><body>
 
-<h1 class="header">
-  <!-- img class="headerimage" src="thumbmoney.jpg"/ -->
-  <canvas id="stonkgraph" width="50%" height="40%" style="border:0; margin:0; padding:0"></canvas>
-  Stonk™BotPortalWorld<i> 0.0.7𝛼</i>
-  <input id="login" class="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
-</h1>
-
-<table border="1" class="yololians">
-<tr><td>
-  <b>YOLOLIANS</b>
-</td></tr><tr><td>
-  <pre id="yololians"></pre>
+<table class="header" border="1"><tr><td class="headercontent">
+  <canvas id="canvasticker" width="100" height="50"></canvas>
+  <h1>Stonk™BotPortal</h1><i>0.0.8𝛼</i>
+  <input id="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </td></tr></table>
 
-<table border="1" class="yololians">
-<tr><td>
-  <b id="username">User</b>
-</td></tr><tr><td>
-  <pre id="stats"></pre>
-</td></tr></table>
+<div>
 
-<table border="1" class="mainbody">
-<tr><td>
-  <h2>Welcome To ™Bot's Web Portal</h2>
-<hr/>
-  <p>
-    For now, all trading is currently supported in Telegram only.
-  </p>
-</td></tr>
-</table>
+  <table border="1" class="info">
+  <tr><td>
+    <b>YOLOLIANS</b>
+  </td></tr><tr><td>
+    <pre id="yololians"></pre>
+  </td></tr></table>
+
+  <table border="1" class="info">
+  <tr><td>
+    <b id="username">User</b>
+  </td></tr><tr><td>
+    <pre id="stats"></pre>
+  </td></tr></table>
+
+  <table border="1" class="blog">
+  <tr><td>
+    <h2>Welcome To ™Bot's Web Portal</h2>
+  </td></tr><tr><td>
+    Please excuse the dust as we perform engineering.  Stonk trading is only accessible via Telegram until further notice.
+  </td></tr>
+  </table>
+
+  <table border="1" class="blog">
+  <tr><td>
+    <h2>Hello, World</h2>
+  </td></tr><tr><td>
+    Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum. 
+  </td></tr>
+  </table>
+
+</div>
 
 <p class="counter">000001</p>
 
-<div id="cookies" class="cookies" onmousedown="ElementById('cookies').style.display='none'">
+<div id="cookiewarning" onmousedown="ElementById('cookiewarning').style.display='none'">
   <p>This site uses COOKIES thus will TRACK and SELL every and all of your PRIVATE PERSONAL INFORMATION any chance it gets to the full extent of the law and free capitalism.</p>
   <p><i>I agree to these terms</i></p>
   <i style="font-size:xx-small">(Don't hate the browser, hate the game.)</i>
 </div>
 
-<p id="xDB"></p>
+<p id="DB"></p>
 <script type="text/javascript">//<![CDATA[
 "use strict"
 
@@ -224,7 +233,7 @@ var Cookies = new Map(document.cookie.split(";").map( p => p.split("=").map( s =
 //var Cookies = new Map([["username",""],["uuid",""]]);
 
 if (document.location.href.substr(0,5) != "file:") { ElementById('DB').style.display="none" }
-if (Cookies.get("username")) { ElementById('cookies').style.display = "none"; }
+if (Cookies.get("username")) { ElementById('cookiewarning').style.display = "none"; }
 
 ////////////////////////////////////////
 
@@ -240,7 +249,7 @@ function wslogin (username, code) {
           document.cookie=`username=${username}`
           document.cookie=`uuid=${code}`
           E.placeholder = `welcome ${msg}`;
-          ElementById('cookies').style.display = "none";
+          ElementById('cookiewarning').style.display = "none";
           stats();
       }
   });
@@ -265,9 +274,10 @@ function login (event) {
 }
 
 // Fake stonk graph animation
-let canvas = document.getElementsByTagName('canvas')[0];
+let canvas = ElementById("canvasticker");
 let ctx = canvas.getContext('2d');
 let [width,height] = [canvas.width, canvas.height];
+DB(`${width}x${height}`);
 let me = new Array(width+1).fill(0);
 me.stroke = (s)=>((ctx.strokeStyle=s), ctx.stroke(), me);
 me.begin = ()=>(ctx.beginPath(), me);

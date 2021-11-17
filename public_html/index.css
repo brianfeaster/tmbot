@@ -1,43 +1,49 @@
 body {
+  font-family: monospace;
   background-image: url('moneybg.jpg')
 }
 
-.header {
-  background-color: green;
-}
-
-.headerimage {
-  float:left; 
-  height: 1.5em;
-}
-
-h1.header {
-  position: relative;
-  margin: 0 0 1em 0;
-  padding: .2em;
-}
-
-.login {
+h1,h2 {
   display: inline-block;
-  position: absolute;
-  right: 1em;
-  bottom: 1em;
+  margin:0; border:0; padding:0;
 }
 
-.mainbody {
-  font-size: larger;
-  background-color: lightgray;
+.header {
+  background-color: rgba(0,128,0, 0.9);
+  margin: 0 auto 0 auto;
 }
 
-.mainbody td p {
-  padding: 1ex;
+.headercontent {
+  text-align: center;
 }
 
-.yololians {
-  margin: 1em;
+canvas {
+  vertical-align: middle;
+}
+
+.headercontent > h1 {
+  vertical-align: middle;
+}
+
+.headercontent > i {
+  vertical-align: bottom;
+}
+
+.headercontent > input {
+  vertical-align: middle;
+}
+
+.info {
   float: right;
-  background-color: #d0e0d0;
   clear: both;
+  margin: 1em 0 0 1em;
+  background-color: #d0e0d0;
+}
+
+.blog {
+  background-color: lightgray;
+  vertical-align: top;
+  margin-top: 1em;
 }
 
 .counter {
@@ -46,10 +52,9 @@ h1.header {
   bottom: 0;
   background-color: black;
   color: white;
-  font-family: monospace;
 }
 
-.cookies {
+#cookiewarning {
   display: none;
   max-width: 20em;
   position: fixed;
@@ -58,12 +63,11 @@ h1.header {
   transform: translate(-50%, -60%);
   background-color: red;
   color: yellow;
-  font-family: monospace;
   font-size: 200%;
   text-align: center;
 }
 
-.cookies > p > i {
+#cookiewarning > p > i {
   font-size: 200%;
   color: blue;
 }
@@ -81,4 +85,10 @@ h1.header {
     position:fixed;
     right:0;
     bottom:0;
+    z-index:-1;
 }
+
+/* static, relative - in-flow
+   sticky           - relative+fixed
+   fixed, absolute  - out-flow
+*/
