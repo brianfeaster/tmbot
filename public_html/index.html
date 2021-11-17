@@ -7,11 +7,11 @@
 </head><body>
 
 <table class="header" border="1"><tr><td class="headercontent">
-  <canvas id="canvasticker" width="100" height="50"></canvas>
-  <h1>Stonk™BotPortal</h1><i>0.0.8𝛼</i>
+  <canvas id="canvasticker" width="100" height="50" onmousedown="ToggleElementDisplay(ElementById('monkey'))"></canvas>
+  <h1>Stonk™BotPortal</h1><i>0.0.9𝛼</i>
   <input id="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </td></tr></table>
-
+<p class="headercontent"><img id="monkey" src="punchthemonkey.jpg" width="600" style="display:none" onmousedown="ToggleElementDisplay(event.target)"/><p>
 <div>
 
   <table border="1" class="info">
@@ -46,7 +46,7 @@
 
 </div>
 
-<p class="counter">000001</p>
+<p id="hitcounter"></p>
 
 <div id="cookiewarning" onmousedown="ElementById('cookiewarning').style.display='none'">
   <p>This site uses COOKIES thus will TRACK and SELL every and all of your PRIVATE PERSONAL INFORMATION any chance it gets to the full extent of the law and free capitalism.</p>
@@ -205,6 +205,7 @@ hyphen("yolo", msg => {
   document.getElementById("yololians").innerHTML =
     Object
       .keys(m)
+      .filter( k => k!="hitcounter")
       .sort( (a,b) => m[b]-m[a] )
       .map( k => `<b>${k}</b> ${m[k]}` )
       .join("\n");
@@ -212,6 +213,8 @@ hyphen("yolo", msg => {
     if (Cookies.get("username") && Cookies.get("uuid")) {
         wslogin(Cookies.get("username"), Cookies.get("uuid"));
     }
+
+    ElementById("hitcounter").innerText = `${m.hitcounter}`.padStart(8,'0');
 });
 
 function stats () {
@@ -303,5 +306,7 @@ ctx.setTransform(1, 0, 0, -1, 0, height/2);
   ), 100);
 }(0,0);
 
+/***************************************
+***************************************/
 //]]>
 </script></body></html>

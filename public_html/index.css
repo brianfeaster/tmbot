@@ -1,94 +1,91 @@
 body {
-  font-family: monospace;
-  background-image: url('moneybg.jpg')
+  font-family:monospace;
+  background-image:url('moneybg.jpg')
 }
 
 h1,h2 {
-  display: inline-block;
+  display:inline-block;
   margin:0; border:0; padding:0;
 }
-
+/**************************************/
 .header {
-  background-color: rgba(0,128,0, 0.9);
-  margin: 0 auto 0 auto;
+  background-color:rgba(0,128,0, 0.9);
+  margin:0 auto 0 auto;
 }
 
 .headercontent {
-  text-align: center;
+  text-align:center;
 }
 
-canvas {
-  vertical-align: middle;
+.headercontent canvas {
+  vertical-align:middle;
 }
 
 .headercontent > h1 {
-  vertical-align: middle;
+  vertical-align:middle;
 }
 
 .headercontent > i {
-  vertical-align: bottom;
+  vertical-align:bottom;
 }
 
 .headercontent > input {
-  vertical-align: middle;
+  vertical-align:middle;
 }
-
+/**************************************/
 .info {
-  float: right;
-  clear: both;
-  margin: 1em 0 0 1em;
-  background-color: #d0e0d0;
+  float:right;
+  clear:both;
+  margin:0 0 1em 1em;
+  background-color:#d0e0d0;
 }
 
 .blog {
-  background-color: lightgray;
-  vertical-align: top;
-  margin-top: 1em;
+  background-color:lightgray;
+  margin-top:1em;
 }
-
-.counter {
-  position: fixed;
-  left: 50%;
-  bottom: 0;
-  background-color: black;
-  color: white;
+/**************************************/
+#hitcounter {
+  position:fixed;
+  left:50%;
+  bottom:0;
+  background-color:black;
+  color:white;
 }
 
 #cookiewarning {
-  display: none;
-  max-width: 20em;
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -60%);
-  background-color: red;
-  color: yellow;
-  font-size: 200%;
-  text-align: center;
+  display:none;
+  max-width:20em;
+  position:fixed;
+  left:50%;
+  top:50%;
+  transform:translate(-50%, -60%);
+  background-color:red;
+  color:yellow;
+  font-size:200%;
+  text-align:center;
 }
 
 #cookiewarning > p > i {
-  font-size: 200%;
-  color: blue;
+  font-size:200%;
+  color:blue;
 }
-
+/**************************************/
 #DB {
-    width:24em;
-    background:black;
-    color: #0f0;
-    z-index:1;
-    border:solid 1px green;
-    margin:0;
-    white-space:pre;
-    overflow:auto;
-    max-height:40em;
-    position:fixed;
-    right:0;
-    bottom:0;
     z-index:-1;
+    position:fixed; right:0; bottom:0;
+    margin:0; border:solid 1px green;
+    width:40em; max-height:8em;
+    overflow:auto;
+    background:black;
+    color:#0f0;
+    font-size:x-small;
+    white-space:pre;
 }
-
-/* static, relative - in-flow
-   sticky           - relative+fixed
-   fixed, absolute  - out-flow
-*/
+/***************************************
+  static, relative - in-flow
+  sticky           - relative+fixed
+  fixed, absolute  - out-flow
+  
+  display:flex allows children to center via margin:auto
+***************************************/

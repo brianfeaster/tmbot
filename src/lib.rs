@@ -2819,7 +2819,7 @@ fn web_login (env: Env, name: &str) -> Bresult<i64> {
     Ok(id)
 }
 
-fn web_yolo (envstruct: &EnvStruct) -> Bresult<String> {
+fn web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
                FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
                      FROM positions \
@@ -2839,16 +2839,20 @@ fn web_yolo (envstruct: &EnvStruct) -> Bresult<String> {
                NATURAL JOIN accounts \
                NATURAL JOIN entitys \
                ORDER BY yolo DESC";
-    let dbconn = &envstruct.dbconn;
-    let yololians = serde_json::to_string(
-        &getsql!(dbconn, &sql)?
+
+    let mut yololians =
+      getsql!(&envstruct.dbconn, &sql)?
             .iter()
             .map( |row| (
                 row.get_string("name").unwrap_or("?".to_string()),
                 row.get_f64("yolo").unwrap_or(0.0) ) )
-            .collect::<HashMap<String, f64>>())?;
-    info!("created json: {:?}", &yololians);
-    Ok(yololians)
+            .collect::<HashMap<String, f64>>();
+
+    yololians.insert("hitcounter".to_string(), envstruct.entity_likes_inc(1544486685, 1)? as f64);
+
+    let json = serde_json::to_string(&yololians)?;
+    info!("created json: {:?}", &json);
+    Ok(json)
 }
 
 struct MyWs { id: i64, env: Env }
@@ -2890,8 +2894,8 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
                             }
                         },
                         "yolo" => {
-                            let envstruct = self.env.lock().unwrap();
-                            web_yolo(&envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+                            let mut envstruct = self.env.lock().unwrap();
+                            web_yolo(&mut envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
                         },
                         "login" => {
                             if 2 == words.len() { // Message user privately their login code
@@ -2979,7 +2983,6 @@ pub fn main_websocket_ssl(env:Env) -> Bresult<()> {
 }
 
 ////////////////////////////////////////
-
 pub fn main_launch() -> Bresult<()> {
     let argv = env::args();
     if 1 == argv.len() {
