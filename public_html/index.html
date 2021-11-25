@@ -277,33 +277,26 @@ function login (event) {
 }
 
 // Fake stonk graph animation
-let canvas = ElementById("canvasticker");
-let ctx = canvas.getContext('2d');
-let [width,height] = [canvas.width, canvas.height];
-DB(`${width}x${height}`);
-let me = new Array(width+1).fill(0);
-me.stroke = (s)=>((ctx.strokeStyle=s), ctx.stroke(), me);
-me.begin = ()=>(ctx.beginPath(), me);
-me.line = function (a,b,x,y) {
-  let [m,n] = (a<x)?[-.5,.5]:[.5,-.5];
-  let [o,p] = (b<y)?[0,0]:[0,0];
-  ctx.moveTo(a,b+o); ctx.lineTo(x,y+p); return me;
-}
-me.rect = (s,a,b,w,h)=>((ctx.fillStyle=s),ctx.fillRect( Floor(a)-1, Floor(b)-1, w, h), me);
-ctx.setTransform(1, 0, 0, -1, 0, height/2);
+const ctx = ElementById("canvasticker").getContext('2d');
+const [W, H] = [ctx.canvas.width, ctx.canvas.height];
+const G = new Array(W+1).fill(0);
+const len = G.length;
+const rect = (s,x,y,w,h)=>{ ctx.fillStyle=s; ctx.fillRect(Floor(x)-1, Floor(y)-1, w, h); };
+const line = (s,x,y,m,n)=>{ ctx.strokeStyle=s; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(m,n); ctx.stroke(); };
+DB(`${W}x${H}`);
+ctx.setTransform(1, 0, 0, -1, 0, H/2); // Screen origin => left centered cartesian
 +function forever (price, idx) {
-  me.rect("rgb(0,0,0)", 0, -height/2+1, width, height) // Clear
-  .begin().line(-.5,-.5,width,-.5).stroke("rgb(128,128,128)"); // axis
-  for (let x=0; x<width; ++x) { // graph
-    let [a,b] = [me[(x+idx) % me.length], me[(x+idx+1) % me.length]];
-    me
-    .begin().line(x-.5,Round(a),x-.5,Round(b))
-    .stroke((a < b)?"rgb(0,255,0)":(b < a)?"rgb(255,0,0)":"rgb(128,128,128)");
+  rect("rgb(0,0,0)", 0, -H/2+1, W, H);// Clear
+  line("rgb(128,128,128)", -.5, -.5, W, -.5); // axis
+  for (let x=0; x<W; ++x) { // graph
+    let [a,b] = [G[(x+idx) % len], G[(x+idx+1) % len]];
+    line((a < b)?"rgb(0,255,0)":(b < a)?"rgb(255,0,0)":"rgb(128,128,128)",
+      x-.5, Round(a), x-.5, Round(b));
   }
-  setTimeout(forever.bind(0,
-    me[idx] = (height/2 < Abs(price)) ? price*=.5 : price + Round(Rnd()*10)-5,
-    (idx+1)%me.length
-  ), 100);
+  setTimeout( forever.bind(null,
+       G[idx] = (H/2 < Abs(price)) ? price*=.5 : price + Round(Rnd()*10)-5,
+      (idx+1)%len
+    ), 100);
 }(0,0);
 
 /***************************************

@@ -347,7 +347,7 @@ pub struct EnvStruct {
 type Env = Arc<Mutex<EnvStruct>>;
 
 impl From<EnvStruct> for Env {
-    fn from (envstruct:EnvStruct) -> Self {
+    fn from (envstruct: EnvStruct) -> Self {
         Arc::new(Mutex::new(envstruct))
     }
 }
@@ -1078,7 +1078,7 @@ r#"`          ™Bot Commands          `
 `word: ` `Definition lookup`
 `+1    ` `Like someone's post (via reply)`
 `+?    ` `Like leaderboard`
-`/stonks [sort]` `Your Stonkfolio`
+`/stonks` `Your Stonkfolio`
 `/orders` `Your @shares and bid/ask orders`
 `/yolo  ` `Stonks leaderboard`
 `gme$   ` `Quote ({}min delay)`
@@ -1338,10 +1338,10 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
 ////////////////////////////////////////
 
 async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let caps = regex_to_vec(r"(?i)/stonks( sort)?", &cmdstruct.message)?;
+    let caps = regex_to_vec(r"(?i)/stonks( .+)?", &cmdstruct.message)?;
     if caps.is_empty() { return Ok("SKIP"); }
 
-    let dosort = !caps[1].is_none();
+    let dosort = caps[1].is_none();
     let positions = Position::get_users_positions(cmdstruct)?;
 
     cmdstruct.markdown().push_msg("…").send_msg().await?;
@@ -1653,12 +1653,12 @@ impl<'a> TradeSell<'a> {
 
         let bp = trade.cmdstruct.buying_power().await?;
 
-        let mut qty =
+        let qty =
             roundqty(match trade.amt {
                 Some(amt) => IF!(trade.is_dollars, amt/price, amt), // Convert dollars to shares
                 None =>
                     if position.qty <= 0.0 {
-                        bp / price // Short entire bying power
+                        roundqty(bp / price) // Short entire bying power
                     } else {
                         position.qty // no amount set, so set to entire qty
                     }
@@ -1668,6 +1668,21 @@ impl<'a> TradeSell<'a> {
                 trade.cmdstruct.push_msg("Quantity too low.").send_msg().await?;
                 Err("sell qty too low")?
         }
+
+        let (mut qty, _new_balance) =
+            match
+                verify_qty(qty, price, bp)
+                .or_else( |_e| verify_qty(qty-0.0001, price, bp) )
+                .or_else( |_e| verify_qty(qty-0.0002, price, bp) )
+                .or_else( |_e| verify_qty(qty-0.0003, price, bp) )
+                .or_else( |_e| verify_qty(qty-0.0004, price, bp) )
+                .or_else( |_e| verify_qty(qty-0.0005, price, bp) ) {
+                Err(e) => {  // Message user problem and log
+                    trade.cmdstruct.push_msg(&e).send_msg().await?;
+                    (qty, 0.0)
+                },
+                Ok(r) => r
+            };
 
         let short = position.qty <= 0.0;
         let mut gain = qty*price;
@@ -2999,12 +3014,41 @@ pub fn main_launch() -> Bresult<()> {
     }
 }
 
-fn fun (argv: std::env::Args) -> Bresult<()>  {
-    let env = EnvStruct::new(argv)?;
-    let now = Instant::now().seconds();
-    let dt = LocalDateTime::at(now);
-    let wd = dt.weekday();
-    info!("{:#?}", env);
-    info!("now {:#?} dt {:#?} wd {:#?}", now, dt, wd);
+////////////////////////////////////////
+/*
+trait Monad<D,W> where W: Fn(D)->D{
+  fn data(&self) -> D;
+  fn work(&self) -> W;
+}
+////////////////////////////////////////
+struct Monad1<'a, D, E> {
+  data: D,
+  work: &'a dyn Fn(&D) -> E,
+}
+
+impl<D> Monad1<'_, D, E> {
+  fn work(&mut self) {
+    self.data = (*self.work)(&self.data)
+  }
+}
+*/
+
+fn fun (_argv: std::env::Args) -> Bresult<()>  {
+  /*
+    let mut data = Monad1{data:5.0, work: &|m| m.data += m.data ;
+    println!("data = {:?}", data.data);
+
+    data.work();
+    println!("data = {:?}", data.data);
+
+    data.work = &|i|i*i;
+
+    data.work();
+    println!("data = {:?}", data.data);
+
+    data.work();
+    println!("data = {:?}", data.data);
+*/
+
     Ok(())
 }
