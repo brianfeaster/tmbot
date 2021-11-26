@@ -7,7 +7,7 @@
 </head><body>
 
 <table class="header" border="1"><tr><td class="headercontent">
-  <canvas id="canvasticker" width="100" height="50" onmousedown="ToggleElementDisplay(ElementById('monkey'))"></canvas>
+  <canvas id="canvasticker" width="100" height="50" onmousedown="secretclick()"></canvas>
   <h1>Stonk™BotPortal</h1><i>0.0.9𝛼</i>
   <input id="login" name="login" type="search" placeholder="login" onkeydown="login(event)"/>
 </td></tr></table>
@@ -54,7 +54,7 @@
   <i style="font-size:xx-small">(Don't hate the browser, hate the game.)</i>
 </div>
 
-<p id="DB"></p>
+<p id="xDB"></p>
 <script type="text/javascript">//<![CDATA[
 "use strict"
 
@@ -81,6 +81,7 @@ var ToggleElementDisplay = function (e1, e2) {
   if (e2) { e2.style.display = off ? "none" : ""; } // e2's style is opposite e1.
 }
 var ElementById = function(id) { return document.getElementById(id); }
+function disordat () { return Floor(Rnd()*2)*2-1 }
 
 /******************************************************************************
   Debug message console and error checking
@@ -276,29 +277,71 @@ function login (event) {
   DB("Username="+Username)
 }
 
-// Fake stonk graph animation
+// Common GFX routines
 const ctx = ElementById("canvasticker").getContext('2d');
 const [W, H] = [ctx.canvas.width, ctx.canvas.height];
-const G = new Array(W+1).fill(0);
-const len = G.length;
+DB(`${W}x${H}`);
 const rect = (s,x,y,w,h)=>{ ctx.fillStyle=s; ctx.fillRect(Floor(x)-1, Floor(y)-1, w, h); };
 const line = (s,x,y,m,n)=>{ ctx.strokeStyle=s; ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(m,n); ctx.stroke(); };
-DB(`${W}x${H}`);
+
+// Fake stonk graph animation
+const G = new Array(W+1).fill(0);
+const len = G.length;
 ctx.setTransform(1, 0, 0, -1, 0, H/2); // Screen origin => left centered cartesian
-+function forever (price, idx) {
-  rect("rgb(0,0,0)", 0, -H/2+1, W, H);// Clear
+function stonkgraph (price, idx) {
+  rect("rgb(0,0,0)", 1, -H/2+1, W, H);// Clear
   line("rgb(128,128,128)", -.5, -.5, W, -.5); // axis
   for (let x=0; x<W; ++x) { // graph
     let [a,b] = [G[(x+idx) % len], G[(x+idx+1) % len]];
     line((a < b)?"rgb(0,255,0)":(b < a)?"rgb(255,0,0)":"rgb(128,128,128)",
       x-.5, Round(a), x-.5, Round(b));
   }
-  setTimeout( forever.bind(null,
-       G[idx] = (H/2 < Abs(price)) ? price*=.5 : price + Round(Rnd()*10)-5,
-      (idx+1)%len
-    ), 100);
-}(0,0);
+  return [G[idx] = (H/2 < Abs(price)) ? price*=.5 : price + Round(Rnd()*10)-5, (idx+1)%len];
+};
 
+// Fake stonk graph animation
+const dot = [0, 0, 1, 1]; // x, y, dx, dy
+const p1 = [1, 0, 0, -.7]; // x, y, dx, dy
+const p2 = [W-1, 0, 0, 1]; // x, y, dx, dy
+ctx.setTransform(1, 0, 0, -1, 0, H/2); // Screen origin => left centered cartesian
+
+function pong () {
+  rect("rgb(0,0,0)", 1, -H/2+1, W, H);
+  rect("rgb(255,255,255)", dot[0]-1, dot[1]-1, 4, 4);
+  rect("rgb(255,255,255)", p1[0]-1, p1[1]-8, 4, 16);
+  rect("rgb(255,255,255)", p2[0]-1, p2[1]-8, 4, 16);
+  dot[0] += dot[2];  dot[1] += dot[3]; if (W < Abs(dot[0]-W/2)*2) { dot[2] *= -1; } if (H < Abs(dot[1])*2) { dot[3] *= -1; }
+  p1[1] += p1[3]; if (H < Abs(p1[1])*2) { p1[3] *= -1; }
+  p2[1] += p2[3]; if (H < Abs(p2[1])*2) { p2[3] *= -1; }
+  return [pong];
+};
+
+let contdemo = function(gen, args) {
+  setTimeout(
+    contdemo.bind(
+      null,
+      gen.next(!contdemo.switch).value(...(args||[]))),
+    40);
+  contdemo.switch = true;
+}.bind(null, 
+  function* (which) {
+    let fn = stonkgraph.bind(null, 0, 0);
+    while (true) {
+      if (yield fn) {
+        which = (which + 1) % 2
+        fn = [stonkgraph.bind(null, 0, 0), pong][which];
+      } else {
+        fn = [stonkgraph, pong][which];
+      }
+    }
+  }(0));
+
+contdemo();
+
+function secretclick () {
+  ToggleElementDisplay(ElementById('monkey'));
+  contdemo.switch = false;
+}
 /***************************************
 ***************************************/
 //]]>
