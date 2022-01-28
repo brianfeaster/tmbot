@@ -15,7 +15,7 @@ use ::log::*;
 use ::regex::Regex;
 use ::datetime::{ Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::* };
 use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod, SslAcceptorBuilder};
-use ::actix::{ Actor, StreamHandler };
+use ::actix::{ prelude::*, Actor, StreamHandler };
 use ::actix_web::{ web, App, HttpRequest, HttpServer, HttpResponse, Route, client::{Client, Connector} };
 use ::actix_web_actors::ws;
 
@@ -425,13 +425,23 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
                 uuid:    String::new()
             });
     }
-    Ok(Env::from(EnvStruct{
+    entitys.insert(0, Entity{
+                id:       0,
+                name:     "nil".to_string(),
+                balance:  0.0,
+                echo:     2,
+                likes:    0,
+                quote:    String::new(),
+                position: String::new(),
+                uuid:     String::new()
+    });
+    Ok(EnvStruct{
         url_api, dbconn,
         dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
         entitys,
-    }))
+    }.into())
 } }
 
 ////////////////////////////////////////
@@ -477,7 +487,7 @@ impl MsgDetails for CmdStruct {
 
 impl CmdStruct {
     // Creates a Cmd object from Env and Telegram message body.
-    fn newcmdstruct(env:Env, body: &web::Bytes) -> Bresult<CmdStruct> {
+    fn newcmdstruct(env: Env, body: &web::Bytes) -> Bresult<CmdStruct> {
         let json: Value = bytes2json(&body)?;
         let inline_query = &json["inline_query"];
         let edited_message = &json["edited_message"];
@@ -500,7 +510,7 @@ impl CmdStruct {
     }
 
     // create a basic CmdStruct
-    fn new_cmdstruct(env:Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
+    fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().unwrap();
             (   Telegram::new(envstruct.url_api.to_string())?,
@@ -906,7 +916,12 @@ impl Position {
 impl Position {
     fn get_users_positions (cmdstruct: &mut CmdStruct) -> Bresult<Vec<Position>> {
         let id = cmdstruct.id;
-        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let envstruct = &mut getenvstruct!(cmdstruct);
+        Position::get_user_positions_env(envstruct, id)
+    }
+
+    fn get_user_positions_env (envstruct: &mut EnvStruct, id: i64) -> Bresult<Vec<Position>> {
+        let dbconn = &envstruct.dbconn;
         Ok(getsql!(dbconn, "SELECT ticker, qty, price FROM positions WHERE id=?", id)?
         .iter()
         .map( |pos|
@@ -1665,11 +1680,14 @@ impl<'a> TradeSell<'a> {
             });
 
         if qty == 0.0 {
-                trade.cmdstruct.push_msg("Quantity too low.").send_msg().await?;
-                Err("sell qty too low")?
+            trade.cmdstruct.push_msg("Quantity too low.").send_msg().await?;
+            Err("sell qty too low")?
         }
 
+        let short = position.qty <= 0.0;
+
         let (mut qty, _new_balance) =
+            if !short { (qty, 0.0) } else {
             match
                 verify_qty(qty, price, bp)
                 .or_else( |_e| verify_qty(qty-0.0001, price, bp) )
@@ -1682,9 +1700,8 @@ impl<'a> TradeSell<'a> {
                     (qty, 0.0)
                 },
                 Ok(r) => r
-            };
+            } };
 
-        let short = position.qty <= 0.0;
         let mut gain = qty*price;
         let bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id)?;
         let mut new_balance = bank_balance+gain;
@@ -2470,7 +2487,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let caps =
         regex_to_vec(
-            r"(?xi)^/schedule
+            r"(?sxi)^/schedule
             (
                 (?: ### Fixed GMT
                     \ +
@@ -2755,7 +2772,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
         from_utf8(&body)
             .unwrap_or(&format!("{:?}", body)) );
 
-    let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
+    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
     //info!("\x1b[1m{:?}", env.lock().unwrap());
 
     std::thread::spawn( move || {
@@ -2771,7 +2788,7 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     "".into()
 }
 
-pub fn launch_server(env:Env) -> Bresult<()> {
+pub fn launch_server(env: Env) -> Bresult<()> {
     let ssl_acceptor_builder = comm::new_ssl_acceptor_builder()?;
     let srv =
         HttpServer::new( move ||
@@ -2799,6 +2816,12 @@ fn envstruct_get_entity<'e> (
         if name == &entity.name { Some(entity) }
         else { None } )
     .ok_or("missing user".into())
+}
+
+#[derive(Message)]
+#[rtype(result = "()")]
+pub struct Line {
+    line: String,
 }
 
 fn web_login (env: Env, name: &str) -> Bresult<i64> {
@@ -2870,12 +2893,52 @@ fn web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
     Ok(json)
 }
 
-struct MyWs { id: i64, env: Env }
+async fn web_stonks (cmdstruct: &mut CmdStruct) -> Bresult<String> {
+    let positions = Position::get_users_positions(cmdstruct)?;
+    let mut quotes :Vec<Vec<String>> = Vec::new();
+    let mut long = 0.0;
+    let mut short = 0.0;
+    for mut pos in positions {
+        if !is_self_stonk(&pos.ticker) {
+            pos.update_quote(&cmdstruct).await?;
+            info!("{} position {:?}", cmdstruct.id, &pos);
+            let quote = pos.quote.as_ref().ok_or("quote not acquired")?;
+            quotes.push(
+                vec!(
+                    pos.ticker,
+                    pos.qty.to_string(),
+                    pos.price.to_string(),
+                    quote.price.to_string() ) );
+            if pos.qty < 0.0 {
+                short += pos.qty * pos.quote.unwrap().price;
+            } else {
+                long += pos.qty * pos.quote.unwrap().price;
+            }
+        }
+    }
 
-impl Actor for MyWs { type Context = ws::WebsocketContext<Self>; }
+    let cash = roundcents(getenvstruct!(cmdstruct).entity_balance(cmdstruct.id)?);
+    let bp = roundcents(long + short*3.0 + cash*2.0);
+    let yolo = roundcents(long+short+cash);
+    quotes.push( vec!(cash.to_string(), bp.to_string(), yolo.to_string()) );
 
-/// Handler for ws::Message message
-impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
+    let json = serde_json::to_string(&quotes)?;
+    info!("created json: {:?}", &json);
+    Ok(json)
+}
+
+impl Handler<Line> for CmdStruct {
+    type Result = ();
+    fn handle(&mut self, line: Line, ctx: &mut Self::Context) {
+        ctx.text(line.line);
+    }
+}
+
+impl Actor for CmdStruct {
+    type Context = ws::WebsocketContext<Self>;
+}
+
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for CmdStruct {
     fn handle(
         &mut self,
         msg: Result<ws::Message, ws::ProtocolError>,
@@ -2883,75 +2946,95 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for MyWs {
     ) {
         warn!("WS handle() <= {:?}", msg);
         match msg {
-            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Text(text)) => {
-                let words = text.split(" ").collect::<Vec<&str>>();
-                warn!("WS handle() words = {:?}", words);
-                let txt = if words.len() < 1 || 3 < words.len() {
-                    "".to_string()
-                } else {
-                    match words[0] {
-                        "stats" => {
-                            let envstruct = self.env.lock().unwrap();
-                            let mut hm = HashMap::new();
-                            match envstruct.entitys.get(&self.id) {
-                                Some(entity) => {
-                                    hm.insert("name", entity.name.to_string());
-                                    hm.insert("balance", roundcents(entity.balance).to_string());
-                                    hm.insert("likes", entity.likes.to_string());
-                                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
-                                },
-                                None => {
-                                    error!("whoam bad id {}", self.id);
-                                    hm.insert("name", "nobody".to_string());
-                                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
-                                }
-                            }
-                        },
-                        "yolo" => {
-                            let mut envstruct = self.env.lock().unwrap();
-                            web_yolo(&mut envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
-                        },
-                        "login" => {
-                            if 2 == words.len() { // Message user privately their login code
-                                web_login(self.env.clone(), words[1])
-                                    .unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
-                                ""
-                            } else if 3 == words.len() { // Accept or reject passocode
-                                let envstruct = self.env.lock().unwrap();
-                                let entity = envstruct_get_entity(&envstruct, words[1]);
-                                match entity {
-                                    Ok(entity) => {
-                                        self.id = entity.id;
-                                        IF!(words[2]!="" && entity.uuid!="" && words[2] == entity.uuid, words[1], "")
-                                    },
-                                    Err(e) => { error!("code result {:?}", e); "" }
-                                }
-                            } else {
-                                ""
-                            }
-                        }.to_string(),
-                        _ => format!("69.42@{}", text)
-                    }
+                info!("WS handle() words = {:?}", text);
+                self.message.clear();
+                self.message.push_str(&text);
+
+                let recipient = ctx.address().recipient();
+
+                let fut = async move {
+                    recipient.do_send(Line{line:r#"["hello"]"#.into()}).unwrap()
                 };
-                ctx.text(txt);
+                let fut = actix::fut::wrap_future::<_, Self>(fut);
+                ctx.spawn(fut);
             },
-            Ok(ws::Message::Binary(_bin)) => ctx.binary("binary woof"),
-            _ => (),
+            Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
+            Ok(ws::Message::Binary(_bin)) => ctx.binary(""),
+            _ => { },
         }
         warn!("WS handle() returning");
     }
 }
 
+async fn ws_handle_request (cmdstruct: &mut CmdStruct) -> String {
+    let words = cmdstruct.message.split(" ").collect::<Vec<&str>>();
+    if words.len() < 1 || 3 < words.len() { return "".to_string() }
+    match words[0] {
+        "stats" => {
+            let envstruct = cmdstruct.env.lock().unwrap();
+            let mut hm = HashMap::new();
+            match envstruct.entitys.get(&cmdstruct.id) {
+                Some(entity) => {
+                    hm.insert("name", entity.name.to_string());
+                    hm.insert("balance", roundcents(entity.balance).to_string());
+                    hm.insert("likes", entity.likes.to_string());
+                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
+                },
+                None => {
+                    error!("stats bad id {}", cmdstruct.id);
+                    hm.insert("name", "nobody".to_string());
+                    serde_json::to_string(&hm).unwrap_or("{}".to_string())
+                }
+            }
+        },
+        "yolo" => {
+            let mut envstruct = cmdstruct.env.lock().unwrap();
+            web_yolo(&mut envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+        },
+        "stonks" => {
+            web_stonks(cmdstruct).await.unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+        },
+        "login" => {
+            if 2 == words.len() { // Message user privately their login code
+                web_login(cmdstruct.env.clone(), words[1])
+                    .unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
+                ""
+            } else if 3 == words.len() { // Accept or reject passocode
+                let envstruct = cmdstruct.env.lock().unwrap();
+                let entity = envstruct_get_entity(&envstruct, words[1]);
+                match entity {
+                    Ok(entity) => {
+                        cmdstruct.id = entity.id;
+                        IF!(words[2]!="" && entity.uuid!="" && words[2] == entity.uuid, words[1], "")
+                    },
+                    Err(e) => { error!("code result {:?}", e); "" }
+                }
+            } else {
+                ""
+            }
+        }.to_string(),
+        _ => format!("69.42@{}", cmdstruct.message)
+    }
+}
+
+
+// This is called only during initial websocket creation so the CmdStruct should be created here?
 async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
     warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    let resp = ws::start(MyWs {id:0, env}, &req, stream);
+
+    let cmdstruct = match CmdStruct::new_cmdstruct(env, 0, 0, 0, 0, 0, "") {
+        Ok(cmdstruct) => cmdstruct,
+        e => { glog!(e); return Ok("".into()) } // TODO: Return an error so the websocket connection closes?
+    };
+
+    let resp = ws::start(cmdstruct, &req, stream);
     println!("ws_handler: resp => {:?}", resp);
     resp
 }
 
-pub fn main_websocket(env:Env) -> Bresult<()> {
+pub fn main_websocket(env: Env) -> Bresult<()> {
     std::thread::spawn( move || {
         let srv =
             match HttpServer::new( move ||
@@ -2967,13 +3050,14 @@ pub fn main_websocket(env:Env) -> Bresult<()> {
                 }
             };
         let res = actix_web::rt::System::new("websocket").block_on(async move {
-        warn!("launch() => {:?}", srv.run().await)
+            warn!("launch() => {:?}", srv.run().await)
         }); // This should never return
         error!("main_websocket => {:?}", res);
     });
     Ok(())
 }
-pub fn main_websocket_ssl(env:Env) -> Bresult<()> {
+
+pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
     let ssl_acceptor_builder = new_ssl_acceptor_builder()?;
     std::thread::spawn( move || {
         let srv =
@@ -3000,9 +3084,7 @@ pub fn main_websocket_ssl(env:Env) -> Bresult<()> {
 ////////////////////////////////////////
 pub fn main_launch() -> Bresult<()> {
     let argv = env::args();
-    if 1 == argv.len() {
-        Err(format!("{:?} missing: KEY ID DST", argv))?
-    }
+    if 4 != argv.len() { Err(format!("Arguments: {:?}  USAGE:: tmbot  {{API_TOKEN_VAR}}  {{SQLITE.FILENAME}}  {{DST 0|1}}", argv))?  }
     if !true { glogd!("create_schema => ", create_schema()) } // Create DB
     if !true { fun(argv) } // Hacks and other test code
     else {
@@ -3034,6 +3116,9 @@ impl<D> Monad1<'_, D, E> {
 */
 
 fn fun (_argv: std::env::Args) -> Bresult<()>  {
+    let rev = regex_to_vec(r"(?s)^/say (.*)$", "/say ab\ncd")?;
+    println!("re {:?}", rev);
+
   /*
     let mut data = Monad1{data:5.0, work: &|m| m.data += m.data ;
     println!("data = {:?}", data.data);

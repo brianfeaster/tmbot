@@ -187,14 +187,14 @@ var hyphen = (function () {
          setTimeout(get.bind(0, cmd, callback), 1000);
       } else {
          server.onmessage = function (e) {
+           DB(`HYPHEN --> '${e.data}'`)
            if (typeof(e.data) == "string") {
              callback(e.data);
            } else {
-              DB("hyphen binary message ignored [" + e.data + "]");
              callback("error")
            }
          }
-         DB("hyphen requesting [" + cmd + "] => " + server.send(cmd));
+         DB(`HYPHEN <- '${cmd}'  => ${server.send(cmd)}`);
       }
    }
 })();
@@ -219,6 +219,10 @@ hyphen("yolo", msg => {
 });
 
 function stats () {
+    hyphen("stonks", msg => {
+        console.log("stonks=");
+        console.log(msg);
+    });
     hyphen("stats", msg => {
         let m = JSON.parse(msg);
         document.getElementById("username").innerHTML = m.name;
@@ -234,7 +238,7 @@ function stats () {
 ////////////////////////////////////////
 
 var Cookies = new Map(document.cookie.split(";").map( p => p.split("=").map( s => s.trim() ) ))
-//var Cookies = new Map([["username",""],["uuid",""]]);
+var Cookies = new Map([["username","shrewm"],["uuid","7417339887753031491"]]);
 
 if (document.location.href.substr(0,5) != "file:") { ElementById('DB').style.display="none" }
 if (Cookies.get("username")) { ElementById('cookiewarning').style.display = "none"; }
