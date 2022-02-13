@@ -16,7 +16,7 @@ actix-web-actors = "3"
 actix-http = "2.2.1"
 openssl = { version = "0.10" }
 serde_json = "*"
-serde_urlencoded = "*"
+#serde_urlencoded = "*"
 sqlite = "*"
 datetime = "*"
 awc = "*"

@@ -1110,7 +1110,7 @@ r#"`          ™Bot Commands          `
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`
 `/schedule [time]` `List jobs, delete job at time`
-`/schedule [ISO-8601] | [1h][2m][3][mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`"#, delay);
+`/schedule [ISO-8601] [-][1h][2m][3] [mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`"#, delay);
     cmdstruct.markdown().push_msg(&msg).send_msg().await?;
     Ok("COMPLETED.")
 }
@@ -1125,7 +1125,8 @@ async fn do_curse (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 }
 
 async fn do_say (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let rev = regex_to_vec(r"^/say (.*)$", &cmdstruct.message)?;
+    let rev = regex_to_vec(r"(?s)^/say (.*)$", &cmdstruct.message)?;
+
     if rev.is_empty() { return Ok("SKIP".into()) }
     cmdstruct.push_msg(rev.as_str(1)?).send_msg().await?;
     Ok("COMPLETED.")
@@ -2615,10 +2616,11 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 }
 
 async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let expr = regex_to_vec(r"(?i)^=([-+*/0-9. ]+)", &cmdstruct.message)?;
+    let expr = regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
+
     if expr.is_empty() { return Ok("SKIP") }
     let mut stack = Vec::new();
-    for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([-+*/])")?.captures_iter(&expr.as_string(1)?) {
+    for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr.as_string(2)?) {
         if let Some(num) = toks.get(1) { // Push a number
             stack.push(num.as_str().parse::<f64>()?)
         } else if let Some(op) = toks.get(4) { // Compute a mathematical operation on top most numbers in stack
@@ -2638,8 +2640,16 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 "/" => stack.push(a/b),
                 _ => ()
             }
+        } else if let Some(op) = toks.get(5) {
+            stack.push(
+                op.as_str().chars().next().unwrap_or('\0')
+                as u32 as f64);
         }
         cmdstruct.set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") ).edit_msg().await?;
+    }
+    if expr.as_string(1)? == "==" {
+        let v = stack[0] as u32;
+        cmdstruct.push_msg( &format!(r#" "{}" 0x{:x}"#, std::char::from_u32(v).unwrap_or('?'), v) ).edit_msg().await?;
     }
 
     Ok("COMPLETED.")
@@ -3116,10 +3126,18 @@ impl<D> Monad1<'_, D, E> {
 */
 
 fn fun (_argv: std::env::Args) -> Bresult<()>  {
-    let rev = regex_to_vec(r"(?s)^/say (.*)$", "/say ab\ncd")?;
-    println!("re {:?}", rev);
-
+    let expr = regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )+[^ ]?)$",
+        "=  -9 🍆 🍆 🍆 🍆   ")?;
+    println!("{:?}", expr);
   /*
+    let e = "🍆";
+    let c = e.chars().next().unwrap();
+    let r :(u32, String) =
+        (
+            c as u32,
+            format!("{:x?}", c.to_string().as_bytes())
+        );
+    println!("{:x} {}", r.0, r.1);
     let mut data = Monad1{data:5.0, work: &|m| m.data += m.data ;
     println!("data = {:?}", data.data);
 
