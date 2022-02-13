@@ -2649,7 +2649,11 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     }
     if expr.as_string(1)? == "==" {
         let v = stack[0] as u32;
-        cmdstruct.push_msg( &format!(r#" "{}" 0x{:x}"#, std::char::from_u32(v).unwrap_or('?'), v) ).edit_msg().await?;
+        cmdstruct.push_msg( &format!(r#" "{}" 0x{:x} {:x?}"#,
+            std::char::from_u32(v).unwrap_or('?'),
+            v,
+            std::char::from_u32(v).unwrap_or('?').to_string().as_bytes(),
+            ) ).edit_msg().await?;
     }
 
     Ok("COMPLETED.")
@@ -3126,9 +3130,7 @@ impl<D> Monad1<'_, D, E> {
 */
 
 fn fun (_argv: std::env::Args) -> Bresult<()>  {
-    let expr = regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )+[^ ]?)$",
-        "=  -9 🍆 🍆 🍆 🍆   ")?;
-    println!("{:?}", expr);
+    println!("\u{1f346}");
   /*
     let e = "🍆";
     let c = e.chars().next().unwrap();
