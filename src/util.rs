@@ -121,7 +121,7 @@ pub fn num2heart (mut n :i64) -> String {
 ////////////////////////////////////////////////////////////////////////////////
 /// JSON
 
-pub fn bytes2json (body: &[u8]) -> Result<Value, Box<dyn Error>> {
+pub fn bytes2json (body: &[u8]) -> Bresult<Value> {
     Ok( serde_json::from_str( from_utf8(&body)? )? )
 }
 
@@ -261,7 +261,5 @@ pub fn sleep_secs(secs: f64) {
 
 #[macro_export(local_inner_macros)]
 macro_rules! IF {
-    ($predicate:expr, $trueblock:expr, $falseblock:expr) => (
-        if $predicate { $trueblock } else { $falseblock }
-    )
+    ($p:expr, $t:expr, $f:expr) => (if $p { $t } else { $f })
 }

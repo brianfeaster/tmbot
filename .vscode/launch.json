@@ -9,7 +9,7 @@
             "sourceLanguages": ["rust"],
             "env": {"RUST_LOG":"info"},
             "cargo": { "args": [ "build" ] },
-            "args": [ "TELEGRAM_API_TOKEN", "tmbot.sqlite", "0"],
+            "args": [ "0" ],
             //"program": "${cargo:program}",
             //"cwd": "${workspaceFolder}",
             //"stopOnEntry": false,

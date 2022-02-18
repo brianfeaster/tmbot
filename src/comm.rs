@@ -1,27 +1,24 @@
 //! # Telegram Communication
+
 use crate::*;
-//use util::*;
 use ::std::{fmt, time::{Duration} };
 use ::openssl::ssl::{SslConnector, SslMethod, SslConnectorBuilder};
 use ::actix_web::{ client::{Client, Connector} };
 
-const TELEGRAM_KEY_PEM: &str = "tmbot/key.pem";
-const TELEGRAM_CERT_PEM: &str = "tmbot/cert.pem";
-
-pub fn new_ssl_acceptor_builder() -> Bresult<SslAcceptorBuilder> {
-    let mut ssl_acceptor_builder =
-        SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    ssl_acceptor_builder.set_private_key_file(TELEGRAM_KEY_PEM, SslFiletype::PEM)?;
-    ssl_acceptor_builder.set_certificate_chain_file(TELEGRAM_CERT_PEM)?;
+// WEB_KEY_PEM, WEB_CERT_PEM
+pub fn new_ssl_acceptor_builder(key_pem: &str, cert_pem: &str) -> Bresult<SslAcceptorBuilder> {
+    let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+    ssl_acceptor_builder.set_private_key_file(key_pem, SslFiletype::PEM)?;
+    ssl_acceptor_builder.set_certificate_chain_file(cert_pem)?;
     Ok(ssl_acceptor_builder)
 }
 
-pub fn new_ssl_connector_builder() -> Bresult<SslConnectorBuilder> {
+// TELEGRAM_KEY_PEM, TELEGRAM_CERT_PEM
+pub fn new_ssl_connector_builder(key_pem: &str, cert_pem: &str) -> Bresult<SslConnectorBuilder> {
     let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
-    ssl_connector_builder.set_private_key_file(TELEGRAM_KEY_PEM, openssl::ssl::SslFiletype::PEM)?;
-    ssl_connector_builder.set_certificate_chain_file(TELEGRAM_CERT_PEM)?;
+    ssl_connector_builder.set_private_key_file(key_pem, openssl::ssl::SslFiletype::PEM)?;
+    ssl_connector_builder.set_certificate_chain_file(cert_pem)?;
     Ok(ssl_connector_builder)
-
 }
 
 pub trait MsgDetails {
@@ -47,8 +44,12 @@ pub struct Telegram {
 }
 
 impl Telegram {
-    pub fn new (url_api: String) -> Bresult<Self> {
-        let ssl_connector_builder = new_ssl_connector_builder()?;
+    pub fn new (
+        url_api: &str,
+        telegram_cert: &str,
+        telegram_key:  &str
+    ) -> Bresult<Self> {
+        let ssl_connector_builder = new_ssl_connector_builder(telegram_key, telegram_cert)?;
         let client =
             Client::builder()
                 .connector(
@@ -57,7 +58,7 @@ impl Telegram {
                         .timeout(Duration::new(90,0))
                         .finish())
                 .finish();
-        Ok(Telegram { client, url_api })
+        Ok(Telegram { client, url_api:url_api.into() })
     }
 }
 

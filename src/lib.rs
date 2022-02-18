@@ -32,14 +32,6 @@ const WEB_CERT_PEM: &str = "cert.pem";
 /// Abstracted primitive types helpers
 ////////////////////////////////////////////////////////////////////////////////
 
-pub fn new_ssl_acceptor_builder() -> Bresult<SslAcceptorBuilder> {
-    let mut ssl_acceptor_builder =
-        SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
-    ssl_acceptor_builder.set_private_key_file(WEB_KEY_PEM, SslFiletype::PEM)?;
-    ssl_acceptor_builder.set_certificate_chain_file(WEB_CERT_PEM)?;
-    Ok(ssl_acceptor_builder)
-}
-
 /// Decide if a ticker's price should be refreshed given its last lookup time.
 ///  PacificTZ  PreMarket  Regular  AfterHours  Closed
 ///  PST        0900z      1430z    2100z       0100z..9000z
@@ -337,6 +329,10 @@ pub struct Entity {
 #[derive(Debug)]
 pub struct EnvStruct {
     url_api:          String, // Telgram API URL
+    telegram_cert:    String,
+    telegram_key:     String,
+    tmbot_cert:       String,
+    tmbot_key:        String,
     dbconn:           Connection, // SQLite connection
     quote_delay_secs: i64,    // Delay between remote stock quote queries
     dst_hours_adjust: i8,     // 1 = DST, 0 = ST
@@ -396,11 +392,14 @@ impl EnvStruct {
 fn new(mut argv: std::env::Args) -> Bresult<Env> {
     let url_api = format!(
         "https://api.telegram.org/bot{}",
-        env::var_os( &argv.nth(1).ok_or("args[1] missing")? )
-            .ok_or("can't resolve telegram api key")?
-            .to_str()
-            .unwrap());
-    let dbconn = Connection::new(argv.next().ok_or("args[2] missing")?)?;
+        env::var_os("TELEGRAM_API_TOKEN").ok_or("TELEGRAM_API_TOKEN")?.to_str().unwrap()).to_string();
+    let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")? .to_str().unwrap().to_string();
+    let telegram_key  = env::var_os("TELEGRAM_KEY").ok_or("TELEGRAM_KEY")? .to_str().unwrap().to_string();
+    let tmbot_cert = env::var_os("TMBOT_CERT").ok_or("TMBOT_CERT")? .to_str().unwrap().to_string();
+    let tmbot_key  = env::var_os("TMBOT_KEY").ok_or("TMBOT_KEY")? .to_str().unwrap().to_string();
+    let tmbot_db  = env::var_os("TMBOT_DB").ok_or("TMBOT_DB")? .to_str().unwrap().to_string();
+    info!("{} {} {} {} {}", telegram_cert, telegram_key, tmbot_cert, tmbot_key, tmbot_db);
+    let dbconn = Connection::new( tmbot_db )?;
     let mut entitys = HashMap::new();
     for hm in
         getsql!(dbconn,
@@ -436,8 +435,8 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
                 uuid:     String::new()
     });
     Ok(EnvStruct{
-        url_api, dbconn,
-        dst_hours_adjust:   argv.next().ok_or("args[3] missing")?.parse::<i8>()?,
+        url_api, telegram_cert, telegram_key, tmbot_cert, tmbot_key, dbconn,
+        dst_hours_adjust:   argv.nth(1).ok_or("args[1] missing")?.parse::<i8>()?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
         entitys,
@@ -513,9 +512,9 @@ impl CmdStruct {
     fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().unwrap();
-            (   Telegram::new(envstruct.url_api.to_string())?,
-                envstruct.entitys.get(&id).ok_or(format!("id {} missing from entitys", id))?.echo,
-                envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
+            ( Telegram::new(&envstruct.url_api, &envstruct.telegram_cert, &envstruct.telegram_key)?,
+              envstruct.entitys.get(&id).ok_or(format!("id {} missing from entitys", id))?.echo,
+              envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
         };
         Ok(CmdStruct{
             env, telegram, now, id, at, to, message_id,
@@ -2649,11 +2648,12 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     }
     if expr.as_string(1)? == "==" {
         let v = stack[0] as u32;
-        cmdstruct.push_msg( &format!(r#" "{}" 0x{:x} {:x?}"#,
-            std::char::from_u32(v).unwrap_or('?'),
-            v,
-            std::char::from_u32(v).unwrap_or('?').to_string().as_bytes(),
-            ) ).edit_msg().await?;
+        cmdstruct.push_msg(
+            &format!(r#" "{}" 0x{:x} {:x?}"#,
+                std::char::from_u32(v).unwrap_or('?'),
+                v,
+                std::char::from_u32(v).unwrap_or('?').to_string().as_bytes())
+        ).edit_msg().await?;
     }
 
     Ok("COMPLETED.")
@@ -2803,7 +2803,10 @@ async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
 }
 
 pub fn launch_server(env: Env) -> Bresult<()> {
-    let ssl_acceptor_builder = comm::new_ssl_acceptor_builder()?;
+    let ssl_acceptor_builder = {
+        let envstruct = env.lock().unwrap();
+        comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+    };
     let srv =
         HttpServer::new( move ||
             App::new()
@@ -3072,7 +3075,10 @@ pub fn main_websocket(env: Env) -> Bresult<()> {
 }
 
 pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
-    let ssl_acceptor_builder = new_ssl_acceptor_builder()?;
+    let ssl_acceptor_builder = {
+        let envstruct = env.lock().unwrap();
+        comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+    };
     std::thread::spawn( move || {
         let srv =
             match HttpServer::new( move ||
@@ -3098,9 +3104,22 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
 ////////////////////////////////////////
 pub fn main_launch() -> Bresult<()> {
     let argv = env::args();
-    if 4 != argv.len() { Err(format!("Arguments: {:?}  USAGE:: tmbot  {{API_TOKEN_VAR}}  {{SQLITE.FILENAME}}  {{DST 0|1}}", argv))?  }
+    if 2 != argv.len() {
+        println!(r#"
+USAGE:
+    tmbot {{DST 0|1}}
+ENVIRONMENT:
+    TELEGRAM_API_TOKEN=0000000000:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    TELEGRAM_CERT=telegram_cert.pem 
+    TELEGRAM_KEY=telegram_key.pem
+    TMBOT_CERT=tmbot_cert.pem
+    TMBOT_KEY=tmbot_key.pem
+    TMBOT_DB=tmbot.sqlite
+    "#);
+        Err(format!("invalid args"))?
+    }
     if !true { glogd!("create_schema => ", create_schema()) } // Create DB
-    if !true { fun(argv) } // Hacks and other test code
+    if !true { crate::fun(argv) } // Hacks and other test code
     else {
         let env = EnvStruct::new(argv)?;
         glogd!("websocket() =>", main_websocket(env.clone()));
@@ -3130,16 +3149,8 @@ impl<D> Monad1<'_, D, E> {
 */
 
 fn fun (_argv: std::env::Args) -> Bresult<()>  {
-    println!("\u{1f346}");
+    info!("::fun {}", "\u{1F346}"); // Should never return
   /*
-    let e = "🍆";
-    let c = e.chars().next().unwrap();
-    let r :(u32, String) =
-        (
-            c as u32,
-            format!("{:x?}", c.to_string().as_bytes())
-        );
-    println!("{:x} {}", r.0, r.1);
     let mut data = Monad1{data:5.0, work: &|m| m.data += m.data ;
     println!("data = {:?}", data.data);
 
