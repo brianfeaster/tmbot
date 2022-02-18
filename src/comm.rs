@@ -46,8 +46,8 @@ pub struct Telegram {
 impl Telegram {
     pub fn new (
         url_api: &str,
-        telegram_cert: &str,
-        telegram_key:  &str
+        telegram_key: &str,
+        telegram_cert: &str
     ) -> Bresult<Self> {
         let ssl_connector_builder = new_ssl_connector_builder(telegram_key, telegram_cert)?;
         let client =

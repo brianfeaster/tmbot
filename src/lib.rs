@@ -329,10 +329,10 @@ pub struct Entity {
 #[derive(Debug)]
 pub struct EnvStruct {
     url_api:          String, // Telgram API URL
-    telegram_cert:    String,
     telegram_key:     String,
-    tmbot_cert:       String,
+    telegram_cert:    String,
     tmbot_key:        String,
+    tmbot_cert:       String,
     dbconn:           Connection, // SQLite connection
     quote_delay_secs: i64,    // Delay between remote stock quote queries
     dst_hours_adjust: i8,     // 1 = DST, 0 = ST
@@ -393,12 +393,12 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
     let url_api = format!(
         "https://api.telegram.org/bot{}",
         env::var_os("TELEGRAM_API_TOKEN").ok_or("TELEGRAM_API_TOKEN")?.to_str().unwrap()).to_string();
-    let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")? .to_str().unwrap().to_string();
     let telegram_key  = env::var_os("TELEGRAM_KEY").ok_or("TELEGRAM_KEY")? .to_str().unwrap().to_string();
-    let tmbot_cert = env::var_os("TMBOT_CERT").ok_or("TMBOT_CERT")? .to_str().unwrap().to_string();
+    let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")? .to_str().unwrap().to_string();
     let tmbot_key  = env::var_os("TMBOT_KEY").ok_or("TMBOT_KEY")? .to_str().unwrap().to_string();
+    let tmbot_cert = env::var_os("TMBOT_CERT").ok_or("TMBOT_CERT")? .to_str().unwrap().to_string();
     let tmbot_db  = env::var_os("TMBOT_DB").ok_or("TMBOT_DB")? .to_str().unwrap().to_string();
-    info!("{} {} {} {} {}", telegram_cert, telegram_key, tmbot_cert, tmbot_key, tmbot_db);
+    println!("{:?}", (&telegram_key, &telegram_cert, &tmbot_key, &tmbot_cert, &tmbot_db));
     let dbconn = Connection::new( tmbot_db )?;
     let mut entitys = HashMap::new();
     for hm in
@@ -435,7 +435,7 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
                 uuid:     String::new()
     });
     Ok(EnvStruct{
-        url_api, telegram_cert, telegram_key, tmbot_cert, tmbot_key, dbconn,
+        url_api, telegram_key, telegram_cert, tmbot_key, tmbot_cert, dbconn,
         dst_hours_adjust:   argv.nth(1).ok_or("args[1] missing")?.parse::<i8>()?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
@@ -512,7 +512,7 @@ impl CmdStruct {
     fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().unwrap();
-            ( Telegram::new(&envstruct.url_api, &envstruct.telegram_cert, &envstruct.telegram_key)?,
+            ( Telegram::new(&envstruct.url_api, &envstruct.telegram_key, &envstruct.telegram_cert)?,
               envstruct.entitys.get(&id).ok_or(format!("id {} missing from entitys", id))?.echo,
               envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
         };
