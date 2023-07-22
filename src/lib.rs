@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]  
+
 //! # External Chat Service Robot
 mod util;  pub use crate::util::*;
 mod comm;  use crate::comm::*;
@@ -14,9 +16,9 @@ use ::std::{
 use ::log::*;
 use ::regex::Regex;
 use ::datetime::{ Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::* };
-use ::openssl::ssl::{SslConnector, SslAcceptor, SslFiletype, SslMethod, SslAcceptorBuilder};
+use ::openssl::ssl::{SslConnector, SslFiletype, SslMethod};
 use ::actix::{ prelude::*, Actor, StreamHandler };
-use ::actix_web::{ web, App, HttpRequest, HttpServer, HttpResponse, Route, client::{Client, Connector} };
+use ::actix_web::{ web, App, HttpRequest, HttpServer, HttpResponse, client::{Client, Connector}, http::header::HeaderMap };
 use ::actix_web_actors::ws;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,8 +26,8 @@ use ::actix_web_actors::ws;
 const QUOTE_DELAY_SECS :i64 = 30;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
-const WEB_KEY_PEM: &str = "key.pem";
-const WEB_CERT_PEM: &str = "cert.pem";
+//const WEB_KEY_PEM: &str = "key.pem";
+//const WEB_CERT_PEM: &str = "cert.pem";
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -295,17 +297,22 @@ fn create_schema() -> Bresult<()> {
 
     getsql!(&conn,"
         CREATE TABLE IF NOT EXISTS schedules (
-            id   INTEGER NOT NULL,
-            at   INTEGER NOT NULL,
-            time INTEGER NOT NULL,
-            days    TEXT NOT NULL,
-            cmd     TEXT NOT NULL);")?;
+            id    INTEGER NOT NULL,
+            at    INTEGER NOT NULL,
+            topic INTEGER NOT NULL,
+            time  INTEGER NOT NULL,
+            days     TEXT NOT NULL,
+            cmd      TEXT NOT NULL);")?;
 
     getsql!(&conn,"
         CREATE TABLE IF NOT EXISTS likes (
             id    INTEGER NOT NULL UNIQUE,
             likes INTEGER NOT NULL);")?;
 
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS aliases (
+            alias TEXT NOT NULL UNIQUE,
+            cmd   TEXT NOT NULL);")?;
     Ok(())
 } // create_schema
 
@@ -314,7 +321,7 @@ fn create_schema() -> Bresult<()> {
 
 #[derive(Debug)]
 pub struct Entity {
-    id: i64,
+    _id: i64,
     name: String,
     balance: f64, // Available cash.  Could be negative as long as -2*balance < portfolioValue
     echo: i64,
@@ -323,7 +330,7 @@ pub struct Entity {
     quote: String,
     position: String,
     // web portal
-    uuid: String
+    _uuid: String
 }
 
 #[derive(Debug)]
@@ -381,10 +388,10 @@ impl EnvStruct {
         getsql!(self.dbconn, "INSERT OR REPLACE INTO likes VALUES (?, ?)", at, likes)?;
         Ok(likes)
     }
-    fn entity_uuid_set (&mut self, id: i64, pw: usize) -> Bresult<()> {
+    fn _entity_uuid_set (&mut self, id: i64, pw: usize) -> Bresult<()> {
         self.entitys
             .get_mut(&id)
-            .map_or(Err("no such entity for uuid".into()), |e| { e.uuid = pw.to_string(); Ok(()) } )
+            .map_or(Err("no such entity for uuid".into()), |e| { e._uuid = pw.to_string(); Ok(()) } )
     }
 } // impl EnvStruct
 
@@ -392,13 +399,12 @@ impl EnvStruct {
 fn new(mut argv: std::env::Args) -> Bresult<Env> {
     let url_api = format!(
         "https://api.telegram.org/bot{}",
-        env::var_os("TELEGRAM_API_TOKEN").ok_or("TELEGRAM_API_TOKEN")?.to_str().unwrap()).to_string();
-    let telegram_key  = env::var_os("TELEGRAM_KEY").ok_or("TELEGRAM_KEY")? .to_str().unwrap().to_string();
-    let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")? .to_str().unwrap().to_string();
-    let tmbot_key  = env::var_os("TMBOT_KEY").ok_or("TMBOT_KEY")? .to_str().unwrap().to_string();
-    let tmbot_cert = env::var_os("TMBOT_CERT").ok_or("TMBOT_CERT")? .to_str().unwrap().to_string();
-    let tmbot_db  = env::var_os("TMBOT_DB").ok_or("TMBOT_DB")? .to_str().unwrap().to_string();
-    println!("{:?}", (&telegram_key, &telegram_cert, &tmbot_key, &tmbot_cert, &tmbot_db));
+        env::var_os("TELEGRAM_API_TOKEN").ok_or("TELEGRAM_API_TOKEN")?.into_string().unwrap());
+    let telegram_key  = env::var_os("TELEGRAM_KEY").ok_or("TELEGRAM_KEY")?.into_string().unwrap();
+    let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")?.into_string().unwrap();
+    let tmbot_key  = env::var_os("TMBOT_KEY").ok_or("TMBOT_KEY")?.into_string().unwrap();
+    let tmbot_cert = env::var_os("TMBOT_CERT").ok_or("TMBOT_CERT")?.into_string().unwrap();
+    let tmbot_db  = env::var_os("TMBOT_DB").ok_or("TMBOT_DB")?.into_string().unwrap();
     let dbconn = Connection::new( tmbot_db )?;
     let mut entitys = HashMap::new();
     for hm in
@@ -411,28 +417,28 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
             LEFT JOIN formats  ON entitys.id = formats.id")?
     {
         //warn!("{:#?}", hm);
-        let id = hm.get_i64("id")?;
-        entitys.insert(id,
+        let _id = hm.get_i64("id")?;
+        entitys.insert(_id,
             Entity{
-                id,
+                _id,
                 name:    hm.get_string("name")?,
                 balance: hm.get_f64_or(0.0, "balance"),
                 echo:    hm.get_i64_or(2, "echo"),
                 likes:   hm.get_i64_or(0, "likes"),
                 quote:   hm.get_string_or("", "quote"),
                 position:hm.get_string_or("", "position"),
-                uuid:    String::new()
+                _uuid:    String::new()
             });
     }
     entitys.insert(0, Entity{
-                id:       0,
+                _id:       0,
                 name:     "nil".to_string(),
                 balance:  0.0,
                 echo:     2,
                 likes:    0,
                 quote:    String::new(),
                 position: String::new(),
-                uuid:     String::new()
+                _uuid:     String::new()
     });
     Ok(EnvStruct{
         url_api, telegram_key, telegram_cert, tmbot_key, tmbot_cert, dbconn,
@@ -446,6 +452,43 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
 ////////////////////////////////////////
 
 #[derive(Debug)]
+pub struct TMsg {
+    id: i64,
+    at: i64,
+    to: i64,
+    topic: Option<i64>,
+    message: String
+}
+
+impl TMsg {
+    fn new (json: Value) -> Bresult<TMsg> {
+        let inline_query = &json["inline_query"];
+        let edited_message = &json["edited_message"];
+        let message = if edited_message.is_object() { edited_message } else { &json["message"] };
+        //let message_id = getin_i64(message, &["message_id"]).unwrap_or(0);
+
+        Ok(if inline_query.is_object() { // Inline queries are DMs so no other associated channels
+            let id = getin_i64(inline_query, &["from", "id"])?;
+            let message = getin_str(inline_query, &["query"])?;
+            TMsg{id, at:id, to:id, topic:None, message}
+        } else if message.is_object() { // An incoming message could be a reply or normal.
+            let id = getin_i64(message, &["from", "id"])?;
+            let at = getin_i64(message, &["chat", "id"])?;
+            let to = getin_i64_or(at, &message, &["reply_to_message", "from", "id"]);
+            let topic =
+                if getin(message, &["is_topic_message"]).is_null() {
+                    None
+                } else {
+                    getin_i64(message, &["message_thread_id"]).ok()
+                };
+            let message = getin_str(message, &["text"])?;
+            TMsg{id, at, to, topic, message}
+        } else { Err("Not a Telegram JSON Update.")? })
+    }
+}
+
+
+#[derive(Debug)]
 pub struct CmdStruct { // Represents in incoming Telegram message and session/service state.
     env: Env,
     telegram: Telegram, // Not in Env since threads can't share this due to an internal Rc
@@ -454,7 +497,8 @@ pub struct CmdStruct { // Represents in incoming Telegram message and session/se
     id: i64, // Entity who sent msg                    message.from.id
     at: i64, // Channel (group/entity) msg sent to     message.chat.id
     to: i64, // Entity replied to ('at' if non-reply)  message.reply_to_message.from.id
-    message_id: i64,  // Message's unique id in channel.  TODO map this to msg_id so edits are reflected to the same response msg.
+    topic: Option<i64>, // topic id
+    //message_id: i64,  // Message's unique id in channel.  TODO map this to msg_id so edits are reflected to the same response msg.
     message: String, // The incoming message
     id_level: i64, // Echo level [0,1,2] for each id.  Higher can't write to lower.
     at_level: i64,
@@ -478,6 +522,8 @@ impl MsgDetails for CmdStruct {
     }
     // Is message to send markdown?
     fn markdown (&self) -> bool { self.markdown }
+    // Message might be from a channel topic
+    fn topic (&self) -> Option<i64> { self.topic }
     // Optional edit message id
     fn msg_id (&self) -> Option<i64> { self.msg_id }
     // The text to send
@@ -486,30 +532,13 @@ impl MsgDetails for CmdStruct {
 
 impl CmdStruct {
     // Creates a Cmd object from Env and Telegram message body.
-    fn newcmdstruct(env: Env, body: &web::Bytes) -> Bresult<CmdStruct> {
-        let json: Value = bytes2json(&body)?;
-        let inline_query = &json["inline_query"];
-        let edited_message = &json["edited_message"];
-        let message = if edited_message.is_object() { edited_message } else { &json["message"] };
-        let message_id = getin_i64(message, &["message_id"]).unwrap_or(0);
-        let (id, at, to, message) =
-            if inline_query.is_object() { // Inline queries are DMs so no other associated channels
-                let id = getin_i64(inline_query, &["from", "id"])?;
-                let message = getin_str(inline_query, &["query"])?.to_string();
-                (id, id, id, message)
-            } else if message.is_object() { // An incoming message could be a reply or normal.
-                let id = getin_i64(message, &["from", "id"])?;
-                let at = getin_i64(message, &["chat", "id"])?;
-                let to = getin_i64_or(at, &message, &["reply_to_message", "from", "id"]);
-                let message = getin_str(message, &["text"])?.to_string();
-                (id, at, to, message) // Normal message
-            } else { Err("Nothing to do.")? };
-
-        CmdStruct::new_cmdstruct(env, Instant::now().seconds(), id, at, to, message_id, &message)
+    fn newcmdstruct(env: Env, tmsg: TMsg) -> Bresult<CmdStruct> {
+        CmdStruct::new_cmdstruct(env, Instant::now().seconds(),
+            tmsg.id, tmsg.at, tmsg.to, tmsg.topic, tmsg.message)
     }
 
     // create a basic CmdStruct
-    fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, message_id:i64, message:&str) -> Bresult<CmdStruct> {
+    fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, topic:Option<i64>, message:String) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().unwrap();
             ( Telegram::new(&envstruct.url_api, &envstruct.telegram_key, &envstruct.telegram_cert)?,
@@ -517,7 +546,7 @@ impl CmdStruct {
               envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
         };
         Ok(CmdStruct{
-            env, telegram, now, id, at, to, message_id,
+            env, telegram, now, id, at, to, topic,
             message: message.to_string(),
             id_level, at_level,
             markdown: false,
@@ -625,15 +654,19 @@ pub struct Quote {
 impl Quote { // Query internet for ticker details
     async fn new_market_quote (env:Env, ticker: &str) -> Bresult<Self> {
         let json = srvs::get_ticker_raw(ticker).await?;
+        //warn!("{}", json);
         let details =
-            getin(&json, &["quoteResponse", "result"])
+            getin(&json, &["chart", "result"])
             .get(0)
-            .ok_or_else( || format!("quoteResponse.Result.0 failed on json response: {}", json) )?;
+            .ok_or("chart.result failed on json response")
+            .map( |j| getin(j, &["meta"]) )?;
         info!("{}", details);
 
         let title_raw =
             &getin_str(&details, &["longName"])
-            .or_else( |_e| getin_str(&details, &["shortName"]) )?;
+            .or_else( |_e| getin_str(&details, &["shortName"]) )
+            .or_else( |_e| getin_str(&details, &["symbol"]) )
+            .unwrap_or( "???".to_string() );
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
             let title_new = title
@@ -652,15 +685,17 @@ impl Quote { // Query internet for ticker details
         };
         info!("cleane title: '{}' => '{}'", title_raw, &title);
 
-        let exchange = getin_str(&details, &["exchange"])?;
+        let exchange = getin_str(&details, &["exchangeName"])?;
 
-        let hours = getin(&details, &["volume24Hr"]);
-        let hours :i64 = if !hours.is_null() { 24 } else { 16 };
+        let timeStart = getin_i64(&details, &["radingPeriods", "regular", "start"]).unwrap_or(0);
+        let timeEnd   = getin_i64(&details, &["radingPeriods", "regular", "end"]).unwrap_or(0);
+        let seconds = timeEnd - timeStart;
+        let hours :i64 = if 23400 < seconds { 24 } else { 16 };
 
-        let previous_close   = getin_f64(&details, &["regularMarketPreviousClose"]).unwrap_or(0.0);
-        let pre_market_price = getin_f64(&details, &["preMarketPrice"]).unwrap_or(0.0);
+        let previous_close   = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
+        let pre_market_price = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
         let reg_market_price = getin_f64(&details, &["regularMarketPrice"]).unwrap_or(0.0);
-        let pst_market_price = getin_f64(&details, &["postMarketPrice"]).unwrap_or(0.0);
+        let pst_market_price = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
 
         // This array will be sorted on market time for the latest market data.  Prices
         // are relative to the previous day's market close, including pre and post markets,
@@ -668,9 +703,9 @@ impl Quote { // Query internet for ticker details
         // closing price for next day deltas.  Non-regular markets are basically forgotten
         // after the fact.
         let mut details = [
-            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["preMarketTime"]).unwrap_or(0)),
-            (reg_market_price, previous_close,   "r", getin_i64(&details, &["regularMarketTime"]).unwrap_or(0)),
-            (pst_market_price, previous_close,   "a", getin_i64(&details, &["postMarketTime"]).unwrap_or(0))];
+            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["currentTradingPeriod", "pre", "start"]).unwrap_or(0)),
+            (reg_market_price, previous_close,   "r", getin_i64(&details, &["currentTradingPeriod", "regular", "start"]).unwrap_or(0)),
+            (pst_market_price, previous_close,   "a", getin_i64(&details, &["currentTradingPeriod", "post", "start"]).unwrap_or(0))];
 
         /* // Log all prices for sysadmin requires "use ::datetime::ISO"
         use ::datetime::ISO;
@@ -1109,7 +1144,10 @@ r#"`          ™Bot Commands          `
 `/fmt [?]     ` `Show format strings, help`
 `/fmt [qp] ...` `Set quote/position fmt str`
 `/schedule [time]` `List jobs, delete job at time`
-`/schedule [ISO-8601] [-][1h][2m][3] [mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`"#, delay);
+`/schedule [ISO-8601] [-][1h][2m][3] [mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`
+`/httpsget URL` `https get request`
+`/httpsbody URL TEXT` `https post request`
+`/httpsjson URL JSON` `https post request`"#, delay);
     cmdstruct.markdown().push_msg(&msg).send_msg().await?;
     Ok("COMPLETED.")
 }
@@ -1125,7 +1163,6 @@ async fn do_curse (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
 async fn do_say (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let rev = regex_to_vec(r"(?s)^/say (.*)$", &cmdstruct.message)?;
-
     if rev.is_empty() { return Ok("SKIP".into()) }
     cmdstruct.push_msg(rev.as_str(1)?).send_msg().await?;
     Ok("COMPLETED.")
@@ -1133,7 +1170,7 @@ async fn do_say (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
 async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
     let adj =
-        match Regex::new(r"^([+-])1")?.captures(&cmdstruct.message) {
+        match Regex::new(r"^([+-])1$")?.captures(&cmdstruct.message) {
             None => return Ok("SKIP".into()),
             Some(cap) =>
                 if cmdstruct.id == cmdstruct.to { return Ok("SKIP self plussed".into()); }
@@ -1233,6 +1270,114 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_httpsget (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+    let cap = regex_to_vec(r"(?s)^/httpsget ((https://|http://)?(.+))$", &cmdstruct.message)?;
+    if cap.is_empty() { return Ok("SKIP"); }
+    let url = cap.as_str(3)?;
+
+    info!("querying url {}", url);
+
+    let mut msg = String::new();
+
+    let body = get_https_raw(&url).await?;
+
+    if body.is_empty() {
+        cmdstruct
+            .push_msg(&format!("*{}* body is empty or error", &url))
+            .send_msg_id()
+            .await?;
+    } else {
+        msg.push_str( &format!("{}", &body) );
+    }
+
+    if !msg.is_empty() {
+        cmdstruct.push_msg(&msg).send_msg().await?;
+    }
+
+    Ok("COMPLETED.")
+}
+
+async fn do_httpsbody (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+    let cap = regex_to_vec(r#"(?s)^/httpsbody\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
+    if cap.is_empty() { return Ok("SKIP"); }
+    let url = cap.as_str(3)?;
+    let text = cap.get(4).and_then(|c|c.as_ref()).unwrap_or(&String::new()).to_string();
+
+    let mut msg = String::new();
+    let body = post_https_text(&url, text).await?;
+
+    if body.is_empty() {
+        cmdstruct
+            .push_msg(&format!("*{}* body is empty or error", &url))
+            .send_msg_id()
+            .await?;
+    } else {
+        msg.push_str( &format!("{}", &body) );
+    }
+
+    if !msg.is_empty() {
+        cmdstruct.push_msg(&msg).send_msg().await?;
+    }
+
+    Ok("COMPLETED.")
+}
+
+async fn do_httpsjson (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+    let cap = regex_to_vec(r#"(?s)^/httpsjson\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
+    if cap.is_empty() { return Ok("SKIP"); }
+    let url = cap.as_str(3)?;
+
+    let txt =
+        cap.get(4)
+        .and_then(|c|c.as_ref())
+        .map( |s| {
+            if 2 < s.len()
+                && match s.chars().nth(0) { Some(c) => c=='"',  _ => false }
+                && match s.chars().last() { Some(c) => c=='"',  _ => false }
+            {
+                s.replace("\n","\\n")
+            } else {
+                s.to_string()
+            }
+        })
+        .unwrap_or(String::new());
+
+    let ret =
+        match post_https_json(&url, &txt).await {
+            Ok(res) => if res.is_empty() { "*empty response*".into() } else { res },
+            Err(e) => e.to_string()
+        };
+
+    cmdstruct.push_msg(&ret).send_msg().await?;
+    Ok("COMPLETED.")
+}
+
+async fn do_json (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+    let cap = regex_to_vec(r#"(?s)^/json\s+(.+)$"#, &cmdstruct.message)?;
+    if cap.is_empty() { return Ok("SKIP"); }
+
+    let ret = match cap.as_str(1).map( |s| { // escapeify newlines in string literals
+        if 2 < s.len()
+            && match s.chars().nth(0) { Some(c) => c=='"',  _ => false }
+            && match s.chars().last() { Some(c) => c=='"',  _ => false }
+        {
+            s.replace("\n","\\n")
+        } else {
+            s.to_string()
+        }
+    } ) {
+        Err(e) => e.to_string(),
+        Ok(txt) =>
+            match bytes2json(txt.as_bytes()) {
+              Err(e) => e.to_string(),
+              Ok(v) => v.to_string()
+            }
+    };
+    cmdstruct.push_msg(&ret).send_msg().await?;
+    Ok("COMPLETED.")
+}
+
+
 async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     if cmdstruct.id != 308188500 { return Ok("do_sql invalid user"); }
     let rev = regex_to_vec("^(.*)ß$", &cmdstruct.message)?;
@@ -1298,14 +1443,14 @@ async fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String
         let ticker = deref_ticker(dbconn, ticker).unwrap_or(ticker.to_string());
         let bidask = if is_self_stonk(&ticker) {
             let mut asks = format!("*Asks:*");
-            for ask in getsql!(dbconn, "SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker)? {
+            for ask in getsql!(dbconn, "SELECT -qty AS qty, price FROM exchange WHERE qty<0 AND ticker=? order by price;", &*ticker).map_err(|e| { error!("{:?}", e); e} )? {
                 asks.push_str(
                     &format!(" `{}@{}`",
                     num_simp( format!("{:.4}", ask.get_f64("qty")?) ),
                     ask.get_f64("price")?));
             }
             let mut bids = format!("*Bids:*");
-            for bid in getsql!(dbconn, "SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker)? {
+            for bid in getsql!(dbconn, "SELECT qty, price FROM exchange WHERE 0<qty AND ticker=? order by price desc;", &*ticker).map_err(|e| { error!("{:?}", e); e} )? {
                 bids.push_str(
                     &format!(" `{}@{}`",
                     num_simp( format!("{:.4}", bid.get_f64("qty")?) ),
@@ -1317,7 +1462,7 @@ async fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String
         };
         (ticker, bidask)
     };
-    let quote = Quote::get_market_quote(cmdstruct, &ticker).await?;
+    let quote = Quote::get_market_quote(cmdstruct, &ticker).await.map_err(|e| { error!("{:?}", e); e} )?;
     Ok(format!("{}{}", quote.format_quote(cmdstruct.id)?, bidask))
 }
 
@@ -1432,7 +1577,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     // Update all user-positioned tickers
     for row in rows {
         let ticker = row.get_string("ticker")?;
-        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker).await?);
+        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker).await); // got rid of ?
     }
 
     /* Everyone's YOLO including non positioned YOLOers
@@ -1646,7 +1791,7 @@ struct TradeSell<'a> {
     short: bool,
     qty: f64, // calculated quantity to sell
     price: f64, // stonk price
-    bank_balance: f64,
+    _bank_balance: f64,
     new_balance: f64, // eventual bank balance
     new_qty: f64,     // eventual position quantity
     trade: Trade<'a>,
@@ -1703,17 +1848,17 @@ impl<'a> TradeSell<'a> {
             } };
 
         let mut gain = qty*price;
-        let bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id)?;
-        let mut new_balance = bank_balance+gain;
+        let _bank_balance = getenvstruct!(trade.cmdstruct).entity_balance(trade.cmdstruct.id)?;
+        let mut new_balance = _bank_balance+gain;
 
-        info!("\x1b[1msell? {} {}/{} @ {} = {}  CASH {} -> {}", IF!(short, "short", "long"), qty, position.qty, price, gain,  bank_balance, new_balance);
+        info!("\x1b[1msell? {} {}/{} @ {} = {}  CASH {} -> {}", IF!(short, "short", "long"), qty, position.qty, price, gain,  _bank_balance, new_balance);
 
         // If equal to the rounded position value, snap qty to exact position
         if qty != position.qty && roundcents(gain) == roundcents(position.qty*price) {
             qty = position.qty;
             gain = qty*price;
-            new_balance = bank_balance + gain;
-            info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", qty, position.qty, price, gain,  bank_balance, new_balance);
+            new_balance = _bank_balance + gain;
+            info!("\x1b[1msell? {}/{} @ {} = {}  BANK {} -> {}", qty, position.qty, price, gain,  _bank_balance, new_balance);
         }
 
         if !short && position.qty < qty {
@@ -1723,7 +1868,7 @@ impl<'a> TradeSell<'a> {
 
         let new_qty = roundqty(position.qty-qty);
 
-        Ok( Self{ position, short, qty, price, bank_balance, new_balance, new_qty, trade, bp} )
+        Ok( Self{ position, short, qty, price, _bank_balance, new_balance, new_qty, trade, bp} )
     }
 }
 
@@ -1915,15 +2060,15 @@ impl<'a> QuoteCancelMine<'a> {
 
 #[derive(Debug)]
 struct QuoteExecute<'a> {
-    qty: f64,
-    bids: Vec<HashMap<String, ::sqlite::Value>>,
+    _qty: f64,
+    _bids: Vec<HashMap<String, ::sqlite::Value>>,
     quotecancelmine: QuoteCancelMine<'a>,
     msg: String
 }
 
 impl<'a> QuoteExecute<'a> {
     async fn doit (mut obj: QuoteCancelMine<'a>) -> Bresult<QuoteExecute<'a>> {
-        let (qty, bids, msg) = {
+        let (_qty, _bids, msg) = {
             let id = obj.exquote.id;
             let ticker = &obj.exquote.ticker;
             let price = obj.exquote.price;
@@ -2154,7 +2299,7 @@ impl<'a> QuoteExecute<'a> {
             } // if
             (qty, bids, msg)
         };
-        Ok(Self{qty, bids, quotecancelmine: obj, msg})
+        Ok(Self{_qty, _bids, quotecancelmine: obj, msg})
     }
 }
 
@@ -2505,7 +2650,6 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 (?: \ + (.+))?
             )",
             &cmdstruct.message )?;
-    //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
     if caps.is_empty() { return Ok("SKIP") }
 
     cmdstruct.markdown();
@@ -2541,6 +2685,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let msg = {
         let id = cmdstruct.id;
         let at = cmdstruct.at;
+        let topic = cmdstruct.topic;
         let now = cmdstruct.now;
         let envstruct = &getenvstruct!(cmdstruct);
         let dbconn = &envstruct.dbconn;
@@ -2564,11 +2709,15 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     ::from_str( timestr )?
                     .to_seconds()
             } else {
-                now
+                // Always assume UTC time with user input.  Default
+                // time will be an hour behind in DST so add an hour
+                // 4pmPDT is really 3pmPST == 11pmUTC but save datetime
+                // as 0AM UTC
+                let dstsecs = 60 * 60 * envstruct.dst_hours_adjust as i64;
+                now + dstsecs
             }
-            + neg*(hours*60*60 + mins*60 + secs)
-            + 60 * 60 * envstruct.dst_hours_adjust as i64;
-        //error!("n{} h{} m{} s{} {}", neg, hours, mins, secs, time);
+            + neg*(hours*60*60 + mins*60 + secs);
+        //info!("n{} h{} m{} s{} {}", neg, hours, mins, secs, time);
 
         let daily = caps.as_str(5);
         if daily.is_ok() { time = time.rem_euclid(86400)}
@@ -2586,10 +2735,10 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
         // Save job
         if let Ok(command) = caps.as_str(6) {
-                info!("now:{} [id:{} at:{} time:{} days:{} cmd:{:?}]",
-                    now, id, at, time, days, command);
-                glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?, ?)",
-                    id, at, time, days, command));
+                info!("now:{} [id:{} at:{} topic:{} time:{} days:{} cmd:{:?}]",
+                    now, id, at, topic.unwrap_or(0), time, days, command);
+                glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?, ?, ?)",
+                    id, at, topic.unwrap_or(0), time, days, command));
                 format!("Scheduled: `{}Z {}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
                     days,
@@ -2616,8 +2765,8 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
 async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let expr = regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
-
     if expr.is_empty() { return Ok("SKIP") }
+
     let mut stack = Vec::new();
     for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr.as_string(2)?) {
         if let Some(num) = toks.get(1) { // Push a number
@@ -2659,22 +2808,45 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
+async fn do_alias (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
+    let expr = regex_to_vec(r"^/alias\s+([^\s]+)(\s+(.*))?$", &cmdstruct.message)?;
+    if expr.is_empty() { return Ok("SKIP") }
+
+    let (alias, cmd) = {
+        let alias = expr.as_str(1)?;
+        let cmd =   expr.as_str(3)?;
+
+        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let ret = getsql!(dbconn, "INSERT OR REPLACE INTO aliases values(?, ?)", alias, cmd)?;
+        info!("do_alias => {:?}", ret);
+        (alias, cmd)
+    };
+
+    cmdstruct.push_msg(&format!("{} == {}", alias, cmd)).send_msg().await?;
+
+    Ok("COMPLETED.")
+}
+
+async fn do_aliasRun (mut cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
+    let expr = regex_to_vec(r"^/([^\s]+)(.*)$", &cmdstruct.message)?;
+    if expr.is_empty() { return Ok("SKIP") }
+
+    let cmd = {
+        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        let aliasCmd = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", expr.as_str(1)?)?;
+        if aliasCmd.is_empty() { return Ok("skip") }
+        aliasCmd[0]["cmd"].as_string().ok_or("bad alias cmd")?.to_string()
+    };
+
+    cmdstruct.message = format!("{} {}", cmd, expr.as_str(2)?).trim_end().into();
+
+    do_most(&mut cmdstruct).await?; // Attempt to run aliased command
+    Ok("COMPLETED.")
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
-    info!("\x1b[33m{:?}", cmdstruct);
-
-    let res = do_schedule(cmdstruct).await;
-    glogd!("do_schedule =>", res);
-    match res {
-        Err(e) => {
-            cmdstruct.push_msg(&format!("Scheduler {}", e)).send_msg_id().await?; }
-        Ok(o) =>  {
-            // Stop evaluating if this is a successfull scheduled job
-            if o == "COMPLETED." { return Ok(()) }
-        }
-    }
-
+async fn do_most (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     glogd!("do_echo_lvl =>",   do_echo_lvl(cmdstruct).await);
     glogd!("do_help =>",       do_help(cmdstruct).await);
     glogd!("do_curse =>",      do_curse(cmdstruct).await);
@@ -2682,6 +2854,10 @@ async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     glogd!("do_like =>",       do_like(cmdstruct).await);
     glogd!("do_like_info =>",  do_like_info(cmdstruct).await);
     glogd!("do_def =>",        do_def(cmdstruct).await);
+    glogd!("do_httpsget => ",  do_httpsget(cmdstruct).await);
+    glogd!("do_httpsbody => ", do_httpsbody(cmdstruct).await);
+    glogd!("do_httpsjson => ", do_httpsjson(cmdstruct).await);
+    glogd!("do_json => ",      do_json(cmdstruct).await);
     glogd!("do_sql =>",        do_sql(cmdstruct).await);
     glogd!("do_quotes => ",    do_quotes(cmdstruct).await);
     glogd!("do_yolo =>",       do_yolo(cmdstruct).await);
@@ -2693,6 +2869,23 @@ async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
     glogd!("do_fmt =>",        do_fmt(cmdstruct).await);
     glogd!("do_rebalance =>",  do_rebalance(cmdstruct).await);
     glogd!("do_rpn =>",        do_rpn(cmdstruct).await);
+    glogd!("do_alias =>",      do_alias(cmdstruct).await);
+    Ok(())
+}
+
+async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
+    let res = do_schedule(cmdstruct).await;
+    glogd!("do_schedule =>", res);
+    match res {
+        Err(e) => {
+            cmdstruct.push_msg(&format!("Scheduler {}", e)).send_msg_id().await?; }
+        Ok(o) =>  {
+            // Stop evaluating if this is a successfull scheduled job
+            if o == "COMPLETED." { return Ok(()) }
+        }
+    }
+    do_most(cmdstruct).await?;
+    glogd!("do_aliasRun =>",   do_aliasRun(cmdstruct).await); // Separate to avoid recursion
     Ok(())
 }
 
@@ -2705,9 +2898,10 @@ async fn do_each_scheduled_job (
         let env = env.clone();
         let id = job.get_i64("id")?;
         let at = job.get_i64("at")?;
+        let topic = job.get_i64("topic")?;
         let command = job.get_str("cmd")?;
         let mut cmdstruct =
-            match CmdStruct::new_cmdstruct(env, now, id, at, at, 0, command) {
+            match CmdStruct::new_cmdstruct(env, now, id, at, at, if topic==0 {None} else {Some(topic)}, command.into()) {
                 Ok(cmdstruct) => cmdstruct,
                 e => { glog!(e); continue }
             };
@@ -2723,8 +2917,8 @@ async fn do_each_scheduled_job (
             let cmdstruct = &getenvstruct!(cmdstruct).dbconn;
             getsql!(
                 cmdstruct,
-                "DELETE FROM schedules WHERE id=? AND at=? AND time=? AND days='' AND cmd=?",
-                id, at, time, command)
+                "DELETE FROM schedules WHERE id=? AND at=? AND topic=? AND time=? AND days='' AND cmd=?",
+                id, at, topic, time, command)
             .unwrap();
         }
     }
@@ -2736,27 +2930,49 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
     std::thread::spawn( move ||
     loop {
         sleep_secs(10.0);
-        let now = Instant::now().seconds();
-        let jobs = {
-            let env = env.clone();
+
+        let now = {
             let envstruct = env.lock().unwrap();
             let dstsecs = 60 * 60 * envstruct.dst_hours_adjust as i64;
+            Instant::now().seconds() + dstsecs
+        };
+
+        let jobs = {
+            let envstruct = env.lock().unwrap();
+            let timeFrom = envstruct.time_scheduler % 86400;
+            let mut timeTo = now % 86400;
+            if timeTo < timeFrom { timeTo += 86400 } // might wrap to 0, make 'from' < 'to'
             let res = getsqlquiet!(&envstruct.dbconn,
-                "SELECT id, at, time, days, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
-                envstruct.time_scheduler+dstsecs, now+dstsecs, // one-time jobs
-                (envstruct.time_scheduler+dstsecs) % 86400, (now+dstsecs) % 86400); // daily jobs
+                "SELECT id, at, topic, time, days, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
+                envstruct.time_scheduler, now, // one-time jobs
+                timeFrom, timeTo); // daily jobs
             if res.is_err() { glog!(res); continue }
             res.unwrap()
         };
         if 0 < jobs.len() {
             info!("\x1b[1mSchedules start\x1b[0m {:?}", &jobs);
             let env = env.clone();
-            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_scheduled_job(jobs, env, now).await } ); // for rows, async, block_on
+            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_scheduled_job(jobs, env, now).await } );
             info!("\x1b[1mSchedules end. {:?}", res);
         }
         env.lock().unwrap().time_scheduler = now;
     } ); // loop, ||, thread
     Ok(())
+}
+
+fn headersPretty (hm: &HeaderMap, pad: &str) -> String {
+    hm.iter()
+    .map(|(k,v)| format!("{}:\x1b[1;30m{}\x1b[0m", k, v.to_str().unwrap_or("?")))
+    .collect::<Vec<String>>()
+    .join(pad)
+}
+
+fn reqPretty (req: &HttpRequest, body: &web::Bytes) -> String {
+    format!("\x1b[35m{} \x1b[1;35m{:?} \x1b[0;33;100m{}\x1b[0m {}",
+        req.peer_addr().map(|sa|sa.ip().to_string()).as_deref().unwrap_or("?"),
+        req.uri(),
+        from_utf8(body).map(|s|s.to_string().replace("\n", " \x1b7\x1b[0m\x08 \x1b8")).unwrap_or_else(|_|format!("{:?}", body)),
+        headersPretty(req.headers(), " "))
 }
 
 fn log_header () {
@@ -2767,53 +2983,126 @@ fn log_header () {
     info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
 }
 
+#[macro_export(local_inner_macros)]
+macro_rules! httpResponseOk { () => ({
+    let resp = HttpResponse::Ok().finish();
+    info!("\x1b[1;35m{} {}", resp.status(), headersPretty(resp.headers(), " "));
+    resp
+})}               
+
+#[macro_export(local_inner_macros)]
+macro_rules! httpResponseNotFound { () => ({
+    let resp = HttpResponse::NotFound().finish();
+    error!("\x1b[1;35m{} {}", resp.status(), headersPretty(resp.headers(), "  "));
+    resp
+})}               
+
 async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
     log_header();
-
-    info!("\x1b[35m{}",
-        format!("{:?}", &req.connection_info())
-        .replace(": ", ":")
-        .replace("\"", "")
-        .replace(",", ""));
-
-    info!("\x1b[35m{}  ?:\x1b[1;36m{}  Body:\x1b[1;35m{}",
-        format!("{:?}", &req)
-            .replace("\n", "")
-            .replace(r#"": ""#, ":")
-            .replace("\"", "")
-            .replace("   ", ""),
-        req.query_string(),
-        from_utf8(&body)
-            .unwrap_or(&format!("{:?}", body)) );
+    info!("{}", reqPretty(&req, &body));
 
     let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    //info!("\x1b[1m{:?}", env.lock().unwrap());
+    match bytes2json(&body).and_then(|json|TMsg::new(json)) {
+        Ok(tmsg) => {
+            std::thread::spawn( move || {
+                let envc = env.clone();
+                actix_web::rt::System::new("tmbot").block_on(async move {
+                    match CmdStruct::newcmdstruct(envc, tmsg) {
+                        Ok(mut cmdstruct) => {
+                            do_all(&mut cmdstruct).await.unwrap_or_else(|r| error!("{:?}", r));
+                            //info!("\x1b[36m{}", format!("{:?}", env.lock().unwrap()).replace(": ",":").replace(" {", "{").replace(",","").replace("\"",""));
+                            info!("done.");
+                        },
+                        e => error!("{:?}", e)
+                    }
+                })
+            });
+            let ret = HttpResponse::Ok().finish();
+            info!("\x1b[35m{}\x1b[0m", ret.status());
+            ret
+        },
+        e => {
+            let ret = HttpResponse::Ok().finish(); // 199 throws NotFound
+            error!("\x1b[35m{}\x1b[0m  {:?}", ret.status(), e);
+            ret
+        }
+    }
 
-    std::thread::spawn( move || {
-        let envc = env.clone();
-        actix_web::rt::System::new("tmbot").block_on(async move {
-            match CmdStruct::newcmdstruct(envc, &body) {
-                Ok(mut cmdstruct) => do_all(&mut cmdstruct).await.unwrap_or_else(|r| error!("{:?}", r)),
-                e => glog!(e)
+}
+
+async fn telelogger (req: HttpRequest, body: web::Bytes) -> HttpResponse {
+
+    info!("{}", reqPretty(&req, &body));
+
+    let bodytxt = from_utf8(&body).unwrap_or("{badBodyBytes}");
+
+    let (at, topic) =
+        match
+            regex_to_vec(r#"^/(-?\d+)(/(-?\d+))?/?$"#, &req.path())
+            .and_then( |capv|
+                if capv.is_empty() {
+                    Err("missing channel/topic".into())
+                } else {
+                    Ok((capv.as_i64(1).unwrap(),
+                        capv.as_i64(3).ok()))
+                } ) {
+            Ok(at_topic) => at_topic,
+            Err(e) => {
+                error!("{:?}", e);
+                return httpResponseNotFound!()
             }
-        });
-        info!("\x1b[33m{:?}\n\x1b[0;1mEnd.", env.lock().unwrap());
-    });
-    "".into()
+        };  
+
+    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
+
+    match CmdStruct::new_cmdstruct(env, Instant::now().seconds(), 0, at, at, topic, "".into()) {
+        Ok(mut cmdstruct) => {
+            cmdstruct.push_msg(&bodytxt).send_msg().await.ok();
+        },
+        e => glog!(e)
+    }
+
+    httpResponseOk!()
+}
+
+
+pub fn launch_telelogger(env: Env) -> Bresult<()> {
+  let ssl_acceptor_builder = {
+      let envstruct = env.lock().unwrap();
+      comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+  };
+  std::thread::spawn( move || {
+    let srv =
+        match HttpServer::new( move ||
+            App::new()
+            .data(env.clone())
+            .route("*", web::to(telelogger) ) )
+        .workers(2)
+        .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder) {
+            Ok(srv) => srv,
+            Err(err) => {
+                error!("launch_telelogger => {:?}", err);
+                return;
+            }
+        };
+    let res = actix_web::rt::System::new("tmbot").block_on(async move {
+        println!("launch() => {:?}", srv.run().await)
+    }); // This should never return
+    error!("main_websocket_ssl => {:?}", res);
+  });
+  Ok(())
 }
 
 pub fn launch_server(env: Env) -> Bresult<()> {
     let ssl_acceptor_builder = {
         let envstruct = env.lock().unwrap();
-        comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+        comm::new_ssl_acceptor_builder(&envstruct.telegram_key, &envstruct.telegram_cert)?
     };
     let srv =
-        HttpServer::new( move ||
-            App::new()
+        HttpServer::new(
+            move || App::new()
             .data(env.clone())
-            .service(
-                web::resource("*")
-                .route( Route::new().to(main_dispatch) ) ) )
+            .route("*", web::to(main_dispatch)) )
         .workers(2)
         .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
     Ok(actix_web::rt::System::new("tmbot").block_on(async move {
@@ -2823,7 +3112,7 @@ pub fn launch_server(env: Env) -> Bresult<()> {
 
 ////////////////////////////////////////
 
-fn envstruct_get_entity<'e> (
+fn _envstruct_get_entity<'e> (
     envstruct: &'e EnvStruct,
     name: &str
 ) -> Bresult<&'e Entity> {
@@ -2841,22 +3130,22 @@ pub struct Line {
     line: String,
 }
 
-fn web_login (env: Env, name: &str) -> Bresult<i64> {
+fn _web_login (env: Env, name: &str) -> Bresult<i64> {
     let id = {
         let env = env.clone();
         let envstruct = env.lock().unwrap();
-        envstruct_get_entity(&envstruct, name)?.id
+        _envstruct_get_entity(&envstruct, name)?._id
     };
     warn!("web_login id = {:?}", id);
     std::thread::spawn( move || {
         let res =
             actix_web::rt::System::new("websocketlogin")
             .block_on(async move {
-                match CmdStruct::new_cmdstruct(env, 0, id, id, id, 0, "") {
+                match CmdStruct::new_cmdstruct(env, 0, id, id, id, None, "".into()) {
                     Ok(mut cmdstruct) => {
                         let pw = ::rand::random::<usize>();
                         match cmdstruct.env.try_lock() {
-                            Ok(mut envstruct) => glog!(envstruct.entity_uuid_set(id, pw)),
+                            Ok(mut envstruct) => glog!(envstruct._entity_uuid_set(id, pw)),
                             Err(e) => error!("websocketlogin {:?}", e)
                         };
                         let res = cmdstruct.push_msg(&pw.to_string()).send_msg().await;
@@ -2874,7 +3163,7 @@ fn web_login (env: Env, name: &str) -> Bresult<i64> {
     Ok(id)
 }
 
-fn web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
+fn _web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
                FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
                      FROM positions \
@@ -2910,7 +3199,7 @@ fn web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
     Ok(json)
 }
 
-async fn web_stonks (cmdstruct: &mut CmdStruct) -> Bresult<String> {
+async fn _web_stonks (cmdstruct: &mut CmdStruct) -> Bresult<String> {
     let positions = Position::get_users_positions(cmdstruct)?;
     let mut quotes :Vec<Vec<String>> = Vec::new();
     let mut long = 0.0;
@@ -2970,11 +3259,29 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for CmdStruct {
 
                 let recipient = ctx.address().recipient();
 
-                let fut = async move {
-                    recipient.do_send(Line{line:r#"["hello"]"#.into()}).unwrap()
-                };
+                let fut = async move { recipient.do_send(Line{line:r#"["hello"]"#.into()}).unwrap() };
                 let fut = actix::fut::wrap_future::<_, Self>(fut);
                 ctx.spawn(fut);
+
+    //let env2 = self.env.clone();
+    //std::thread::spawn( move || {
+    //    let res =
+    //        actix_web::rt::System::new("websocketlogin")
+    //        .block_on(async move {
+    //            match CmdStruct::new_cmdstruct(env2, 0, -572225120,-572225120,-572225120, "") {
+    //                Ok(mut cmdstruct) => {
+    //                    let res = cmdstruct.push_msg(&"Someone is playing Wordle!".to_string()).send_msg().await;
+    //                    info!("wordle msg {:?}", res);
+    //                },
+    //                Err(e) => {
+    //                    error!("new_cmdstruct => {:?}", e);
+    //                    "who?".to_string();
+    //                }
+    //            }
+    //        });
+    //    info!("wordle msg => {:?}", res);
+    //});
+
             },
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
             Ok(ws::Message::Binary(_bin)) => ctx.binary(""),
@@ -2984,7 +3291,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for CmdStruct {
     }
 }
 
-async fn ws_handle_request (cmdstruct: &mut CmdStruct) -> String {
+async fn _ws_handle_request (cmdstruct: &mut CmdStruct) -> String {
     let words = cmdstruct.message.split(" ").collect::<Vec<&str>>();
     if words.len() < 1 || 3 < words.len() { return "".to_string() }
     match words[0] {
@@ -3007,23 +3314,23 @@ async fn ws_handle_request (cmdstruct: &mut CmdStruct) -> String {
         },
         "yolo" => {
             let mut envstruct = cmdstruct.env.lock().unwrap();
-            web_yolo(&mut envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+            _web_yolo(&mut envstruct).unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
         },
         "stonks" => {
-            web_stonks(cmdstruct).await.unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
+            _web_stonks(cmdstruct).await.unwrap_or_else( |e| { error!("{:?}", e); "error".into() } )
         },
         "login" => {
             if 2 == words.len() { // Message user privately their login code
-                web_login(cmdstruct.env.clone(), words[1])
+                _web_login(cmdstruct.env.clone(), words[1])
                     .unwrap_or_else( |e| { error!("web_login => {:?}", e); 0 } );
                 ""
             } else if 3 == words.len() { // Accept or reject passocode
                 let envstruct = cmdstruct.env.lock().unwrap();
-                let entity = envstruct_get_entity(&envstruct, words[1]);
+                let entity = _envstruct_get_entity(&envstruct, words[1]);
                 match entity {
                     Ok(entity) => {
-                        cmdstruct.id = entity.id;
-                        IF!(words[2]!="" && entity.uuid!="" && words[2] == entity.uuid, words[1], "")
+                        cmdstruct.id = entity._id;
+                        IF!(words[2]!="" && entity._uuid!="" && words[2] == entity._uuid, words[1], "")
                     },
                     Err(e) => { error!("code result {:?}", e); "" }
                 }
@@ -3041,13 +3348,13 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpRespon
     warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
 
-    let cmdstruct = match CmdStruct::new_cmdstruct(env, 0, 0, 0, 0, 0, "") {
+    let cmdstruct = match CmdStruct::new_cmdstruct(env, 0, 0, 0, 0, None, "".into()) {
         Ok(cmdstruct) => cmdstruct,
         e => { glog!(e); return Ok("".into()) } // TODO: Return an error so the websocket connection closes?
     };
 
     let resp = ws::start(cmdstruct, &req, stream);
-    println!("ws_handler: resp => {:?}", resp);
+    glogd!("ws_handler ", resp);
     resp
 }
 
@@ -3081,10 +3388,11 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
     };
     std::thread::spawn( move || {
         let srv =
-            match HttpServer::new( move ||
-                App::new()
-                .data(env.clone())
-                .route("*", web::get().to(ws_handler)) )
+            match
+                HttpServer::new(
+                    move || App::new()
+                    .data(env.clone())
+                    .route("*", web::get().to(ws_handler)))
                 .bind_openssl("0.0.0.0:7189", ssl_acceptor_builder)
             {
                 Ok(srv) => srv,
@@ -3096,7 +3404,7 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
         let res = actix_web::rt::System::new("websocket").block_on(async move {
             println!("launch() => {:?}", srv.run().await)
         }); // This should never return
-        error!("main_websocket => {:?}", res);
+        error!("main_websocket_ssl => {:?}", res);
     });
     Ok(())
 }
@@ -3110,7 +3418,7 @@ USAGE:
     tmbot {{DST 0|1}}
 ENVIRONMENT:
     TELEGRAM_API_TOKEN=0000000000:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-    TELEGRAM_CERT=telegram_cert.pem 
+    TELEGRAM_CERT=telegram_cert.pem
     TELEGRAM_KEY=telegram_key.pem
     TMBOT_CERT=tmbot_cert.pem
     TMBOT_KEY=tmbot_key.pem
@@ -3122,9 +3430,10 @@ ENVIRONMENT:
     if !true { crate::fun(argv) } // Hacks and other test code
     else {
         let env = EnvStruct::new(argv)?;
-        glogd!("websocket() =>", main_websocket(env.clone()));
-        glogd!("websocketssl() =>", main_websocket_ssl(env.clone()));
+        //glogd!("websocket() =>", main_websocket(env.clone()));
+        //glogd!("websocketssl() =>", main_websocket_ssl(env.clone()));
         glogd!("scheduler() =>", launch_scheduler(env.clone()));
+        glogd!("teleLogger() =>", launch_telelogger(env.clone()));
         launch_server(env)
     }
 }

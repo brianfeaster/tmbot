@@ -4,6 +4,10 @@ version = "0.1.0"
 authors = ["b f <brianf@geemale.kom>"]
 edition = "2018"
 
+[profile.dev]
+opt-level = 1
+lto = "off"
+
 [dependencies]
 log = "*"
 env_logger = "*"

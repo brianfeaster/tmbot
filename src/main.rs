@@ -13,7 +13,7 @@ fn _logger_formatter (buf :&mut Formatter, rec :&Record) -> std::io::Result<()> 
                 Debug => Color::Cyan,
                 Trace => Color::Magenta
             });
-    let pre = style.value(format!("{} {}:{}", rec.level(), rec.target(), rec.line().unwrap()));
+    let pre = style.value(format!("{}{}", /*rec.level(),*/ rec.target(), rec.line().unwrap()));
     writeln!(buf, "{} {:?}", pre, rec.args())
 }
 
