@@ -12,13 +12,15 @@ use ::std::{
     collections::{HashMap, HashSet},
     str::{from_utf8, FromStr},
     sync::{Arc, Mutex},
+    net::TcpListener
  };
 use ::log::*;
 use ::regex::Regex;
 use ::datetime::{ Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::* };
 use ::openssl::ssl::{SslConnector, SslFiletype, SslMethod};
 use ::actix::{ prelude::*, Actor, StreamHandler };
-use ::actix_web::{ web, App, HttpRequest, HttpServer, HttpResponse, client::{Client, Connector}, http::header::HeaderMap };
+use ::actix_web::{ rt, web, App, HttpRequest, HttpServer, HttpResponse, client::{Client, Connector}, http::header::HeaderMap};
+//use ::actix_tls;
 use ::actix_web_actors::ws;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -451,8 +453,10 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
 
 ////////////////////////////////////////
 
+/* Separate structure due to a !send Rc in Telegram
+*/
 #[derive(Debug)]
-pub struct TMsg {
+pub struct Msg {
     id: i64,
     at: i64,
     to: i64,
@@ -460,8 +464,8 @@ pub struct TMsg {
     message: String
 }
 
-impl TMsg {
-    fn new (json: Value) -> Bresult<TMsg> {
+impl Msg {
+    fn new (json: Value) -> Bresult<Msg> {
         let inline_query = &json["inline_query"];
         let edited_message = &json["edited_message"];
         let message = if edited_message.is_object() { edited_message } else { &json["message"] };
@@ -470,7 +474,7 @@ impl TMsg {
         Ok(if inline_query.is_object() { // Inline queries are DMs so no other associated channels
             let id = getin_i64(inline_query, &["from", "id"])?;
             let message = getin_str(inline_query, &["query"])?;
-            TMsg{id, at:id, to:id, topic:None, message}
+            Msg {id, at:id, to:id, topic:None, message }
         } else if message.is_object() { // An incoming message could be a reply or normal.
             let id = getin_i64(message, &["from", "id"])?;
             let at = getin_i64(message, &["chat", "id"])?;
@@ -482,7 +486,7 @@ impl TMsg {
                     getin_i64(message, &["message_thread_id"]).ok()
                 };
             let message = getin_str(message, &["text"])?;
-            TMsg{id, at, to, topic, message}
+            Msg {id, at, to, topic, message}
         } else { Err("Not a Telegram JSON Update.")? })
     }
 }
@@ -531,17 +535,11 @@ impl MsgDetails for CmdStruct {
 }
 
 impl CmdStruct {
-    // Creates a Cmd object from Env and Telegram message body.
-    fn newcmdstruct(env: Env, tmsg: TMsg) -> Bresult<CmdStruct> {
-        CmdStruct::new_cmdstruct(env, Instant::now().seconds(),
-            tmsg.id, tmsg.at, tmsg.to, tmsg.topic, tmsg.message)
-    }
-
-    // create a basic CmdStruct
-    fn new_cmdstruct(env: Env, now:i64, id:i64, at:i64, to:i64, topic:Option<i64>, message:String) -> Bresult<CmdStruct> {
+    // Create a CmdStruct
+    fn new(env: Env, now:i64, id:i64, at:i64, to:i64, topic:Option<i64>, message:String) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
-            let envstruct = env.lock().unwrap();
-            ( Telegram::new(&envstruct.url_api, &envstruct.telegram_key, &envstruct.telegram_cert)?,
+            let envstruct = env.lock().map_err(|e| <std::sync::PoisonError<_> as std::string::ToString>::to_string(&e))?;
+            ( Telegram::new(envstruct.url_api.to_string(), &envstruct.telegram_key, &envstruct.telegram_cert)?,
               envstruct.entitys.get(&id).ok_or(format!("id {} missing from entitys", id))?.echo,
               envstruct.entitys.get(&at).ok_or(format!("at {} missing from entitys", at))?.echo )
         };
@@ -573,21 +571,21 @@ impl CmdStruct {
         self
     }
     // Send new message
-    async fn send_msg (&mut self) -> Bresult<()> {
+    fn send_msg (&mut self) -> Bresult<()> {
         self.msg_id = None;
-        self.msg_id = self.telegram.send_msg(self).await?.msg_id;
+        self.msg_id = self.telegram.send_msg(self)?.msg_id;
         Ok(())
     }
     // Edit last message (last msg_id is always cached)
-    async fn edit_msg (&mut self) -> Bresult<()> {
-        self.msg_id = self.telegram.send_msg(self).await?.msg_id;
+    fn edit_msg (&mut self) -> Bresult<()> {
+        self.msg_id = self.telegram.send_msg(self)?.msg_id;
         Ok(())
     }
     // Send new message to self (TODO: implement edit message to self?)
-    async fn send_msg_id (&mut self) -> Bresult<()> {
+    fn send_msg_id (&mut self) -> Bresult<()> {
         self.msg_id = None;
         self.dm = Some(self.id);
-        self.msg_id = self.telegram.send_msg(self).await?.msg_id;
+        self.msg_id = self.telegram.send_msg(self)?.msg_id;
         self.dm = None;
         Ok(())
     }
@@ -596,13 +594,13 @@ impl CmdStruct {
     // Buying long decreased cash while selling short increases cash.
     // Thus the invariant/buying-power is (otherwise the margin is exceeded/called):
     // 0 < 3*ShortPositions + LongPositions + 2*CashBalance
-    async fn buying_power (&mut self) -> Bresult<f64> {
+    fn buying_power (&mut self) -> Bresult<f64> {
         let positions = Position::get_users_positions(self)?;
         let mut long = 0.0;
         let mut short = 0.0;
         for mut pos in positions {
             if !is_self_stonk(&pos.ticker) {
-                pos.update_quote(&self).await?;
+                pos.update_quote(&self)?;
                 let qty= pos.qty;
                 if qty < 0.0 {
                     short += qty * pos.quote.unwrap().price
@@ -650,10 +648,9 @@ pub struct Quote {
     pub updated: bool // Was this generated or pulled from cache
 }
 
-
 impl Quote { // Query internet for ticker details
-    async fn new_market_quote (env:Env, ticker: &str) -> Bresult<Self> {
-        let json = srvs::get_ticker_raw(ticker).await?;
+    fn new_market_quote (env: Env, ticker: &str) -> Bresult<Self> {
+        let json = srvs::get_ticker_raw(ticker)?;
         //warn!("{}", json);
         let details =
             getin(&json, &["chart", "result"])
@@ -803,7 +800,7 @@ impl Quote { // Query internet for ticker details
 }
 
 impl Quote {// Query local cache or internet for ticker details
-    async fn get_market_quote (cmdstruct: &CmdStruct, ticker:&str) -> Bresult<Self> {
+    fn get_market_quote (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<Self> {
         // Make sure not given referenced stonk. Expected symbols:  GME  308188500   Illegal: @shrewm
         if &ticker[0..1] == "@" { Err("Illegal ticker")? }
         let is_self_stonk = is_self_stonk(ticker);
@@ -856,7 +853,7 @@ impl Quote {// Query local cache or internet for ticker details
                     updated: true
                 }
             } else { // Quote not in cache so query internet
-                Quote::new_market_quote(cmdstruct.env.clone(), ticker).await?
+                Quote::new_market_quote(cmdstruct.env.clone(), ticker)?
             };
         info!("quote = {:?}", quote);
 
@@ -941,8 +938,8 @@ struct Position { // Represent a ledgered position, and optional quote
 }
 
 impl Position {
-    async fn update_quote(&mut self, cmdstruct: &CmdStruct) -> Bresult<&mut Position> {
-        self.quote = Some(Quote::get_market_quote(cmdstruct, &self.ticker).await?);
+    fn update_quote(&mut self, cmdstruct: &CmdStruct) -> Bresult<&mut Position> {
+        self.quote = Some(Quote::get_market_quote(cmdstruct, &self.ticker)?);
         Ok(self)
     }
 }
@@ -985,7 +982,7 @@ impl Position {
             } )
         .collect())
     }
-    async fn query_position(cmdstruct:&CmdStruct, id:i64, ticker:&str) -> Bresult<Position> {
+    fn query_position (cmdstruct:&CmdStruct, id:i64, ticker:&str) -> Bresult<Position> {
         let mut vec = Position::cached_position(cmdstruct, id, ticker)?;
         let mut pos = // Consider the quote or a 0 quantity quote
             match vec.len() {
@@ -993,7 +990,7 @@ impl Position {
                 1 => vec.pop().unwrap(),
                 _ => Err(format!("For {} ticker {} has {} positions, expect 0 or 1", id, ticker, vec.len()))?
             };
-        pos.update_quote(cmdstruct).await?;
+        pos.update_quote(cmdstruct)?;
         Ok(pos)
     }
 }
@@ -1083,15 +1080,14 @@ impl<'a> Trade<'a> {
 // Bot's Do Handlers -- The Meat And Potatos.  The Bread N Butter.  The Works.
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_echo_lvl (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let caps = regex_to_vec("^/echo ?([0-9]+)?", &cmdstruct.message)?;
-    if caps.is_empty() { return Ok("SKIP") }
+fn do_echo_lvl(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let caps = must_regex_to_vec("^/echo ?([0-9]+)?", &cmdstruct.message)?;
 
     let msg = match caps.as_i64(1) {
         Ok(echo) => { // Update existing echo level
             if 2 < echo {
                 let msg = "*echo level must be 0…2*";
-                cmdstruct.push_msg(&msg).send_msg().await?;
+                cmdstruct.push_msg(&msg).send_msg()?;
                 Err(msg)?
             }
             let dbconn = &getenvstruct!(cmdstruct).dbconn;
@@ -1110,15 +1106,14 @@ async fn do_echo_lvl (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             format!("`echo {} verbosity at {:.0}%`", echo, echo as f64/0.02)
         }
     };
-    cmdstruct.push_msg(&msg).send_msg().await?;
+    cmdstruct.push_msg(&msg).send_msg()?;
     Ok("COMPLETED.")
 }
 
-
-pub async fn do_help (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+fn do_help (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     //let cmdl = cmd.lock().unwrap();
     //let cmdstruct = cmdl.deref();
-    if regex_to_vec(r"/help", &cmdstruct.message)?.is_empty() { return Ok("SKIP") }
+    must_regex_to_vec(r"/help", &cmdstruct.message)?;
     let delay = getenvstruct!(cmdstruct).quote_delay_secs;
     let msg = format!(
 r#"`          ™Bot Commands          `
@@ -1148,34 +1143,30 @@ r#"`          ™Bot Commands          `
 `/httpsget URL` `https get request`
 `/httpsbody URL TEXT` `https post request`
 `/httpsjson URL JSON` `https post request`"#, delay);
-    cmdstruct.markdown().push_msg(&msg).send_msg().await?;
+    cmdstruct.markdown().push_msg(&msg).send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn do_curse (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    if Regex::new(r"/curse").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP") }
+fn do_curse(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    must_regex_to_vec("/curse", &cmdstruct.message)?;
     cmdstruct
         .push_msg(["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7])
-        .send_msg()
-        .await?;
+        .send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn do_say (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let rev = regex_to_vec(r"(?s)^/say (.*)$", &cmdstruct.message)?;
-    if rev.is_empty() { return Ok("SKIP".into()) }
-    cmdstruct.push_msg(rev.as_str(1)?).send_msg().await?;
+fn do_say (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let rev = must_regex_to_vec(r"(?s)^/say (.*)$", &cmdstruct.message)?;
+    cmdstruct.push_msg(rev.as_str(1)?).send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
+fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r"^([+-])1$", &cmdstruct.message)?;
     let adj =
-        match Regex::new(r"^([+-])1$")?.captures(&cmdstruct.message) {
-            None => return Ok("SKIP".into()),
-            Some(cap) =>
-                if cmdstruct.id == cmdstruct.to { return Ok("SKIP self plussed".into()); }
-                else if &cap[1] == "+" { 1 } else { -1 }
-    };
+        if cmdstruct.id == cmdstruct.to {
+            return Ok("SKIP self plussed");
+        } else if cap.as_str(1)? == "+" { 1 } else { -1 };
 
     let (fromname, likes, toname) = {
         let ref mut envstruct = getenvstruct!(cmdstruct);
@@ -1190,13 +1181,12 @@ async fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<String> {
 
     cmdstruct
         .push_msg(&format!("{}{}{}", fromname, num2heart(likes), toname))
-        .send_msg()
-        .await?;
+        .send_msg()?;
     Ok("COMPLETED.".into())
 }
 
-async fn do_like_info (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    if cmdstruct.message != "+?" { return Ok("SKIP"); }
+fn do_like_info (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    if cmdstruct.message != "+?" { Err("")? }
 
     let mut likes :Vec<(i64, String)>=
         getenvstruct!(cmdstruct).entitys.iter().map( |(_,e)| (e.likes, e.name.clone()) ).collect();
@@ -1208,14 +1198,13 @@ async fn do_like_info (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             .iter()
             .map( |(likecount, username)| format!("{}{} ", username, num2heart(*likecount)) )
             .collect::<Vec<String>>().join(""))
-        .send_msg().await?;
+        .send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    let cap = regex_to_vec(r"^([A-Za-z-]+):$", &cmdstruct.message)?;
-    if cap.is_empty() { return Ok("SKIP"); }
-    let word = cap.as_str(1)?;
+fn do_def (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r"^([A-Za-z-]+):$", &cmdstruct.message)?;
+    let word = cap.as_str(1)?.to_string();
 
     info!("looking up {:?}", word);
 
@@ -1223,15 +1212,14 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     // Definitions
 
-    let defs = get_definition(&word).await?;
-
+    let word2 = word.to_string();
+    let defs = actix_web::rt::System::new("tmbot").block_on(async move { get_definition(&word2).await })?;
     cmdstruct.markdown();
 
     if defs.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* def is empty", &word))
-            .send_msg_id()
-            .await?;
+            .send_msg_id()?;
     } else {
         msg.push_str( &format!("*{}", &word) );
         if 1 == defs.len() { // If multiple definitions, leave off the colon
@@ -1246,13 +1234,13 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     // Synonyms
 
-    let mut syns = get_syns(&word).await?;
+    let word2 = word.to_string();
+    let mut syns = actix_web::rt::System::new("tmbot").block_on(async move { get_syns(&word2).await })?;
 
     if syns.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* syns is empty", &word))
-            .send_msg_id()
-            .await?;
+            .send_msg_id()?;
     } else {
         if msg.is_empty() {
             msg.push_str( &format!("*{}:* _", &word) );
@@ -1265,67 +1253,54 @@ async fn do_def (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     }
 
     if !msg.is_empty() {
-        cmdstruct.push_msg(&msg).send_msg().await?;
+        cmdstruct.push_msg(&msg).send_msg()?;
     }
     Ok("COMPLETED.")
 }
 
-async fn do_httpsget (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    let cap = regex_to_vec(r"(?s)^/httpsget ((https://|http://)?(.+))$", &cmdstruct.message)?;
-    if cap.is_empty() { return Ok("SKIP"); }
+fn do_httpsget (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r"(?s)^/httpsget\s+((https://|http://)?(.+))$", &cmdstruct.message)?;
     let url = cap.as_str(3)?;
 
-    info!("querying url {}", url);
-
     let mut msg = String::new();
-
-    let body = get_https_raw(&url).await?;
+    let url2 = url.to_string();
+    let body = actix_web::rt::System::new("tmbot").block_on(async move { get_https_raw(&url2).await })?;
 
     if body.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* body is empty or error", &url))
-            .send_msg_id()
-            .await?;
+            .send_msg_id()?;
     } else {
         msg.push_str( &format!("{}", &body) );
     }
 
     if !msg.is_empty() {
-        cmdstruct.push_msg(&msg).send_msg().await?;
+        cmdstruct.push_msg(&msg).send_msg()?;
     }
 
     Ok("COMPLETED.")
 }
 
-async fn do_httpsbody (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    let cap = regex_to_vec(r#"(?s)^/httpsbody\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
-    if cap.is_empty() { return Ok("SKIP"); }
+fn do_httpsbody(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r#"(?s)^/httpsbody\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
     let url = cap.as_str(3)?;
     let text = cap.get(4).and_then(|c|c.as_ref()).unwrap_or(&String::new()).to_string();
 
-    let mut msg = String::new();
-    let body = post_https_text(&url, text).await?;
+    let body = post_https_text(&url, text)?;
 
     if body.is_empty() {
         cmdstruct
             .push_msg(&format!("*{}* body is empty or error", &url))
-            .send_msg_id()
-            .await?;
+            .send_msg_id()?
     } else {
-        msg.push_str( &format!("{}", &body) );
-    }
-
-    if !msg.is_empty() {
-        cmdstruct.push_msg(&msg).send_msg().await?;
+        cmdstruct.push_msg(&body).send_msg()?
     }
 
     Ok("COMPLETED.")
 }
 
-async fn do_httpsjson (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    let cap = regex_to_vec(r#"(?s)^/httpsjson\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
-    if cap.is_empty() { return Ok("SKIP"); }
-    let url = cap.as_str(3)?;
+fn do_httpsjson (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r#"(?s)^/httpsjson\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
 
     let txt =
         cap.get(4)
@@ -1341,20 +1316,19 @@ async fn do_httpsjson (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
             }
         })
         .unwrap_or(String::new());
-
+    let url = cap.as_str(3)?;
     let ret =
-        match post_https_json(&url, &txt).await {
+        match post_https_json(&url, &txt) {
             Ok(res) => if res.is_empty() { "*empty response*".into() } else { res },
             Err(e) => e.to_string()
         };
 
-    cmdstruct.push_msg(&ret).send_msg().await?;
+    cmdstruct.push_msg(&ret).send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn do_json (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
-    let cap = regex_to_vec(r#"(?s)^/json\s+(.+)$"#, &cmdstruct.message)?;
-    if cap.is_empty() { return Ok("SKIP"); }
+fn do_json (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cap = must_regex_to_vec(r#"(?s)^/json\s+(.+)$"#, &cmdstruct.message)?;
 
     let ret = match cap.as_str(1).map( |s| { // escapeify newlines in string literals
         if 2 < s.len()
@@ -1373,14 +1347,13 @@ async fn do_json (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
               Ok(v) => v.to_string()
             }
     };
-    cmdstruct.push_msg(&ret).send_msg().await?;
+    cmdstruct.push_msg(&ret).send_msg()?;
     Ok("COMPLETED.")
 }
 
-
-async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+fn do_sql (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     if cmdstruct.id != 308188500 { return Ok("do_sql invalid user"); }
-    let rev = regex_to_vec("^(.*)ß$", &cmdstruct.message)?;
+    let rev = must_regex_to_vec("^(.*)ß$", &cmdstruct.message)?;
     let sqlexpr = if rev.is_empty() { return Ok("SKIP") } else { rev.as_str(1)? };
     let sqlres = {
         let envstruct = getenvstruct!(cmdstruct);
@@ -1389,7 +1362,7 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     let results =
         match sqlres {
             Err(e) => {
-                cmdstruct.push_msg(&format!("{}", e)).send_msg().await?;
+                cmdstruct.push_msg(&format!("{}", e)).send_msg()?;
                 Err(e)?
             }
             Ok(r) => r
@@ -1408,7 +1381,7 @@ async fn do_sql (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
 
     cmdstruct
         .push_msg(if msg.is_empty() { &"empty results" } else { &msg })
-        .send_msg().await?;
+        .send_msg()?;
     Ok("COMPLETED.")
 }
 
@@ -1437,7 +1410,7 @@ pub fn doquotes_scan_tickers (txt :&str, re:Regex) -> Bresult<HashSet<String>> {
     Ok(tickers)
 }
 
-async fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String> {
+fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String> {
     let (ticker, bidask) = {
         let dbconn = &getenvstruct!(cmdstruct).dbconn;
         let ticker = deref_ticker(dbconn, ticker).unwrap_or(ticker.to_string());
@@ -1462,27 +1435,27 @@ async fn doquotes_pretty (cmdstruct: &CmdStruct, ticker: &str) -> Bresult<String
         };
         (ticker, bidask)
     };
-    let quote = Quote::get_market_quote(cmdstruct, &ticker).await.map_err(|e| { error!("{:?}", e); e} )?;
+    let quote = Quote::get_market_quote(cmdstruct, &ticker).map_err(|e| { error!("{:?}", e); e} )?;
     Ok(format!("{}{}", quote.format_quote(cmdstruct.id)?, bidask))
 }
 
-async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
+fn do_quotes (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let tickers =
         doquotes_scan_tickers(
             &cmdstruct.message,
             Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$")?)?;
-    if tickers.is_empty() { return Ok("SKIP") }
+    if tickers.is_empty() { return Err("".into()); }
 
-    cmdstruct.markdown().push_msg("…").send_msg().await?;
+    cmdstruct.markdown().push_msg("…").send_msg()?;
     cmdstruct.set_msg("");
 
     let mut found_tickers = false;
     for ticker in &tickers {
         // Catch error and continue looking up tickers
-        match doquotes_pretty(&cmdstruct, ticker).await {
+        match doquotes_pretty(&cmdstruct, ticker) {
             Ok(res) => {
                 info!("doquotes_pretty => {:?}", res);
-                cmdstruct.push_msg(&format!("{}\n", res)).edit_msg().await?;
+                cmdstruct.push_msg(&format!("{}\n", res)).edit_msg()?;
                 found_tickers = true;
             },
             e => { glogd!("doquotes_pretty => ", e); }
@@ -1490,21 +1463,20 @@ async fn do_quotes (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
     }
 
     if !found_tickers {
-        cmdstruct.set_msg(&"No quotes found").edit_msg().await?;
+        cmdstruct.set_msg(&"No quotes found").edit_msg()?;
     }
     Ok("COMPLETED.")
 }
 // DO QUOTES
 ////////////////////////////////////////
 
-async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let caps = regex_to_vec(r"(?i)/stonks( .+)?", &cmdstruct.message)?;
-    if caps.is_empty() { return Ok("SKIP"); }
+fn do_portfolio(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let caps = must_regex_to_vec(r"(?i)/stonks( .+)?", &cmdstruct.message)?;
 
     let dosort = caps[1].is_none();
     let positions = Position::get_users_positions(cmdstruct)?;
 
-    cmdstruct.markdown().push_msg("…").send_msg().await?;
+    cmdstruct.markdown().push_msg("…").send_msg()?;
     cmdstruct.set_msg("");
 
     let mut long = 0.0;
@@ -1512,7 +1484,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     let mut positions_table :Vec<(f64,String)> = Vec::new();
     for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
-            pos.update_quote(&cmdstruct).await?;
+            pos.update_quote(&cmdstruct)?;
             info!("{} position {:?}", cmdstruct.id, &pos);
             let quote = pos.quote.as_ref().ok_or("quote not acquired")?;
             let pretty_position = pos.format_position(&getenvstruct!(cmdstruct), cmdstruct.id)?;
@@ -1533,7 +1505,7 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             } else {
                 long += pos.qty * pos.quote.unwrap().price;
             }
-            cmdstruct.edit_msg().await?;
+            cmdstruct.edit_msg()?;
         }
     }
 
@@ -1542,17 +1514,15 @@ async fn do_portfolio (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     cmdstruct
         .push_msg(&format!("\n`{:.2}``CASH`  `{:.2}``BP`  `{:.2}``YOLO`\n",
             roundcents(IF!(cash<0.0, 0.0, cash)), roundcents(bp), roundcents(long+short+cash)))
-        .edit_msg()
-        .await?;
+        .edit_msg()?;
     Ok("COMPLETED.")
 }
 
 // Handle: /yolo
-async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+fn do_yolo (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    must_regex_to_vec(r"/yolo", &cmdstruct.message)?;
 
-    if regex_to_vec(r"/yolo", &cmdstruct.message)?.is_empty() { return Ok("SKIP"); }
-
-    cmdstruct.markdown().push_msg("...").send_msg().await?;
+    cmdstruct.markdown().push_msg("...").send_msg()?;
 
     let rows = {
         let envstruct = getenvstruct!(cmdstruct);
@@ -1577,7 +1547,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
     // Update all user-positioned tickers
     for row in rows {
         let ticker = row.get_string("ticker")?;
-        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker).await); // got rid of ?
+        info!("Stonk \x1b[33m{:?}", Quote::get_market_quote(cmdstruct, &ticker)); // got rid of ?
     }
 
     /* Everyone's YOLO including non positioned YOLOers
@@ -1628,7 +1598,7 @@ async fn do_yolo (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
             row.get_f64("yolo")?,
             row.get_string("name")?) );
     }
-    cmdstruct.set_msg(&msg).edit_msg().await?;
+    cmdstruct.set_msg(&msg).edit_msg()?;
     Ok("COMPLETED.")
 }
 
@@ -1655,17 +1625,18 @@ struct TradeBuy<'a> {
 }
 
 impl<'a> TradeBuy<'a> {
-    async fn new_tradebuy(trade: Trade<'a>) -> Bresult<TradeBuy<'a>> {
-        let position = Position::query_position(&trade.cmdstruct, trade.cmdstruct.id, &trade.ticker).await?;
+    fn new_tradebuy(trade: Trade<'a>) -> Bresult<TradeBuy<'a>> {
+        let position =
+            Position::query_position(&trade.cmdstruct, trade.cmdstruct.id, &trade.ticker)?;
         let quote = position.quote.as_ref().ok_or("quote not acquired")?;
         trade.cmdstruct.markdown();
 
         if quote.exchange == "PNK" {
-            trade.cmdstruct.push_msg("`OTC/PinkSheet untradeable`").send_msg().await?;
+            trade.cmdstruct.push_msg("`OTC/PinkSheet untradeable`").send_msg()?;
             Err("OTC/PinkSheet untradeable")?
         }
 
-        let bp = trade.cmdstruct.buying_power().await?;
+        let bp = trade.cmdstruct.buying_power()?;
         let qty = match trade.amt {
             Some(amt) => if trade.is_dollars { amt/quote.price } else { amt },
             None => {
@@ -1684,7 +1655,7 @@ impl<'a> TradeBuy<'a> {
 struct TradeBuyCalc<'a> { qty:f64, cost:f64, new_qty:f64, new_basis:f64, new_position_p:bool, tradebuy: TradeBuy<'a> }
 
 impl<'a> TradeBuyCalc<'a> {
-    async fn compute_position (obj: TradeBuy<'a>) -> Bresult<TradeBuyCalc<'a>> {
+    fn compute_position(obj: TradeBuy<'a>) -> Bresult<TradeBuyCalc<'a>> {
         let quote = obj.position.quote.as_ref().ok_or("quote not acquired")?;
         // TODO: Adjust for short settling?
         let bp = obj.bp + IF!(obj.position.qty<0.0, -obj.position.qty*quote.price, 0.0);
@@ -1698,7 +1669,7 @@ impl<'a> TradeBuyCalc<'a> {
                 .or_else( |_e| verify_qty(obj.qty-0.0004, quote.price, bp) )
                 .or_else( |_e| verify_qty(obj.qty-0.0005, quote.price, bp) ) {
                 Err(e) => {  // Message user problem and log
-                    obj.trade.cmdstruct.push_msg(&e).send_msg_id().await?;
+                    obj.trade.cmdstruct.push_msg(&e).send_msg_id()?;
                     return Err(e.into())
                 },
                 Ok(r) => r
@@ -1720,7 +1691,6 @@ struct ExecuteBuy<'a> { msg:String, tradebuycalc: TradeBuyCalc<'a> }
 
 impl<'a> ExecuteBuy<'a> {
     fn execute (mut obj: TradeBuyCalc<'a>) -> Bresult<Self> {
-
         let quote = obj.tradebuy.position.quote.as_ref().ok_or("quote not acquired")?;
         let now = obj.tradebuy.trade.cmdstruct.now;
 
@@ -1767,18 +1737,18 @@ impl<'a> ExecuteBuy<'a> {
     }
 }
 
-async fn do_trade_buy (cmdstruct:&mut CmdStruct) -> Bresult<&'static str> {
+fn do_trade_buy (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let trade = Trade::new_trade(cmdstruct)?;
-    if trade.as_ref().map_or(true, |trade| trade.action != '+') { return Ok("SKIP") }
+    if trade.as_ref().map_or(true, |trade| trade.action != '+') { Err("")?  }
 
     let res =
-        TradeBuy::new_tradebuy(trade.unwrap()).await
-        .map(TradeBuyCalc::compute_position)?.await
+        TradeBuy::new_tradebuy(trade.unwrap())
+        .map(TradeBuyCalc::compute_position)?
         .map(ExecuteBuy::execute)??;
 
     info!("\x1b[1;31mResult {:#?}", &res);
 
-    res.tradebuycalc.tradebuy.trade.cmdstruct.push_msg(&res.msg).edit_msg().await?; // Report to group
+    res.tradebuycalc.tradebuy.trade.cmdstruct.push_msg(&res.msg).edit_msg()?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -1799,19 +1769,18 @@ struct TradeSell<'a> {
 }
 
 impl<'a> TradeSell<'a> {
-    async fn new_tradesell (trade: Trade<'a>) -> Bresult<TradeSell<'a>> {
-
-        let position = Position::query_position(trade.cmdstruct, trade.cmdstruct.id, &trade.ticker).await?;
+    fn new_tradesell (trade: Trade<'a>) -> Bresult<TradeSell<'a>> {
+        let position = Position::query_position(trade.cmdstruct, trade.cmdstruct.id, &trade.ticker)?;
         let quote = position.quote.as_ref().ok_or("quote not acquired")?;
         let price = quote.price;
         trade.cmdstruct.markdown();
 
         if quote.exchange == "PNK" {
-            trade.cmdstruct.push_msg("`OTC / PinkSheet untradeable`").send_msg().await?;
+            trade.cmdstruct.push_msg("`OTC / PinkSheet untradeable`").send_msg()?;
             Err("OTC / PinkSheet Verboten Stonken")?
         }
 
-        let bp = trade.cmdstruct.buying_power().await?;
+        let bp = trade.cmdstruct.buying_power()?;
 
         let qty =
             roundqty(match trade.amt {
@@ -1825,7 +1794,7 @@ impl<'a> TradeSell<'a> {
             });
 
         if qty == 0.0 {
-            trade.cmdstruct.push_msg("Quantity too low.").send_msg().await?;
+            trade.cmdstruct.push_msg("Quantity too low.").send_msg()?;
             Err("sell qty too low")?
         }
 
@@ -1841,7 +1810,7 @@ impl<'a> TradeSell<'a> {
                 .or_else( |_e| verify_qty(qty-0.0004, price, bp) )
                 .or_else( |_e| verify_qty(qty-0.0005, price, bp) ) {
                 Err(e) => {  // Message user problem and log
-                    trade.cmdstruct.push_msg(&e).send_msg().await?;
+                    trade.cmdstruct.push_msg(&e).send_msg()?;
                     (qty, 0.0)
                 },
                 Ok(r) => r
@@ -1862,7 +1831,7 @@ impl<'a> TradeSell<'a> {
         }
 
         if !short && position.qty < qty {
-            trade.cmdstruct.push_msg("You can't sell more than you own.").send_msg().await?;
+            trade.cmdstruct.push_msg("You can't sell more than you own.").send_msg()?;
             return Err("not enough shares to sell".into());
         }
 
@@ -1937,16 +1906,16 @@ impl<'a> ExecuteSell<'a> {
     }
 }
 
-async fn do_trade_sell (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
+fn do_trade_sell (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let trade = Trade::new_trade(cmdstruct)?;
-    if trade.as_ref().map_or(true, |trade| trade.action != '-') { return Ok("SKIP") }
+    if trade.as_ref().map_or(true, |trade| trade.action != '-') { Err("")? }
 
     let res =
-        TradeSell::new_tradesell(trade.unwrap()).await
+        TradeSell::new_tradesell(trade.unwrap())
         .map(ExecuteSell::execute)??;
 
     info!("\x1b[1;31mResult {:#?}", res);
-    res.tradesell.trade.cmdstruct.push_msg(&res.msg).send_msg().await?; // Report to group
+    res.tradesell.trade.cmdstruct.push_msg(&res.msg).send_msg()?; // Report to group
     Ok("COMPLETED.")
 }
 
@@ -2067,7 +2036,7 @@ struct QuoteExecute<'a> {
 }
 
 impl<'a> QuoteExecute<'a> {
-    async fn doit (mut obj: QuoteCancelMine<'a>) -> Bresult<QuoteExecute<'a>> {
+    fn doit (mut obj: QuoteCancelMine<'a>) -> Bresult<QuoteExecute<'a>> {
         let (_qty, _bids, msg) = {
             let id = obj.exquote.id;
             let ticker = &obj.exquote.ticker;
@@ -2092,7 +2061,7 @@ impl<'a> QuoteExecute<'a> {
             };
 
             let mut msg = obj.msg.to_string();
-            let position = Position::query_position( &obj.exquote.cmdstruct, id, ticker).await?;
+            let position = Position::query_position( &obj.exquote.cmdstruct, id, ticker)?;
             let posqty = position.qty;
             let posprice = position.price;
 
@@ -2146,7 +2115,7 @@ impl<'a> QuoteExecute<'a> {
                         }
 
                         // Update buyer's position
-    /**/                let aposition = Position::query_position( &obj.exquote.cmdstruct, aid, ticker).await?;
+    /**/                let aposition = Position::query_position( &obj.exquote.cmdstruct, aid, ticker)?;
                         let aposqty = aposition.qty;
                         let aposprice = aposition.price;
 
@@ -2159,7 +2128,7 @@ impl<'a> QuoteExecute<'a> {
                         }
 
                         // Update stonk exquote value
-    /**/                let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker).await?.price;
+    /**/                let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker)?.price;
                         getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?", aprice, last_price, now, &**ticker)?;
 
                         qty = roundqty(qty+xqty);
@@ -2255,7 +2224,7 @@ impl<'a> QuoteExecute<'a> {
 
                         {
                             // Update their position
-        /**/                let aposition = Position::query_position( &obj.exquote.cmdstruct, aid, ticker).await?;
+        /**/                let aposition = Position::query_position( &obj.exquote.cmdstruct, aid, ticker)?;
                             let aposqty = aposition.qty;
                             let newaposqty = roundqty(aposqty - xqty);
                             let dbconn = &getenvstruct!(obj.exquote.cmdstruct).dbconn;
@@ -2267,7 +2236,7 @@ impl<'a> QuoteExecute<'a> {
                         }
 
                         // Update self-stonk exquote value
-                        let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker).await?.price;
+                        let last_price = Quote::get_market_quote(obj.exquote.cmdstruct, ticker)?.price;
                         let dbconn = &getenvstruct!(obj.exquote.cmdstruct).dbconn;
                         getsql!(dbconn, "UPDATE stonks SET price=?, last=?, time=? WHERE ticker=?",
                             aprice, last_price, now, &**ticker)?;
@@ -2303,14 +2272,13 @@ impl<'a> QuoteExecute<'a> {
     }
 }
 
-async fn do_exchange_bidask (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
-
+fn do_exchange_bidask (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let exquote = ExQuote::scan(cmdstruct)?;
-    let exquote = if exquote.is_none() { return Ok("SKIP") } else { exquote.unwrap() };
+    let exquote = if exquote.is_none() { Err("")? } else { exquote.unwrap() };
 
     let ret =
         QuoteCancelMine::doit(exquote)
-        .map(|obj| QuoteExecute::doit(obj) )?.await?;
+        .map(|obj| QuoteExecute::doit(obj) )??;
     info!("\x1b[1;31mResult {:#?}", ret);
     if 0 != ret.msg.len() {
         ret.quotecancelmine.exquote.cmdstruct
@@ -2319,21 +2287,21 @@ async fn do_exchange_bidask (cmdstruct :&mut CmdStruct) -> Bresult<&'static str>
                 &ret.msg
                 .replacen("_", "\\_", 1000)
                 .replacen(">", "\\>", 1000))
-            .send_msg()
-            .await?;
+            .send_msg()?;
     } // Report to group
     Ok("COMPLETED.")
 }
 
-
-async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
+fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let id = cmdstruct.id;
     let mut asks = String::from("");
     let mut bids = String::from("");
     let rows = {
         let envstruct = getenvstruct!(cmdstruct);
         let dbconn = &envstruct.dbconn;
-        if Regex::new(r"(?i)/orders").unwrap().find(&cmdstruct.message).is_none() { return Ok("SKIP"); }
+
+        must_regex_to_vec(r"(?i)/orders", &cmdstruct.message)?;
+
         for order in getsql!(dbconn, "SELECT * FROM exchange WHERE id=?", id)? {
             let ticker = order.get_string("ticker")?;
             let stonk = reference_ticker(envstruct, &ticker).replacen("_", "\\_", 10000);
@@ -2370,7 +2338,7 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     quote: None
                 }
             };
-            pos.update_quote(&cmdstruct).await?;
+            pos.update_quote(&cmdstruct)?;
             msg += &pos.format_position(getenvstruct!(cmdstruct), id)?;
             total += pos.qty * pos.quote.unwrap().price;
         }
@@ -2400,16 +2368,15 @@ async fn do_orders (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         }
     }
 
-    cmdstruct.markdown().push_msg(&msg).send_msg().await?;
+    cmdstruct.markdown().push_msg(&msg).send_msg()?;
     Ok("COMPLETED.")
 }
 
-async fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<()> {
+fn send_format_strings_help (cmdstruct: &mut CmdStruct) -> Bresult<()> {
     cmdstruct
         .markdown()
         .push_msg(FORMAT_STRINGS_HELP)
-        .edit_msg()
-        .await?;
+        .edit_msg()?;
     Ok(())
 }
 
@@ -2443,11 +2410,9 @@ const FORMAT_STRINGS_HELP: &str =
 `%[%nbiusq]` `% newline bold italics underline strikeout quote`
 ";
 
-async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
-
-    let caps = regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &cmdstruct.message)?;
+fn do_fmt (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let caps = must_regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &cmdstruct.message)?;
     //caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
-    if caps.is_empty() { return Ok("SKIP"); }
 
     let id = cmdstruct.id;
 
@@ -2462,7 +2427,7 @@ async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
             .push_msg(&format!("FORMAT STRINGS\nQuote{} {}\nPosition{} {}",
                 IF!(fmt_quote==FORMAT_STRING_QUOTE, "*", ""), fmt_quote,
                 IF!(fmt_position==FORMAT_STRING_POSITION, "*", ""), fmt_position))
-            .send_msg().await
+            .send_msg()
             .and(Ok("COMPLETED."))
     }
 
@@ -2478,7 +2443,7 @@ async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
             getenvstruct!(cmdstruct).entitys.get_mut(&id).unwrap().position = new_format_str.to_string();
             "position"
         },
-          _ => return send_format_strings_help(cmdstruct).await.and(Ok("COMPLETED."))
+          _ => return send_format_strings_help(cmdstruct).and(Ok("COMPLETED."))
     };
 
     // notify user the change
@@ -2487,8 +2452,7 @@ async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
             &format!("Format {}\n{}",
                 format_type,
                 if new_format_str.is_empty() { "DEFAULT".to_string() } else { format!("{}", new_format_str) }))
-        .send_msg()
-        .await?;
+        .send_msg()?;
 
     let dbconn = &getenvstruct!(cmdstruct).dbconn;
 
@@ -2500,20 +2464,16 @@ async fn do_fmt (cmdstruct :&mut CmdStruct) -> Bresult<&'static str> {
     Ok("COMPLETED.")
 }
 
-
-async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-
-    let caps = regex_to_vec(
+fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let caps = must_regex_to_vec(
         //             _______float to 2 decimal places______                                    ____________float_____________
         r"(?i)^/rebalance( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* (([0-9]*[.][0-9]+)|([0-9]+[.]?)))+)",
         &cmdstruct.message)?;
-    if caps.is_empty() { return Ok("SKIP") }
-
 
     cmdstruct
         .markdown()
         .push_msg(&format!("Rebalancing:"))
-        .send_msg().await?;
+        .send_msg()?;
 
     let percents = // HashMap of Ticker->Percent
         Regex::new(r" ([@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*) (([0-9]*[.][0-9]+)|([0-9]+[.]?))")?
@@ -2534,17 +2494,17 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 percents.keys().map(String::to_string).collect::<Vec<String>>().join("','")))?
         .len() != 0
     } {
-        cmdstruct.push_msg(&"\nRebalance During Trading Hours Mon..Fri 1AM..5PM").edit_msg().await?;
+        cmdstruct.push_msg(&"\nRebalance During Trading Hours Mon..Fri 1AM..5PM").edit_msg()?;
         return Ok("COMPLETED.");
     }
 
     for ticker in percents.keys() { // Refresh stonk quotes
         if !is_self_stonk(&ticker) {
-            if Quote::get_market_quote(cmdstruct, &ticker).await.map_err( |e|warn!("ticker {} invalid {}", ticker, e) ).is_err() {
-                cmdstruct.push_msg(&format!(" ~{}~", ticker)).edit_msg().await?;
+            if Quote::get_market_quote(cmdstruct, &ticker).map_err( |e| warn!("ticker {} invalid {}", ticker, e) ).is_err() {
+                cmdstruct.push_msg(&format!(" ~{}~", ticker)).edit_msg()?;
             } else {
                 // Update feedback message with ticker symbol
-                cmdstruct.push_msg(&format!(" {}", ticker)).edit_msg().await?;
+                cmdstruct.push_msg(&format!(" {}", ticker)).edit_msg()?;
             }
         }
     }
@@ -2571,7 +2531,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
     info!("rebalance total {}", total);
 
     if 0==positions.len() {
-        cmdstruct.push_msg("no valid tickers").edit_msg().await?;
+        cmdstruct.push_msg("no valid tickers").edit_msg()?;
     } else {
         for i in 0..positions.len() {
             let ticker = positions[i].get_string("ticker")?;
@@ -2587,13 +2547,13 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let diffstr = &positions[i].get_string("diff")?[1..];
                 cmdstruct.push_msg("\n");
                 if "0" == diffstr {
-                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).edit_msg().await?;
+                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).edit_msg()?;
                 } else {
                     let message = format!("{}-${}", ticker, &diffstr);
                     cmdstruct.message = message;
-                    glogd!(" do_trade_sell =>", do_trade_sell(cmdstruct).await); // Recurse on same cmsstruct but mutated message
+                    glogd!(" do_trade_sell =>", do_trade_sell(cmdstruct)); // Recurse on same cmsstruct but mutated message
                 }
-                //cmdstruct.edit_msg().await?;
+                //cmdstruct.edit_msg()?;
             }
         }
         for i in 0..positions.len() {
@@ -2602,7 +2562,7 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 let ticker = &positions[i].get_string("ticker")?;
                 let mut diffstr = positions[i].get_string("diff")?;
                 if diffstr != "0" {
-                    let bp = cmdstruct.buying_power().await?;
+                    let bp = cmdstruct.buying_power()?;
                     // The last buy might be so off, so skip or adjust to account value
                     if bp < diffstr.parse::<f64>()? {
                         if 0.01 <= bp {
@@ -2615,23 +2575,23 @@ async fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 }
                 cmdstruct.push_msg("\n");
                 if "0" == diffstr {
-                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).edit_msg().await?;
+                    cmdstruct.push_msg(&format!("{} is balanced", ticker)).edit_msg()?;
                 } else {
                     let message = format!("{}+${}", ticker, &diffstr);
                     //cmdstruct.push_msg(&format!("\n{}\n", message));
                     cmdstruct.message = message;
-                    glogd!(" do_trade_buy =>", do_trade_buy(cmdstruct).await); // Recurse on same cmsstruct but mutated message
+                    glogd!(" do_trade_buy =>", do_trade_buy(cmdstruct)); // Recurse on same cmsstruct but mutated message
                 }
-                //cmdstruct.send_msg().await?;
+                //cmdstruct.send_msg()?;
             }
         }
     }
     Ok("COMPLETED.")
 }
 
-async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
+fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let caps =
-        regex_to_vec(
+        must_regex_to_vec(
             r"(?sxi)^/schedule
             (
                 (?: ### Fixed GMT
@@ -2650,7 +2610,6 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 (?: \ + (.+))?
             )",
             &cmdstruct.message )?;
-    if caps.is_empty() { return Ok("SKIP") }
 
     cmdstruct.markdown();
 
@@ -2661,7 +2620,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             getsql!(dbconn, "SELECT name, time, days, cmd FROM schedules LEFT JOIN entitys ON schedules.at = entitys.id WHERE schedules.id=?", cmdstruct.id)?
         };
         if res.is_empty() {
-            cmdstruct.push_msg("No Scheduled Jobs").send_msg().await?;
+            cmdstruct.push_msg("No Scheduled Jobs").send_msg()?;
             return Ok("COMPLETED.")
         }
         res.sort_by( |a,b| a.get_i64("time").unwrap().cmp(&b.get_i64("time").unwrap()) );
@@ -2678,7 +2637,7 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
             } )
             .collect::<Vec<String>>()
             .join("\n");
-        cmdstruct.push_msg(&buff).send_msg().await?;
+        cmdstruct.push_msg(&buff).send_msg()?;
         return Ok("COMPLETED.")
     }
 
@@ -2692,7 +2651,6 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
 
         let duration_caps =
             regex_to_vec(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d*)", caps.as_str(4).unwrap_or(""))?;
-        //duration_caps.iter().for_each( |c| println!("\x1b[1;35m{:?}", c));
         let neg = IF!(duration_caps.as_str(1).is_ok(),-1,1);
         let hours = duration_caps.as_i64(2).unwrap_or(0);
         let mins = duration_caps.as_i64(3).unwrap_or(0);
@@ -2717,7 +2675,6 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 now + dstsecs
             }
             + neg*(hours*60*60 + mins*60 + secs);
-        //info!("n{} h{} m{} s{} {}", neg, hours, mins, secs, time);
 
         let daily = caps.as_str(5);
         if daily.is_ok() { time = time.rem_euclid(86400)}
@@ -2758,14 +2715,13 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         }
     };
 
-    cmdstruct.push_msg(&msg).send_msg().await?;
+    cmdstruct.push_msg(&msg).send_msg()?;
 
     Ok("COMPLETED.")
 }
 
-async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let expr = regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
-    if expr.is_empty() { return Ok("SKIP") }
+fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let expr = must_regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
 
     let mut stack = Vec::new();
     for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr.as_string(2)?) {
@@ -2777,8 +2733,8 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                     stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ")
                     + " "
                     + op.as_str()))
-                .edit_msg().await?;
-            if stack.len() < 2 { cmdstruct.push_msg(" stack is lacking").edit_msg().await? }
+                .edit_msg()?;
+            if stack.len() < 2 { cmdstruct.push_msg(" stack is lacking").edit_msg()? }
             let b = stack.pop().ok_or("stack empty")?;
             let a = stack.pop().ok_or("stack empty")?;
             match op.as_str() {
@@ -2793,7 +2749,7 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 op.as_str().chars().next().unwrap_or('\0')
                 as u32 as f64);
         }
-        cmdstruct.set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") ).edit_msg().await?;
+        cmdstruct.set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") ).edit_msg()?;
     }
     if expr.as_string(1)? == "==" {
         let v = stack[0] as u32;
@@ -2802,15 +2758,14 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
                 std::char::from_u32(v).unwrap_or('?'),
                 v,
                 std::char::from_u32(v).unwrap_or('?').to_string().as_bytes())
-        ).edit_msg().await?;
+        ).edit_msg()?;
     }
 
     Ok("COMPLETED.")
 }
 
-async fn do_alias (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let expr = regex_to_vec(r"^/alias\s+([^\s]+)(\s+(.*))?$", &cmdstruct.message)?;
-    if expr.is_empty() { return Ok("SKIP") }
+fn do_alias (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let expr = must_regex_to_vec(r"^/alias\s+([^\s]+)(\s+(.*))?$", &cmdstruct.message)?;
 
     let (alias, cmd) = {
         let alias = expr.as_str(1)?;
@@ -2822,74 +2777,176 @@ async fn do_alias (cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
         (alias, cmd)
     };
 
-    cmdstruct.push_msg(&format!("{} == {}", alias, cmd)).send_msg().await?;
+    cmdstruct.push_msg(&format!("{} == {}", alias, cmd)).send_msg()?;
 
     Ok("COMPLETED.")
 }
 
-async fn do_aliasRun (mut cmdstruct: &mut CmdStruct) -> Bresult<&'static str> {
-    let expr = regex_to_vec(r"^/([^\s]+)(.*)$", &cmdstruct.message)?;
-    if expr.is_empty() { return Ok("SKIP") }
+fn do_wordle(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let expr = must_regex_to_vec(r"^Wordle \d+ ([123456X])/6(\*?)", &cmdstruct.message)?; // "Wordle 767 4/6\n\n..."
 
-    let cmd = {
+    let resultext = post_https_text(
+        "world.dv8.org:4441/jsondb/v1/wordle",
+        format!(
+            "'{} {} 1 :wordle",
+            getenvstruct!(cmdstruct).entity_id2name(cmdstruct.id)?,
+            match expr.as_str(1)? {
+                "X" => "7",
+                n => n,
+            }
+        ),
+    )?;
+
+    cmdstruct.push_msg(&resultext).send_msg()?;
+
+    Ok("COMPLETED.")
+}
+
+fn do_aliasRun(mut cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let expr = must_regex_to_vec(r"^/([^\s]+)( *.*)$", &cmdstruct.message)?;
+
+    let rawcmd = {
         let dbconn = &getenvstruct!(cmdstruct).dbconn;
         let aliasCmd = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", expr.as_str(1)?)?;
-        if aliasCmd.is_empty() { return Ok("skip") }
+        if aliasCmd.is_empty() { Err("")? }
         aliasCmd[0]["cmd"].as_string().ok_or("bad alias cmd")?.to_string()
     };
 
-    cmdstruct.message = format!("{} {}", cmd, expr.as_str(2)?).trim_end().into();
+    let args = expr.as_str(2)?;
+    let parameters = args.split_ascii_whitespace().collect::<Vec<&str>>();
+    let parametersCount = parameters.len().to_string();
+    info!("Expanding: {} -> {} {:?}", cmdstruct.message, rawcmd, parameters);
 
-    do_most(&mut cmdstruct).await?; // Attempt to run aliased command
+    let mut usedParameters = false;
+    let mut parameterError = false;
+
+    let me = getenvstruct!(cmdstruct)
+        .entity_id2name(cmdstruct.id)
+        .unwrap_or_else(|_e| {
+            parameterError = true;
+            &"?"
+        })
+        .to_string();
+    let cmd = Regex::new(r#"(?x) \{ ((\d+)|([a-z*\#]+)) \} | (\{[}{]) | (.[^{]*)"#)?
+        .captures_iter(&rawcmd)
+        .into_iter()
+        .map(|c| {
+            // Normal text
+            if let Some(m) = c.get(5) {
+                m.as_str()
+            } else {
+                usedParameters = true;
+                // Parameter replacement
+                if let Some(m) = c.get(2) {
+                    parameters
+                        .get(m.as_str().parse::<usize>().unwrap_or(usize::MAX))
+                        .unwrap_or_else(|| {
+                            parameterError = true;
+                            &"?"
+                        })
+                } else if let Some(s) = c.get(3) {
+                    match s.as_str() {
+                        "me" => &me,
+                        "#" => &parametersCount,
+                        "*" => args,
+                        _ => "",
+                    }
+                } else if let Some(m) = c.get(4) {
+                    // Escaped brace or null parameter
+                    if "{" == &m.as_str()[1..2] { "{" } else { "" }
+                } else {
+                    // This should never happen
+                    parameterError = true;
+                    "?"
+                }
+            }
+        })
+        .collect::<Vec<&str>>()
+        .join("");
+
+    if parameterError {
+        cmdstruct
+            .push_msg(&format!("alias error: {}", cmd))
+            .send_msg_id()?;
+    } else {
+        cmdstruct.message = if usedParameters {
+            format!("{}", cmd)
+        } else {
+            format!("{}{}", rawcmd, expr.as_str(2)?)
+        }
+        .trim_end()
+        .into();
+        do_most(&mut cmdstruct); // Attempt to run aliased command
+    }
     Ok("COMPLETED.")
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-async fn do_most (cmdstruct:&mut CmdStruct) -> Bresult<()> {
-    glogd!("do_echo_lvl =>",   do_echo_lvl(cmdstruct).await);
-    glogd!("do_help =>",       do_help(cmdstruct).await);
-    glogd!("do_curse =>",      do_curse(cmdstruct).await);
-    glogd!("do_say =>",        do_say(cmdstruct).await);
-    glogd!("do_like =>",       do_like(cmdstruct).await);
-    glogd!("do_like_info =>",  do_like_info(cmdstruct).await);
-    glogd!("do_def =>",        do_def(cmdstruct).await);
-    glogd!("do_httpsget => ",  do_httpsget(cmdstruct).await);
-    glogd!("do_httpsbody => ", do_httpsbody(cmdstruct).await);
-    glogd!("do_httpsjson => ", do_httpsjson(cmdstruct).await);
-    glogd!("do_json => ",      do_json(cmdstruct).await);
-    glogd!("do_sql =>",        do_sql(cmdstruct).await);
-    glogd!("do_quotes => ",    do_quotes(cmdstruct).await);
-    glogd!("do_yolo =>",       do_yolo(cmdstruct).await);
-    glogd!("do_portfolio =>",  do_portfolio(cmdstruct).await);
-    glogd!("do_trade_buy =>",  do_trade_buy(cmdstruct).await);
-    glogd!("do_trade_sell =>", do_trade_sell(cmdstruct).await);
-    glogd!("do_exchange_bidask =>", do_exchange_bidask(cmdstruct).await);
-    glogd!("do_orders =>",     do_orders(cmdstruct).await);
-    glogd!("do_fmt =>",        do_fmt(cmdstruct).await);
-    glogd!("do_rebalance =>",  do_rebalance(cmdstruct).await);
-    glogd!("do_rpn =>",        do_rpn(cmdstruct).await);
-    glogd!("do_alias =>",      do_alias(cmdstruct).await);
-    Ok(())
-}
-
-async fn do_all (cmdstruct:&mut CmdStruct) -> Bresult<()> {
-    let res = do_schedule(cmdstruct).await;
-    glogd!("do_schedule =>", res);
-    match res {
-        Err(e) => {
-            cmdstruct.push_msg(&format!("Scheduler {}", e)).send_msg_id().await?; }
-        Ok(o) =>  {
-            // Stop evaluating if this is a successfull scheduled job
-            if o == "COMPLETED." { return Ok(()) }
+fn do_most (cmdstruct: &mut CmdStruct) {
+    let lst: &[(fn(&mut CmdStruct) -> Bresult<&str>, &str)] = &[
+        (do_echo_lvl, "do_echo_lvl"),
+        (do_help, "do_help"),
+        (do_curse, "do_curse"),
+        (do_say, "do_say"),
+        (do_like, "do_like"),
+        (do_like_info, "do_like_info"),
+        (do_def, "do_def"),
+        (do_httpsget, "do_httpsget"),
+        (do_httpsbody, "do_httpsbody"),
+        (do_httpsjson, "do_httpsjson"),
+        (do_json, "do_json"),
+        (do_sql, "do_sql"),
+        (do_quotes, "do_quotes"),
+        (do_yolo, "do_yolo"),
+        (do_portfolio, "do_portfolio"),
+        (do_trade_buy, "do_trade_buy"),
+        (do_trade_sell, "do_trade_sell"),
+        (do_exchange_bidask, "do_exchange_bidask"),
+        (do_orders, "do_orders"),
+        (do_fmt, "do_fmt"),
+        (do_rebalance, "do_rebalance"),
+        (do_rpn, "do_rpn"),
+        (do_alias, "do_alias"),
+        (do_wordle, "do_wordle"),
+    ];
+    for f in lst {
+        match f.0(cmdstruct) {
+            Err(e) => if e.to_string() != "" {
+                error!("\x1b[1m{}() =>{:?}", f.1, e)
+            }
+            r => info!("\x1b[1m{}() => {:?}", f.1, r),
         }
     }
-    do_most(cmdstruct).await?;
-    glogd!("do_aliasRun =>",   do_aliasRun(cmdstruct).await); // Separate to avoid recursion
+}
+
+fn do_all(cmdstruct: &mut CmdStruct) -> Bresult<()> {
+    match do_schedule(cmdstruct) {
+        Err(e) => {
+            if e.to_string() != "" {
+                cmdstruct.push_msg(&format!("\x1b[1mScheduler {}", e)).send_msg_id()?;
+                error!("\x1b[1mdo_schedule() => {:?}", e)
+            }
+        }
+        Ok(r) =>  {
+            // Stop evaluating if this is a successfull scheduled job so as not to potentially trigger other do handlers.
+            info!("\x1b[1mdo_schedule() =>{:?}", r);
+            if r == "COMPLETED." { return Ok(()) }
+        }
+    }
+    do_most(cmdstruct);
+    match do_aliasRun(cmdstruct) { // Separate to avoid recursion
+        Err(e) => if e.to_string() != "" {
+            error!("\x1b[1mdo_aliasrun() =>{:?}", e)
+        }
+        r => info!("\x1b[1mdo_aliasrun() => {:?}", r),
+    }
     Ok(())
 }
 
-async fn do_each_scheduled_job (
+////////////////////////////////////////
+
+fn do_each_scheduled_job (
     jobs: Vec<HashMap<String, sqlite::Value>>,
     env:  Env,
     now:  i64
@@ -2901,7 +2958,7 @@ async fn do_each_scheduled_job (
         let topic = job.get_i64("topic")?;
         let command = job.get_str("cmd")?;
         let mut cmdstruct =
-            match CmdStruct::new_cmdstruct(env, now, id, at, at, if topic==0 {None} else {Some(topic)}, command.into()) {
+            match CmdStruct::new(env, now, id, at, at, if topic==0 {None} else { Some(topic) }, command.into()) {
                 Ok(cmdstruct) => cmdstruct,
                 e => { glog!(e); continue }
             };
@@ -2910,7 +2967,7 @@ async fn do_each_scheduled_job (
             Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
             Friday => "f" , Saturday => "s", Sunday => "u" };
         if days.is_empty() || days.find(day_now).is_some() {
-            glog!(do_all(&mut cmdstruct).await);
+            glogd!("do_all() =>", do_all(&mut cmdstruct));
         }
         let time = job.get_i64("time")?;
         if 86400 <= time { // Delete the non-daily job
@@ -2925,7 +2982,7 @@ async fn do_each_scheduled_job (
     Ok(())
 }
 
-pub fn launch_scheduler(env:Env) -> Bresult<()> {
+pub fn start_scheduler (env:Env) -> Bresult<()> {
     info!("Spawned Scheduler Event Thread, 10s delay");
     std::thread::spawn( move ||
     loop {
@@ -2952,7 +3009,7 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
         if 0 < jobs.len() {
             info!("\x1b[1mSchedules start\x1b[0m {:?}", &jobs);
             let env = env.clone();
-            let res = actix_web::rt::System::new("tmbot").block_on( async move { do_each_scheduled_job(jobs, env, now).await } );
+            let res = do_each_scheduled_job(jobs, env, now);
             info!("\x1b[1mSchedules end. {:?}", res);
         }
         env.lock().unwrap().time_scheduler = now;
@@ -2960,159 +3017,179 @@ pub fn launch_scheduler(env:Env) -> Bresult<()> {
     Ok(())
 }
 
-fn headersPretty (hm: &HeaderMap, pad: &str) -> String {
+////////////////////////////////////////
+
+fn headersPretty(hm: &HeaderMap) -> String {
     hm.iter()
-    .map(|(k,v)| format!("{}:\x1b[1;30m{}\x1b[0m", k, v.to_str().unwrap_or("?")))
+    .map(|(k,v)| format!("\x1b[0m{} \x1b[1;30m{}\x1b[0m", k, v.to_str().unwrap_or("?")))
     .collect::<Vec<String>>()
-    .join(pad)
+    .join(" ")
 }
 
 fn reqPretty (req: &HttpRequest, body: &web::Bytes) -> String {
-    format!("\x1b[35m{} \x1b[1;35m{:?} \x1b[0;33;100m{}\x1b[0m {}",
+    format!("\x1b[35m{} \x1b[1m{:?} \x1b[0;33;100m{} {}",
         req.peer_addr().map(|sa|sa.ip().to_string()).as_deref().unwrap_or("?"),
         req.uri(),
-        from_utf8(body).map(|s|s.to_string().replace("\n", " \x1b7\x1b[0m\x08 \x1b8")).unwrap_or_else(|_|format!("{:?}", body)),
-        headersPretty(req.headers(), " "))
+        from_utf8(body).map(|s|s.to_string().replace("\n", " \x1b7\x08\x1b[43m \x1b8")).unwrap_or_else(|_|format!("{:?}", body)),
+        headersPretty(req.headers())
+    )
 }
 
-fn log_header () {
+fn header_tmbot() {
     info!("\x1b[0;31;40m _____ __  __ ____        _   ");
-    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™ ");
+    info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™");
     info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
     info!("\x1b[0;34;40m  | | | |  | | |_) | (_) | |_ ");
     info!("\x1b[0;35;40m  |_| |_|  |_|____/ \\___/ \\__|");
 }
 
+fn header_tmlog() {
+    info!("\x1b[0;31;40m _____ __  __ _          __ _™");
+    info!("\x1b[0;33;40m|_   _|  \\/  | |    ___ / _` |");
+    info!("\x1b[0;32;40m  | | | |\\/| | |   / _ \\|(_| |");
+    info!("\x1b[0;34;40m  | | | |  | | |__| (_) \\__, |");
+    info!("\x1b[0;35;40m  |_| |_|  |_|_____\\___/|___/ ");
+}
+
+////////////////////////////////////////
+
 #[macro_export(local_inner_macros)]
 macro_rules! httpResponseOk { () => ({
     let resp = HttpResponse::Ok().finish();
-    info!("\x1b[1;35m{} {}", resp.status(), headersPretty(resp.headers(), " "));
+    info!("\x1b[1;35m{}\x1b[0m {}", resp.status(), headersPretty(resp.headers()));
     resp
 })}               
 
 #[macro_export(local_inner_macros)]
 macro_rules! httpResponseNotFound { () => ({
     let resp = HttpResponse::NotFound().finish();
-    error!("\x1b[1;35m{} {}", resp.status(), headersPretty(resp.headers(), "  "));
+    error!("\x1b[1;35m{}\x1b[0m {}",
+        resp.status(),
+        headersPretty(resp.headers())
+    );
     resp
 })}               
 
-async fn main_dispatch (req: HttpRequest, body: web::Bytes) -> HttpResponse {
-    log_header();
+////////////////////////////////////////
+
+fn dispatch_tmbot(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    header_tmbot();
     info!("{}", reqPretty(&req, &body));
-
-    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    match bytes2json(&body).and_then(|json|TMsg::new(json)) {
-        Ok(tmsg) => {
-            std::thread::spawn( move || {
-                let envc = env.clone();
-                actix_web::rt::System::new("tmbot").block_on(async move {
-                    match CmdStruct::newcmdstruct(envc, tmsg) {
-                        Ok(mut cmdstruct) => {
-                            do_all(&mut cmdstruct).await.unwrap_or_else(|r| error!("{:?}", r));
-                            //info!("\x1b[36m{}", format!("{:?}", env.lock().unwrap()).replace(": ",":").replace(" {", "{").replace(",","").replace("\"",""));
-                            info!("done.");
-                        },
-                        e => error!("{:?}", e)
-                    }
-                })
-            });
-            let ret = HttpResponse::Ok().finish();
-            info!("\x1b[35m{}\x1b[0m", ret.status());
-            ret
-        },
-        e => {
-            let ret = HttpResponse::Ok().finish(); // 199 throws NotFound
-            error!("\x1b[35m{}\x1b[0m  {:?}", ret.status(), e);
-            ret
-        }
-    }
-
-}
-
-async fn telelogger (req: HttpRequest, body: web::Bytes) -> HttpResponse {
-
-    info!("{}", reqPretty(&req, &body));
-
-    let bodytxt = from_utf8(&body).unwrap_or("{badBodyBytes}");
-
-    let (at, topic) =
-        match
-            regex_to_vec(r#"^/(-?\d+)(/(-?\d+))?/?$"#, &req.path())
-            .and_then( |capv|
-                if capv.is_empty() {
-                    Err("missing channel/topic".into())
-                } else {
-                    Ok((capv.as_i64(1).unwrap(),
-                        capv.as_i64(3).ok()))
-                } ) {
-            Ok(at_topic) => at_topic,
-            Err(e) => {
-                error!("{:?}", e);
-                return httpResponseNotFound!()
-            }
-        };  
-
-    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-
-    match CmdStruct::new_cmdstruct(env, Instant::now().seconds(), 0, at, at, topic, "".into()) {
-        Ok(mut cmdstruct) => {
-            cmdstruct.push_msg(&bodytxt).send_msg().await.ok();
-        },
-        e => glog!(e)
-    }
-
+    let env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
+    std::thread::spawn(move || {
+        info!("::TMBot thread async");
+        glogd!("--TMBot thread async do_all() =>",
+            bytes2json(&body)
+                .and_then(Msg::new)
+                .and_then(|tmsg| CmdStruct::new(
+                    env,
+                    Instant::now().seconds(),
+                    tmsg.id,
+                    tmsg.at,
+                    tmsg.to,
+                    tmsg.topic,
+                    tmsg.message
+                ))
+                .and_then(|mut cmd| do_all(&mut cmd))
+        )
+    });
     httpResponseOk!()
 }
 
-
-pub fn launch_telelogger(env: Env) -> Bresult<()> {
-  let ssl_acceptor_builder = {
-      let envstruct = env.lock().unwrap();
-      comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
-  };
-  std::thread::spawn( move || {
-    let srv =
-        match HttpServer::new( move ||
-            App::new()
-            .data(env.clone())
-            .route("*", web::to(telelogger) ) )
-        .workers(2)
-        .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder) {
-            Ok(srv) => srv,
-            Err(err) => {
-                error!("launch_telelogger => {:?}", err);
-                return;
-            }
-        };
-    let res = actix_web::rt::System::new("tmbot").block_on(async move {
-        println!("launch() => {:?}", srv.run().await)
-    }); // This should never return
-    error!("main_websocket_ssl => {:?}", res);
-  });
-  Ok(())
-}
-
-pub fn launch_server(env: Env) -> Bresult<()> {
+pub fn start_tmbot(env: Env) -> Bresult<()> {
     let ssl_acceptor_builder = {
         let envstruct = env.lock().unwrap();
         comm::new_ssl_acceptor_builder(&envstruct.telegram_key, &envstruct.telegram_cert)?
     };
-    let srv =
-        HttpServer::new(
-            move || App::new()
-            .data(env.clone())
-            .route("*", web::to(main_dispatch)) )
+    info!("::TMBot Start");
+    actix_web::rt::System::new("tmbotWebServer").block_on(async move {
+        let listener = match TcpListener::bind("0.0.0.0:8443") {
+            Ok(listener) => listener, //listener.accept(), => Result<(TcpStream, SocketAddr)>
+            Err(e) => {
+                error!("{:?}", e);
+                return;
+            }
+        };
+        match HttpServer::new(move || {
+            App::new()
+                .data(env.clone())
+                .route("*", web::to(dispatch_tmbot))
+        })
         .workers(2)
-        .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
-    Ok(actix_web::rt::System::new("tmbot").block_on(async move {
-        println!("launch() => {:?}", srv.run().await)
-    })) // This should never return
+        //.on_connect( |any, _extensions| warn!("{:?}", any.downcast_ref::<actix_tls::openssl::SslStream<actix_web::rt::net::TcpStream>>()) )
+        .listen_openssl(listener, ssl_acceptor_builder)
+        {
+            Ok(httpserver) => info!("  TMBot run() => {:?}", httpserver.run().await), // await returns after SIGINT
+            Err(e) => error!("  TMBot new() => {:?}", e),
+        };
+        warn!("--TMBot done.");
+    });
+    Ok(())
+}
+
+////////////////////////////////////////
+fn dispatch_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    header_tmlog();
+    info!("{}", reqPretty(&req, &body));
+
+    let (at, topic) = match must_regex_to_vec(r#"^/(-?\d+)(/(-?\d+))?/?$"#, &req.path()) {
+        Ok(capv) => (capv.as_i64(1).unwrap(), capv.as_i64(3).ok()),
+        Err(e) => {
+            error!("{:?}", e);
+            return httpResponseNotFound!();
+        }
+    };
+
+    let bodytxt = from_utf8(&body).unwrap_or("{badBodyBytes}").to_string();
+    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
+
+    std::thread::spawn(move || {
+        match CmdStruct::new(env, Instant::now().seconds(), 0, at, at, topic, "".into()) {
+            Ok(mut cmdstruct) => {
+                cmdstruct.push_msg(&bodytxt).send_msg().ok();
+            }
+            e => glog!(e),
+        }
+    });
+
+    httpResponseOk!()
+}
+
+pub fn start_tmlog(env: Env) -> Bresult<()> {
+    let ssl_acceptor_builder = {
+        let envstruct = env.lock().unwrap();
+        comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+    };
+    std::thread::spawn(move || {
+        let httpserver = match HttpServer::new(move || {
+            App::new()
+                .data(env.clone())
+                .route("*", web::to(dispatch_tmlog))
+        })
+        .workers(2)
+        .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder)
+        {
+            Ok(httpserver) => httpserver,
+            Err(err) => {
+                error!("start_tmlog .bind_openssl() => {:?}", err);
+                return;
+            }
+        };
+        let res = actix_web::rt::System::new("tmbot").block_on(async move {
+            warn!(
+                "start_tmlog httpserver.run() => {:?}",
+                httpserver.run().await
+            )
+        }); // Thread returns after SIGINT
+        warn!("start_tmlog .block_on() => {:?}", res);
+    });
+
+    Ok(())
 }
 
 ////////////////////////////////////////
 
-fn _envstruct_get_entity<'e> (
+fn _envstruct_get_entity<'e>(
     envstruct: &'e EnvStruct,
     name: &str
 ) -> Bresult<&'e Entity> {
@@ -3141,19 +3218,19 @@ fn _web_login (env: Env, name: &str) -> Bresult<i64> {
         let res =
             actix_web::rt::System::new("websocketlogin")
             .block_on(async move {
-                match CmdStruct::new_cmdstruct(env, 0, id, id, id, None, "".into()) {
+                match CmdStruct::new(env, 0, id, id, id, None, "".into()) {
                     Ok(mut cmdstruct) => {
                         let pw = ::rand::random::<usize>();
                         match cmdstruct.env.try_lock() {
                             Ok(mut envstruct) => glog!(envstruct._entity_uuid_set(id, pw)),
                             Err(e) => error!("websocketlogin {:?}", e)
                         };
-                        let res = cmdstruct.push_msg(&pw.to_string()).send_msg().await;
+                        let res = cmdstruct.push_msg(&pw.to_string()).send_msg();
                         info!("ws login msg {} to {} => {:?}", pw, id, res);
                         pw.to_string()
                     },
                     Err(e) => {
-                        error!("new_cmdstruct => {:?}", e);
+                        error!("CmdStruct::new => {:?}", e);
                         "who?".to_string()
                     }
                 }
@@ -3163,7 +3240,7 @@ fn _web_login (env: Env, name: &str) -> Bresult<i64> {
     Ok(id)
 }
 
-fn _web_yolo (envstruct: &mut EnvStruct) -> Bresult<String> {
+fn _web_yolo(envstruct: &mut EnvStruct) -> Bresult<String> {
     let sql = "SELECT name, ROUND(value + balance, 2) AS yolo \
                FROM (SELECT positions.id, SUM(qty*stonks.price) AS value \
                      FROM positions \
@@ -3206,7 +3283,7 @@ async fn _web_stonks (cmdstruct: &mut CmdStruct) -> Bresult<String> {
     let mut short = 0.0;
     for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
-            pos.update_quote(&cmdstruct).await?;
+            pos.update_quote(&cmdstruct)?;
             info!("{} position {:?}", cmdstruct.id, &pos);
             let quote = pos.quote.as_ref().ok_or("quote not acquired")?;
             quotes.push(
@@ -3268,13 +3345,13 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for CmdStruct {
     //    let res =
     //        actix_web::rt::System::new("websocketlogin")
     //        .block_on(async move {
-    //            match CmdStruct::new_cmdstruct(env2, 0, -572225120,-572225120,-572225120, "") {
+    //            match CmdStruct::new(env2, 0, -572225120,-572225120,-572225120, "") {
     //                Ok(mut cmdstruct) => {
     //                    let res = cmdstruct.push_msg(&"Someone is playing Wordle!".to_string()).send_msg().await;
     //                    info!("wordle msg {:?}", res);
     //                },
     //                Err(e) => {
-    //                    error!("new_cmdstruct => {:?}", e);
+    //                    error!("new => {:?}", e);
     //                    "who?".to_string();
     //                }
     //            }
@@ -3348,7 +3425,7 @@ async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpRespon
     warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
 
-    let cmdstruct = match CmdStruct::new_cmdstruct(env, 0, 0, 0, 0, None, "".into()) {
+    let cmdstruct = match CmdStruct::new(env, 0, 0, 0, 0, None, "".into()) {
         Ok(cmdstruct) => cmdstruct,
         e => { glog!(e); return Ok("".into()) } // TODO: Return an error so the websocket connection closes?
     };
@@ -3409,11 +3486,11 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
     Ok(())
 }
 
-////////////////////////////////////////
-pub fn main_launch() -> Bresult<()> {
-    let argv = env::args();
-    if 2 != argv.len() {
-        println!(r#"
+////////////////////////////////////////////////////////////////////////////////
+
+fn usage() {
+    println!(
+        r#"
 USAGE:
     tmbot {{DST 0|1}}
 ENVIRONMENT:
@@ -3424,17 +3501,25 @@ ENVIRONMENT:
     TMBOT_KEY=tmbot_key.pem
     TMBOT_DB=tmbot.sqlite
     "#);
-        Err(format!("invalid args"))?
+}
+
+pub fn main_launch() -> Bresult<()> {
+    let argv = env::args();
+    if 2 != argv.len() {
+        usage();
+        Err("invalid args")?
     }
     if !true { glogd!("create_schema => ", create_schema()) } // Create DB
-    if !true { crate::fun(argv) } // Hacks and other test code
+    if !true { crate::fun(argv) }
+    // Playground
     else {
         let env = EnvStruct::new(argv)?;
         //glogd!("websocket() =>", main_websocket(env.clone()));
         //glogd!("websocketssl() =>", main_websocket_ssl(env.clone()));
-        glogd!("scheduler() =>", launch_scheduler(env.clone()));
-        glogd!("teleLogger() =>", launch_telelogger(env.clone()));
-        launch_server(env)
+        glogd!("start_scheduler() =>", start_scheduler(env.clone()));
+        glogd!("start_tmlog() =>", start_tmlog(env.clone()));
+        glogd!("start_tmbot() =>", start_tmbot(env));
+        Ok(())
     }
 }
 

@@ -1,5 +1,5 @@
 use std::io::Write;
-use log::{info, Record, Level::{Error, Warn, Info, Debug, Trace}};
+use log::{warn, Record, Level::{Error, Warn, Info, Debug, Trace}};
 use env_logger::fmt::{Formatter, Color};
 
 /// Logger output serializer.
@@ -29,9 +29,9 @@ fn logger_init () {
 
 //#[actix_web::main] async fn main() { ::tmbot::launch().await; }
 
-fn main () {
+fn main() {
     logger_init();
-    info!("main => {:?}", ::tmbot::main_launch()); // Should never return
+    warn!("main tmbot::main_launch() => {:?}", ::tmbot::main_launch()); // Should never return
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -14,6 +14,7 @@ env_logger = "*"
 regex = "*"
 tokio = { version = "0.2", features = ["full"] }
 actix = "0.10"
+actix-tls = "2.*"
 actix-web = { version = "3", features = ["openssl"] }
 actix-web-actors = "3"
 actix-http = "2.2.1"

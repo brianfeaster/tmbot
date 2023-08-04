@@ -205,14 +205,40 @@ pub fn regex_to_hashmap (re: &str, msg: &str) -> Bresult<HashMap<String, String>
 
 // Return vector of the regex capture groups, if any.
 pub fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re)?
-    .captures(msg) // An Option<Captures>
-    .map_or(Ok(Vec::new()), // Return Ok empty vec if None...
-        |captures|          // ...or return Ok Vec of Option<Vec>
-        Ok(captures.iter() // Iterator over Option<Match>
-            .map( |o_match| // None or Some<String>
-                    o_match.map( |mtch| mtch.as_str().into() ) )
-            .collect()))
+    Ok(Regex::new(re)? // Result<Regex>
+        .captures(msg) // Option<Captures>
+        .map(|caps| {
+            caps.iter() // Iter::Option<match>
+                .map(|o_match| o_match.map(|mtch| mtch.as_str().into()))
+                .collect()
+        }) // Option<Vec<Option<String>>r
+        .unwrap_or(Vec::new()))
+}
+
+// Return vector of the regex capture groups, error if no match
+pub fn must_regex_to_vec_OLD(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Regex::new(re) // Result<Regex>
+        .map_err(Box::from)
+        .and_then(|reg| {
+            reg.captures(msg) // Option<Captures>
+                .ok_or("".into())
+        })
+        .map(|caps| {
+            caps.iter()
+                .map(|o_match| o_match.map(|mtch| mtch.as_str().into()))
+                .collect::<Vec<Option<String>>>()
+        }) // Option<Vec<Option<String>>
+}
+
+// Return vector of the regex capture groups, error if no match
+pub fn must_regex_to_vec(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Ok(Regex::new(re)? // Result<Regex>
+        .captures(msg) // Option<Captures>
+        .ok_or("")? // Result<Captures>
+        .iter()
+        .map(|om|   // Option<Match>
+        om.map(|m| m.as_str().into())) // Iter<Option<String>>
+        .collect::<Vec<Option<String>>>())
 }
 
 pub trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }

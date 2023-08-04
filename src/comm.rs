@@ -3,7 +3,7 @@
 use crate::*;
 use ::std::{fmt, time::{Duration} };
 use ::openssl::ssl::{SslRef, SslAlert, SniError, NameType, SslConnector, SslAcceptor, SslMethod, SslConnectorBuilder, SslAcceptorBuilder};
-use ::actix_web::client::{Client, Connector};
+use ::actix_web::{rt, client::{Client, Connector}};
 
 pub fn verifyServerName (cert_pem: &str)
     -> Bresult<
@@ -33,7 +33,7 @@ pub fn verifyServerName (cert_pem: &str)
     Ok(move |sr: &mut SslRef, _: &mut SslAlert| {
         let sni = sr.servername(NameType::HOST_NAME).unwrap_or("");
         if !names.iter().any(|n| sni==n) {
-            warn!("Rejected SNI '{}'", sni);
+            warn!("Rejected SNI '{}'  {:?}", sni, sr.state_string_long());
             Err(SniError::ALERT_FATAL)
         } else {
             Ok(())
@@ -84,25 +84,26 @@ pub struct Telegram {
 
 impl Telegram {
     pub fn new (
-        url_api: &str,
+        url_api: String,
         telegram_key: &str,
         telegram_cert: &str
     ) -> Bresult<Self> {
         let ssl_connector_builder = new_ssl_connector_builder(telegram_key, telegram_cert)?;
-        let client =
+        let client = rt::System::new("Telegram::new").block_on(async move {
             Client::builder() // ClientBuilder
                 .connector(
                     Connector::new()
                         .ssl( ssl_connector_builder.build() )
                         .timeout(Duration::new(90,0))
                         .finish())
-                .finish(); // Client
-        Ok(Telegram { client, url_api:url_api.into() })
+                .finish() // Client
+        });
+        Ok(Telegram { client, url_api })
     }
 }
 
 impl Telegram {
-    pub async fn send_msg<'a> (&self, obj: &'a impl MsgDetails) -> Bresult<MsgCmd<'a>> {
+    pub fn send_msg<'a>(&self, obj: &'a impl MsgDetails) -> Bresult<MsgCmd<'a>> {
         let mut mc = MsgCmd {
             at:       obj.at(),
             topic:    obj.topic(),
@@ -111,7 +112,7 @@ impl Telegram {
             msg:      obj.msg()
         };
 
-        info!("\x1b[36m{:?}\x1b[0m", mc);
+        //info!("\x1b[36m{:?}\x1b[0m", mc);
 
         let chat_id = mc.at.to_string();
         let text = if mc.markdown {
@@ -164,11 +165,7 @@ impl Telegram {
                 self.url_api,
                 if mc.msg_id.is_some() { "editmessagetext" } else { "sendmessage"} );
 
-        info!("{} {}", theurl,
-            query.iter()
-            .map(|[k,v]| format!("{}=\x1b[1;30m{}\x1b[0m",k,v.replace("\n", "⬅")))
-            .collect::<Vec<String>>()
-            .join(" "));
+        //info!("{}{}", theurl, query.iter().map(|[k,v]| format!(" {}=\x1b[1;30m{}\x1b[0m", k, v.replace("\n", " \x1b7\x08\x1b[0m|\x1b8"))).collect::<Vec<String>>().join(""));
 
         let clientRequest =
             self.client
@@ -178,30 +175,41 @@ impl Telegram {
                 .query(&query)
                 .unwrap();
 
-        info!("<= \x1b[34m{:?} {} {}\x1b[0m  {}",
+        info!("<= \x1b[1;34m{:?} {} \x1b[22m{}  {}",
             clientRequest.get_version(),
             clientRequest.get_method(),
-            clientRequest.get_uri(),
-            headersPretty(&clientRequest.headers(), "  ")
+            clientRequest.get_uri()
+                .to_string()
+                .replace("/", "\x1b[1m/\x1b[22m")
+                .replace("?", "\x1b[1m?\x1b[22m")
+                .replace("=", "\x1b[1m=\x1b[22m")
+                .replace("&", "\x1b[1m&\x1b[22m"),
+            headersPretty(&clientRequest.headers())
         );
 
-        let mut clientResponse = clientRequest.send().await?;
-
-        let body = clientResponse.body().await;
-
-        info!("=> \x1b[34m{:?} {} \x1b[33m{}\x1b[0m {}",
-            clientResponse.version(),
-            clientResponse.status(),
-            body.as_ref().map(|b|from_utf8(b).unwrap_or("?")).unwrap_or("?"),
-            headersPretty(&clientResponse.headers(), "  "));
-
+        let body = rt::System::new("tmbot").block_on(async move {
+            match clientRequest.send().await {
+                Ok(mut clientResponse) => {
+                    let body = clientResponse.body().await;
+                    info!("=> \x1b[1;34m{:?} {} \x1b[0;33m{} {}",
+                        clientResponse.version(),
+                        clientResponse.status(),
+                        body.as_ref().map(|b| from_utf8(b).unwrap_or("?")).unwrap_or("?"),
+                        headersPretty(&clientResponse.headers())
+                    );
+                    Ok(body)
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        })?;
 
         // Return the new message's id
         mc.msg_id = Some( getin_i64(
             &bytes2json(&body?)?,
             &["result", "message_id"])? );
 
-        info!("\x1b[36m{:?}\x1b[0m", mc);
+        //info!("\x1b[36m{:?}\x1b[0m", mc);
+
         Ok(mc)
     }
 }

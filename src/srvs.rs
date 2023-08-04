@@ -47,7 +47,6 @@ pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
     Ok(lst)
 }
 
-
 pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
     let body =
         Client::builder()
@@ -134,23 +133,28 @@ pub async fn _get_ticker_raw_2 (ticker: &str) -> Bresult<Value> {
     bytes2json(jsonstr.as_bytes())
 } // _get_ticker_raw_2
 
-pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
+pub fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
-    let body =
+    let sslConnector = SslConnector::builder(SslMethod::tls())?.build();
+    let ticker2 = ticker.to_string();
+    let mut sendClientRequest = rt::System::new("tmbot").block_on( async move {
         Client::builder()
         .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
+                    .ssl( sslConnector )
                     .timeout( std::time::Duration::new(90,0) )
                     .finish() )
         .finish() // -> Client
-        .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker) )
+        .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker2) )
         .header("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36")
         //.header("Referer", "https://finance.yahoo.com/__finStreamer-worker.js")
         .timeout(std::time::Duration::new(90,0))
         //.query(&[["symbols", ticker],["events","split"]]).unwrap()
         .send()
-        .await?
-        .body().limit(1_000_000).await;
+        .await
+    })?;
+
+    let body = rt::System::new("tmbot")
+        .block_on(async move { sendClientRequest.body().limit(1_000_000).await });
 
     let body = body.or_else( |r| Err(format!("get_ticker_raw for {:?}  {:?}", ticker, r)) )?;
     let jsonstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_raw http body2str {:?} {:?}"#, ticker, r)) )?;
@@ -158,111 +162,134 @@ pub async fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
     bytes2json(jsonstr.as_bytes())
 } // get_ticker_raw
 
-
-pub async fn get_https_raw (url: &str) -> Bresult<String> {
+pub async fn get_https_raw(url: &str) -> Bresult<String> {
     let url = format!("https://{}", url);
-    info!("get_https_raw <- {}", url);
     let client =
         Client::builder()
         .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( std::time::Duration::new(90,0) )
+                    .ssl(SslConnector::builder(SslMethod::tls())?.build())
+                    .timeout(std::time::Duration::new(90, 0))
                     .finish() )
         .finish() // -> Client
         .get(url.to_string()) // -> ClientRequest
-        .timeout(std::time::Duration::new(90,0));
+        .timeout(std::time::Duration::new(90, 0));
 
- 
-    //match client { awc::SendClientRequest::Err(ref e) => println!("zomg {:#?}", e), _ => () };
-    println!("zomg {:#?}", client.get_uri());
+    info!(
+        "<= \x1b[34m{:?} {} {} {}",
+        client.get_version(),
+        client.get_method(),
+        client.get_uri(),
+        headersPretty(&client.headers())
+    );
 
-    let bodya = client
+    let mut resp = client
         .send() // -> SendClientRequest
-        .await;
+        .await?;
 
-    println!("{:?}", bodya);
+    let body = resp.body().limit(1_000_000).await;
 
-    let mut body = bodya?;
+    let body = body.or_else(|r| Err(format!("get_https_raw {:?}  {:?}", url, r)))?;
+    let body = from_utf8(&body)
+        .or_else(|r| Err(format!(r#"get_https_raw from_utf8 {:?} {:?}"#, body, r)))?;
 
-    let body = body.body().limit(1_000_000).await;
+    info!(
+        "=> \x1b[34m{:?} {} \x1b[33;100m{} {}",
+        resp.version(),
+        resp.status(),
+        body.replace("\n", " \x1b7\x08\x1b[1m|\x1b8"),
+        headersPretty(&resp.headers())
+    );
 
-    let body = body.or_else( |r| Err(format!("get_https_raw {:?}  {:?}", url, r)) )?;
-    let body = from_utf8(&body).or_else( |r| Err(format!(r#"get_https_raw from_utf8 {:?} {:?}"#, body, r)) )?;
     Ok(body.into())
 } // get_https_raw
 
-pub async fn post_https_text (url: &str, text: String) -> Bresult<String> {
+pub fn post_https_text(url: &str, text: String) -> Bresult<String> {
     let url = format!("https://{}", url);
-    let clientRequest =
-        Client::builder()
-        .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( std::time::Duration::new(90,0) )
-                    .finish() )
+    let clientRequest = Client::builder()
+        .connector(
+            Connector::new()
+                .ssl( SslConnector::builder(SslMethod::tls())?.build() )
+                .timeout( std::time::Duration::new(90,0) )
+                .finish(),
+        )
         .header(actix_web::http::header::USER_AGENT, "TMBot")
         .timeout(std::time::Duration::new(90,0)) // ClientBuilder
         .finish() // -> Client
         .post(url.to_string()); // -> ClientRequest
 
- 
-    info!("<= \x1b[34m{:?} {} {} \x1b[33;100m{}\x1b[0m {}",
+    info!("<= \x1b[34m{:?} {} {} \x1b[33;100m{} {}",
         clientRequest.get_version(),
         clientRequest.get_method(),
         clientRequest.get_uri(),
-        text,
-        headersPretty(&clientRequest.headers(), "  ")
+        text.replace("\n", " \x1b7\x08\x1b[1m|\x1b8"),
+        headersPretty(&clientRequest.headers())
     );
 
-    let mut clientResponse = clientRequest.send_body(text).await?;
+    let body = rt::System::new("tmbot").block_on(async move {
+        match clientRequest.send_body(text).await {
+            Ok(mut clientResponse) => {
+                let body = clientResponse
+                    .body()
+                    .limit(1_000_000)
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|b| {
+                        from_utf8(&b)
+                            .map(|s| s.to_string())
+                            .map_err(|e| e.to_string())
+                    })
+                    .unwrap();
 
-    let body = clientResponse.body().limit(1_000_000).await;
-
-    let body = body.or_else( |r| Err(format!("post_https_text {:?}  {:?}", url, r)) )?;
-    let body = from_utf8(&body).or_else( |r| Err(format!(r#"post_https_text from_utf8 {:?} {:?}"#, body, r)) )?;
-
-    info!("=> \x1b[34m{:?} {} \x1b[33;100m{}\x1b[0m {}",
-        clientResponse.version(),
-        clientResponse.status(),
-        body,
-        headersPretty(&clientResponse.headers(), " "));
+                info!(
+                    "=> \x1b[34m{:?} {} \x1b[33;100m{} {}",
+                    clientResponse.version(),
+                    clientResponse.status(),
+                    body.replace("\n", " \x1b7\x08\x1b[1m|\x1b8"),
+                    headersPretty(&clientResponse.headers())
+                );
+                Ok(body)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    })?;
 
     Ok(body.into())
 } // post_https_text
 
-pub async fn post_https_json (url: &str, jsons: &str) -> Bresult<String> {
+pub fn post_https_json(url: &str, jsons: &str) -> Bresult<String> {
     let url = format!("https://{}", url);
-    let client =
-        Client::builder()
-        .connector( Connector::new()
-                    .ssl( SslConnector::builder(SslMethod::tls())?.build() )
-                    .timeout( std::time::Duration::new(90,0) )
-                    .finish() )
+    let clientRequest = Client::builder() // ClientBuilder
+        .connector(
+            Connector::new()
+                .ssl(SslConnector::builder(SslMethod::tls())?.build())
+                .timeout(std::time::Duration::new(90, 0))
+                .finish(),
+        )
         .header(actix_web::http::header::USER_AGENT, "TMBot")
         .finish() // -> Client
         .post(url.to_string()) // -> ClientRequest
-        .timeout(std::time::Duration::new(90,0));
+        .timeout(std::time::Duration::new(90, 0));
 
-    let js = bytes2json(jsons.as_bytes());
-    info!("post_https_json <- {} + {:?}", url, js);
- 
-    let bodya = if jsons == "" {
-       client
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-    } else {
-        client
-            .send_json(&js?) // SendClientRequest
-            .await
-    };
+    let js = bytes2json(jsons.as_bytes())?;
+    let jsonsIsEmpty = jsons == "";
 
-    info!("{:?}", bodya);
+    let mut clientResponse = rt::System::new("tmbot").block_on(async move {
+        if jsonsIsEmpty {
+            clientRequest
+                .header("Content-Type", "application/json")
+                .send() // SendClientRequest
+                .await // ClientResponse
+        } else {
+            clientRequest
+                .send_json(&js) // SendClientRequest
+                .await // ClientResponse
+        }
+    })?;
 
-    let mut body = bodya?;
+    let body = rt::System::new("tmbot").block_on(async move { clientResponse.body().await });
 
-    let body = body.body().limit(1_000_000).await;
-
-    let body = body.or_else( |r| Err(format!("post_https_json {:?}  {:?}", url, r)) )?;
-    let body = from_utf8(&body).or_else( |r| Err(format!(r#"post_https_json from_utf8 {:?} {:?}"#, body, r)) )?;
+    let body = body.or_else(|r| Err(format!("post_https_json {:?}  {:?}", url, r)))?;
+    let body = from_utf8(&body)
+        .or_else(|r| Err(format!(r#"post_https_json from_utf8 {:?} {:?}"#, body, r)))?;
     Ok(body.into())
 } // post_https_json
