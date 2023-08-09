@@ -1,46 +1,53 @@
-#![allow(non_snake_case)]  
+#![allow(non_snake_case)]
 
 //! # External Chat Service Robot
-mod util;  pub use crate::util::*;
-mod comm;  use crate::comm::*;
-mod srvs;  use crate::srvs::*;
-mod db;    use crate::db::*;
+
+mod comm;
+mod db;
+pub mod srvs;
+pub mod util;
+
+use crate::comm::*;
+use crate::db::*;
+use crate::srvs::*;
+use crate::util::*;
+
+use ::actix::{prelude::*, Actor, StreamHandler};
+use ::actix_web::{
+    client::{Client, ClientRequest, ClientResponse, Connector},
+    http::header::HeaderMap,
+    rt, web, App, HttpRequest, HttpResponse, HttpServer,
+};
+use ::actix_web_actors::ws;
+use ::datetime::{
+    DatePiece, Duration, Instant, LocalDate, LocalDateTime, LocalTime, TimePiece, Weekday::*,
+};
+use ::openssl::ssl::{SslConnector, SslFiletype, SslMethod};
+use ::regex::Regex;
 use ::std::{
-    env,
     cmp::Ordering,
-    mem::transmute,
     collections::{HashMap, HashSet},
+    env,
+    mem::transmute,
     str::{from_utf8, FromStr},
     sync::{Arc, Mutex},
-    net::TcpListener
- };
-use ::log::*;
-use ::regex::Regex;
-use ::datetime::{ Instant, Duration, LocalDate, LocalTime, LocalDateTime, DatePiece, TimePiece, Weekday::* };
-use ::openssl::ssl::{SslConnector, SslFiletype, SslMethod};
-use ::actix::{ prelude::*, Actor, StreamHandler };
-use ::actix_web::{ rt, web, App, HttpRequest, HttpServer, HttpResponse, client::{Client, Connector}, http::header::HeaderMap};
-//use ::actix_tls;
-use ::actix_web_actors::ws;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_SECS :i64 = 30;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
-//const WEB_KEY_PEM: &str = "key.pem";
-//const WEB_CERT_PEM: &str = "cert.pem";
 
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Abstracted primitive types helpers
-////////////////////////////////////////////////////////////////////////////////
+// Abstracted primitive types helpers
 
-/// Decide if a ticker's price should be refreshed given its last lookup time.
-///  PacificTZ  PreMarket  Regular  AfterHours  Closed
-///  PST        0900z      1430z    2100z       0100z..9000z
-///  PDT        0800z      1330z    2000z       0000z..0800z
-///  Duration   5.5h       6.5h     4h          8h
+// Decide if a ticker's price should be refreshed given its last lookup time.
+//  PacificTZ  PreMarket  Regular  AfterHours  Closed
+//  PST        0900z      1430z    2100z       0100z..9000z
+//  PDT        0800z      1330z    2000z       0000z..0800z
+//  Duration   5.5h       6.5h     4h          8h
 fn most_recent_trading_hours (
     dst_hours_adjust: i8,
     now: LocalDateTime,
@@ -184,7 +191,7 @@ fn _pad_between(width: usize, a:&str, b:&str) -> String {
 }
 
 // Transforms @user_nickname to {USER_ID}
-fn deref_ticker (dbconn:&Connection, s:&str) -> Bresult<String> {
+fn deref_ticker (dbconn: &Connection, s:&str) -> Bresult<String> {
     // Expects:  "@shrewm"   Returns: Some(308188500)
     if &s[0..1] == "@" {
         let rows = getsql!(dbconn, "SELECT id FROM entitys WHERE name=?", &s[1..])?;
@@ -226,7 +233,7 @@ pub fn time2timestr (time:i64) -> String {
 ////////////////////////////////////////////////////////////////////////////////
 /// Helpers on complex types
 
-pub fn sql_table_order_insert (dbconn:&Connection, id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<()> {
+pub fn sql_table_order_insert (dbconn: &Connection, id:i64, ticker:&str, qty:f64, price:f64, time:i64) -> Bresult<()> {
     getsql!(dbconn,
         "INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
         id, ticker, qty, price, time)?;
@@ -399,8 +406,7 @@ impl EnvStruct {
 
 impl EnvStruct {
 fn new(mut argv: std::env::Args) -> Bresult<Env> {
-    let url_api = format!(
-        "https://api.telegram.org/bot{}",
+    let url_api = format!("https://api.telegram.org/bot{}",
         env::var_os("TELEGRAM_API_TOKEN").ok_or("TELEGRAM_API_TOKEN")?.into_string().unwrap());
     let telegram_key  = env::var_os("TELEGRAM_KEY").ok_or("TELEGRAM_KEY")?.into_string().unwrap();
     let telegram_cert = env::var_os("TELEGRAM_CERT").ok_or("TELEGRAM_CERT")?.into_string().unwrap();
@@ -444,7 +450,7 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
     });
     Ok(EnvStruct{
         url_api, telegram_key, telegram_cert, tmbot_key, tmbot_cert, dbconn,
-        dst_hours_adjust:   argv.nth(1).ok_or("args[1] missing")?.parse::<i8>()?,
+        dst_hours_adjust:   argv.nth(1).and_then(|s| s.parse::<i8>().ok()).ok_or(fmthere!("args[1] DST"))?,
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
         entitys,
@@ -460,7 +466,7 @@ pub struct Msg {
     id: i64,
     at: i64,
     to: i64,
-    topic: Option<i64>,
+    topic: String,
     message: String
 }
 
@@ -469,23 +475,23 @@ impl Msg {
         let inline_query = &json["inline_query"];
         let edited_message = &json["edited_message"];
         let message = if edited_message.is_object() { edited_message } else { &json["message"] };
-        //let message_id = getin_i64(message, &["message_id"]).unwrap_or(0);
+        //let message_id = getin_i64(message, "/message_id").unwrap_or(0);
 
         Ok(if inline_query.is_object() { // Inline queries are DMs so no other associated channels
-            let id = getin_i64(inline_query, &["from", "id"])?;
-            let message = getin_str(inline_query, &["query"])?;
-            Msg {id, at:id, to:id, topic:None, message }
+            let id = getin_i64(inline_query, "/from/id")?;
+            let message = getin_str(inline_query, "/query")?;
+            Msg {id, at:id, to:id, topic:"".into(), message }
         } else if message.is_object() { // An incoming message could be a reply or normal.
-            let id = getin_i64(message, &["from", "id"])?;
-            let at = getin_i64(message, &["chat", "id"])?;
-            let to = getin_i64_or(at, &message, &["reply_to_message", "from", "id"]);
+            let id = getin_i64(message, "/from/id")?;
+            let at = getin_i64(message, "/chat/id")?;
+            let to = getin_i64_or(at, &message, "/reply_to_message/from/id");
             let topic =
-                if getin(message, &["is_topic_message"]).is_null() {
-                    None
+                if getin(message, "/is_topic_message").is_null() {
+                    "".to_string()
                 } else {
-                    getin_i64(message, &["message_thread_id"]).ok()
+                    getin_string(message, "/message_thread_id")?
                 };
-            let message = getin_str(message, &["text"])?;
+            let message = getin_str(message, "/text")?;
             Msg {id, at, to, topic, message}
         } else { Err("Not a Telegram JSON Update.")? })
     }
@@ -501,7 +507,7 @@ pub struct CmdStruct { // Represents in incoming Telegram message and session/se
     id: i64, // Entity who sent msg                    message.from.id
     at: i64, // Channel (group/entity) msg sent to     message.chat.id
     to: i64, // Entity replied to ('at' if non-reply)  message.reply_to_message.from.id
-    topic: Option<i64>, // topic id
+    topic: String, // topic id
     //message_id: i64,  // Message's unique id in channel.  TODO map this to msg_id so edits are reflected to the same response msg.
     message: String, // The incoming message
     id_level: i64, // Echo level [0,1,2] for each id.  Higher can't write to lower.
@@ -513,30 +519,8 @@ pub struct CmdStruct { // Represents in incoming Telegram message and session/se
     msg: String
 }
 
-impl MsgDetails for CmdStruct {
-    // Get id of channel to message
-    fn at (&self) -> i64 {
-        if let Some(dm) = self.dm {
-            dm // Forced message to id
-        } else if self.id_level <= self.at_level {
-            self.at // Message the channel if sender has better/equal privs than channel
-        } else {
-            self.id // Message the "id" channel
-        }
-    }
-    // Is message to send markdown?
-    fn markdown (&self) -> bool { self.markdown }
-    // Message might be from a channel topic
-    fn topic (&self) -> Option<i64> { self.topic }
-    // Optional edit message id
-    fn msg_id (&self) -> Option<i64> { self.msg_id }
-    // The text to send
-    fn msg (&self) -> &str { &self.msg }
-}
-
 impl CmdStruct {
-    // Create a CmdStruct
-    fn new(env: Env, now:i64, id:i64, at:i64, to:i64, topic:Option<i64>, message:String) -> Bresult<CmdStruct> {
+    fn new(env: Env, now:i64, id:i64, at:i64, to:i64, topic:String, message:String) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().map_err(|e| <std::sync::PoisonError<_> as std::string::ToString>::to_string(&e))?;
             ( Telegram::new(envstruct.url_api.to_string(), &envstruct.telegram_key, &envstruct.telegram_cert)?,
@@ -573,21 +557,19 @@ impl CmdStruct {
     // Send new message
     fn send_msg (&mut self) -> Bresult<()> {
         self.msg_id = None;
-        self.msg_id = self.telegram.send_msg(self)?.msg_id;
-        Ok(())
+        Telegram::send_msg(self)
     }
     // Edit last message (last msg_id is always cached)
     fn edit_msg (&mut self) -> Bresult<()> {
-        self.msg_id = self.telegram.send_msg(self)?.msg_id;
-        Ok(())
+        Telegram::send_msg(self)
     }
     // Send new message to self (TODO: implement edit message to self?)
     fn send_msg_id (&mut self) -> Bresult<()> {
         self.msg_id = None;
         self.dm = Some(self.id);
-        self.msg_id = self.telegram.send_msg(self)?.msg_id;
+        let ret = Telegram::send_msg(self);
         self.dm = None;
-        Ok(())
+        ret
     }
     // Buying power is summed long positions (positive) plus double the bank
     // balance (pos or neg) plus 3 times summed short positions (negative).
@@ -601,11 +583,12 @@ impl CmdStruct {
         for mut pos in positions {
             if !is_self_stonk(&pos.ticker) {
                 pos.update_quote(&self)?;
-                let qty= pos.qty;
+                let price = pos.quote.ok_or("buying_power: no quote")?.price;
+                let qty = pos.qty;
                 if qty < 0.0 {
-                    short += qty * pos.quote.unwrap().price
+                    short += qty * price
                 } else {
-                    long += qty * pos.quote.unwrap().price
+                    long += qty * price
                 }
             }
         }
@@ -615,21 +598,44 @@ impl CmdStruct {
         Ok(bp)
     }
 
-} // CmdStruct
+}
+
+impl MsgDetails for CmdStruct {
+    // Get id of channel to message
+    fn telegram (&self) -> &Telegram {
+        &self.telegram
+    }
+    fn at (&self) -> i64 {
+        if let Some(dm) = self.dm {
+            dm // Forced message to id
+        } else if self.id_level <= self.at_level {
+            self.at // Message the channel if sender has better/equal privs than channel
+        } else {
+            self.id // Message the "id" channel
+        }
+    }
+    // Is message to send markdown?
+    fn markdown (&self) -> bool { self.markdown }
+    // Message might be from a channel topic
+    fn topic (&self) -> &str { if self.dm.is_some() { "" } else { &self.topic } }
+    // Optional edit message id
+    fn msg_id (&self) -> Option<i64> { self.msg_id }
+    fn set_msg_id (&mut self, i: i64) { self.msg_id = Some(i) }
+    // The text to send
+    fn msg (&self) -> &str { &self.msg }
+}
+
 
 // This is a macro so logs reveal caller details
 #[macro_export]
-macro_rules! getenvstruct {
-    ( $cmdstruct:expr ) => {
-        &mut*$cmdstruct
-            .env.try_lock()
-            .map_err( |e| {
-                let msg = format!("getenvstruct!({})  try_lock() {:?} ", stringify!($cmdstruct), e);
-                 error!("{}", msg);
-                 "mutex locked" } )
-            ?
-    }
-}
+macro_rules! getenvstruct {($cmdstruct:expr) => {
+    &mut*$cmdstruct.env
+    .try_lock().map_err(|e|
+        format!("{}.env.try_lock() => {:?}",
+            stringify!($cmdstruct),
+            e)
+    )?
+}}
 
 ////////////////////////////////////////
 
@@ -653,16 +659,16 @@ impl Quote { // Query internet for ticker details
         let json = srvs::get_ticker_raw(ticker)?;
         //warn!("{}", json);
         let details =
-            getin(&json, &["chart", "result"])
+            getin(&json, "/chart/result")
             .get(0)
             .ok_or("chart.result failed on json response")
-            .map( |j| getin(j, &["meta"]) )?;
+            .map( |j| getin(j, "/meta") )?;
         info!("{}", details);
 
         let title_raw =
-            &getin_str(&details, &["longName"])
-            .or_else( |_e| getin_str(&details, &["shortName"]) )
-            .or_else( |_e| getin_str(&details, &["symbol"]) )
+            &getin_str(&details, "/longName")
+            .or_else( |_e| getin_str(&details, "/shortName") )
+            .or_else( |_e| getin_str(&details, "/symbol") )
             .unwrap_or( "???".to_string() );
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
@@ -680,29 +686,29 @@ impl Quote { // Query internet for ticker details
             if title == title_new { break title_new.to_string() }
             title = title_new;
         };
-        info!("cleane title: '{}' => '{}'", title_raw, &title);
+        info!("clean title: '{}' => '{}'", title_raw, &title);
 
-        let exchange = getin_str(&details, &["exchangeName"])?;
+        let exchange = getin_str(&details, "/exchangeName")?;
 
-        let timeStart = getin_i64(&details, &["radingPeriods", "regular", "start"]).unwrap_or(0);
-        let timeEnd   = getin_i64(&details, &["radingPeriods", "regular", "end"]).unwrap_or(0);
+        let timeStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
+        let timeEnd   = getin_i64(&details, "/currentTradingPeriod/regular/end").unwrap_or(0);
         let seconds = timeEnd - timeStart;
         let hours :i64 = if 23400 < seconds { 24 } else { 16 };
 
-        let previous_close   = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
-        let pre_market_price = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
-        let reg_market_price = getin_f64(&details, &["regularMarketPrice"]).unwrap_or(0.0);
-        let pst_market_price = getin_f64(&details, &["previousClose"]).unwrap_or(0.0);
+        let previous_close   = getin_f64(&details, "/previousClose").unwrap_or(0.0);
+        let pre_market_price = getin_f64(&details, "/previousClose").unwrap_or(0.0);
+        let reg_market_price = getin_f64(&details, "/regularMarketPrice").unwrap_or(0.0);
+        let pst_market_price = getin_f64(&details, "/previousClose").unwrap_or(0.0);
 
         // This array will be sorted on market time for the latest market data.  Prices
         // are relative to the previous day's market close, including pre and post markets,
         // because most online charts I've come across ignore previous day's after market
         // closing price for next day deltas.  Non-regular markets are basically forgotten
         // after the fact.
-        let mut details = [
-            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["currentTradingPeriod", "pre", "start"]).unwrap_or(0)),
-            (reg_market_price, previous_close,   "r", getin_i64(&details, &["currentTradingPeriod", "regular", "start"]).unwrap_or(0)),
-            (pst_market_price, previous_close,   "a", getin_i64(&details, &["currentTradingPeriod", "post", "start"]).unwrap_or(0))];
+        let details = [
+            (pre_market_price, reg_market_price, "p", getin_i64(&details, "/currentTradingPeriod/pre/start").unwrap_or(0)),
+            (reg_market_price, previous_close,   "r", getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0)),
+            (pst_market_price, previous_close,   "a", getin_i64(&details, "/currentTradingPeriod/post/start").unwrap_or(0))];
 
         /* // Log all prices for sysadmin requires "use ::datetime::ISO"
         use ::datetime::ISO;
@@ -712,31 +718,32 @@ impl Quote { // Query internet for ticker details
             LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
             LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2); */
 
-        details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
+        //details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
-        let price = details[0].0;
-        let last = details[0].1;
+        let price = details[1].0;
+        let last = details[1].1;
         Ok(Quote{
             env,
             ticker:  ticker.to_string(),
             price, last,
             amount:  roundqty(price-last),
             percent: percentify(last,price),
-            market:  details[0].2.to_string(),
+            market:  details[1].2.to_string(),
             hours, exchange, title,
             updated: true})
     } // Quote::new_market_quote
 
+    /*
     async fn _new_market_quote_1 (env:Env, ticker: &str) -> Bresult<Self> {
         let json = srvs::_get_ticker_raw_1(ticker).await?;
 
-        let details = getin(&json, &["context", "dispatcher", "stores", "QuoteSummaryStore", "price"]);
+        let details = getin(&json, "/context/dispatcher/stores/QuoteSummaryStore/price");
         if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
         info!("{}", details);
 
         let title_raw =
-            &getin_str(&details, &["longName"])
-            .or_else( |_e| getin_str(&details, &["shortName"]) )?;
+            &getin_str(&details, "/longName")
+            .or_else( |_e| getin_str(&details, "/shortName") )?;
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
             let title_new = title
@@ -755,15 +762,15 @@ impl Quote { // Query internet for ticker details
         };
         info!("cleane title: '{}' => '{}'", title_raw, &title);
 
-        let exchange = getin_str(&details, &["exchange"])?;
+        let exchange = getin_str(&details, "/exchange")?;
 
-        let hours = getin(&details, &["volume24Hr"]);
+        let hours = getin(&details, "/volume24Hr");
         let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
 
-        let previous_close   = getin_f64(&details, &["regularMarketPreviousClose", "raw"]).unwrap_or(0.0);
-        let pre_market_price = getin_f64(&details, &["preMarketPrice", "raw"]).unwrap_or(0.0);
-        let reg_market_price = getin_f64(&details, &["regularMarketPrice", "raw"]).unwrap_or(0.0);
-        let pst_market_price = getin_f64(&details, &["postMarketPrice", "raw"]).unwrap_or(0.0);
+        let previous_close   = getin_f64(&details, "/regularMarketPreviousClose/raw").unwrap_or(0.0);
+        let pre_market_price = getin_f64(&details, "/preMarketPrice/raw").unwrap_or(0.0);
+        let reg_market_price = getin_f64(&details, "/regularMarketPrice/raw").unwrap_or(0.0);
+        let pst_market_price = getin_f64(&details, "/postMarketPrice/raw").unwrap_or(0.0);
 
         // This array will be sorted on market time for the latest market data.  Prices
         // are relative to the previous day's market close, including pre and post markets,
@@ -771,9 +778,9 @@ impl Quote { // Query internet for ticker details
         // closing price for next day deltas.  Non-regular markets are basically forgotten
         // after the fact.
         let mut details = [
-            (pre_market_price, reg_market_price, "p", getin_i64(&details, &["preMarketTime"]).unwrap_or(0)),
-            (reg_market_price, previous_close,   "r", getin_i64(&details, &["regularMarketTime"]).unwrap_or(0)),
-            (pst_market_price, previous_close,   "a", getin_i64(&details, &["postMarketTime"]).unwrap_or(0))];
+            (pre_market_price, reg_market_price, "p", getin_i64(&details, "/preMarketTime").unwrap_or(0)),
+            (reg_market_price, previous_close,   "r", getin_i64(&details, "/regularMarketTime").unwrap_or(0)),
+            (pst_market_price, previous_close,   "a", getin_i64(&details, "/postMarketTime").unwrap_or(0))];
 
         /* // Log all prices for sysadmin requires "use ::datetime::ISO"
         use ::datetime::ISO;
@@ -797,6 +804,7 @@ impl Quote { // Query internet for ticker details
             hours, exchange, title,
             updated: true})
     } // Quote::_new_market_quote_1
+    */
 }
 
 impl Quote {// Query local cache or internet for ticker details
@@ -887,11 +895,11 @@ fn fmt_decode_to (c: &str, s: &mut String) {
 
 fn amt_as_glyph (qty: f64, amt: f64) -> (&'static str, &'static str) {
     if 0.0 == amt {
-        (from_utf8(b"\xF0\x9F\x94\xB7").unwrap(), " ") // Blue diamond, nothing
+        (from_utf8(b"\xF0\x9F\x94\xB7").unwrap_or("?"), " ") // Blue diamond, nothing
     } else if (0.0 < amt) ^ (qty < 0.0) {
-        (from_utf8(b"\xF0\x9F\x9F\xA2").unwrap(), from_utf8(b"\xE2\x86\x91").unwrap()) // Green circle, Arrow up
+        (from_utf8(b"\xF0\x9F\x9F\xA2").unwrap_or("?"), from_utf8(b"\xE2\x86\x91").unwrap_or("?")) // Green circle, Arrow up
     } else {
-        (from_utf8(b"\xF0\x9F\x9F\xA5").unwrap(), from_utf8(b"\xE2\x86\x93").unwrap()) // Red square, Arrow down
+        (from_utf8(b"\xF0\x9F\x9F\xA5").unwrap_or("?"), from_utf8(b"\xE2\x86\x93").unwrap_or("?")) // Red square, Arrow down
     }
 }
 
@@ -899,7 +907,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
     fn format_quote (&self, id:i64) -> Bresult<String> {
         let envstruct = &self.env.lock().unwrap();
         let gain_glyphs = amt_as_glyph(0.0, self.amount);
-        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap() // (?s) dot accepts newline
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)")? // (?s) dot accepts newline
             .captures_iter(&envstruct.fmt_str_quote(id))
             .fold(String::new(), |mut s, cap| {
                 if let Some(m) = cap.get(2) {
@@ -987,7 +995,7 @@ impl Position {
         let mut pos = // Consider the quote or a 0 quantity quote
             match vec.len() {
                 0 => Position { ticker: ticker.to_string(), qty: 0.0, price: 0.0, quote: None },
-                1 => vec.pop().unwrap(),
+                1 => vec.pop().ok_or("query_position: bad pop")?,
                 _ => Err(format!("For {} ticker {} has {} positions, expect 0 or 1", id, ticker, vec.len()))?
             };
         pos.update_quote(cmdstruct)?;
@@ -999,8 +1007,8 @@ impl Position { // Format the position using its format string.
     fn format_position (&self, envstruct:&EnvStruct, id: i64) -> Bresult<String> {
         let qty = self.qty;
         let cost = self.price;
-        let price = self.quote.as_ref().unwrap().price;
-        let last = self.quote.as_ref().unwrap().last;
+        let price = self.quote.as_ref().ok_or("format_position: bad quote")?.price;
+        let last = self.quote.as_ref().ok_or("format_position: bad quote")?.last;
 
         let basis = qty*cost;
         let value = qty*price;
@@ -1015,7 +1023,7 @@ impl Position { // Format the position using its format string.
         let gain_glyphs = amt_as_glyph(qty, price-cost);
         let day_gain_glyphs = amt_as_glyph(qty, price-last);
 
-        Ok(Regex::new("(?s)(%([A-Za-z%])|.)").unwrap()
+        Ok(Regex::new("(?s)(%([A-Za-z%])|.)")?
         .captures_iter(&envstruct.fmt_str_position(id) )
         .fold( String::new(), |mut s, cap| {
             if let Some(m) = cap.get(2) { match m.as_str() {
@@ -1069,7 +1077,7 @@ impl<'a> Trade<'a> {
         Ok(Some(Trade{
             cmdstruct,
             ticker:     caps.as_str(1)?.to_uppercase(),
-            action:     caps.as_str(2)?.chars().nth(0).unwrap(),
+            action:     caps.as_str(2)?.chars().nth(0).ok_or("bad action")?,
             is_dollars: caps.as_str(3).is_ok(),
             amt:        caps.as_f64(4).ok()
         }))
@@ -1099,7 +1107,7 @@ fn do_echo_lvl(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
             let dbconn = &getenvstruct!(cmdstruct).dbconn;
             let rows = getsql!(dbconn, "SELECT echo FROM modes WHERE id=?", cmdstruct.at)?;
             if rows.len() == 0 { // Create/set echo level for this channel
-                getsql!(dbconn, "INSERT INTO modes values(?, ?)", cmdstruct.at, echo)?;
+                getsql!(dbconn, "INSERT INTO modes VALUES(?, ?)", cmdstruct.at, echo)?;
             } else {
                 echo = rows[0].get_i64("echo")?;
             }
@@ -1111,8 +1119,6 @@ fn do_echo_lvl(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_help (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    //let cmdl = cmd.lock().unwrap();
-    //let cmdstruct = cmdl.deref();
     must_regex_to_vec(r"/help", &cmdstruct.message)?;
     let delay = getenvstruct!(cmdstruct).quote_delay_secs;
     let msg = format!(
@@ -1173,9 +1179,9 @@ fn do_like (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
         let likes = envstruct.entity_likes_inc(cmdstruct.to, adj)?;
         let entitys = &envstruct.entitys;
         (
-            entitys.get(&cmdstruct.id).unwrap().name.to_string(),
+            entitys.get(&cmdstruct.id).ok_or("bad id")?.name.to_string(),
             likes,
-            entitys.get(&cmdstruct.to).unwrap().name.to_string()
+            entitys.get(&cmdstruct.to).ok_or("bad to")?.name.to_string()
         )
     };
 
@@ -1213,7 +1219,7 @@ fn do_def (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     // Definitions
 
     let word2 = word.to_string();
-    let defs = actix_web::rt::System::new("tmbot").block_on(async move { get_definition(&word2).await })?;
+    let defs = get_definition(&word2)?;
     cmdstruct.markdown();
 
     if defs.is_empty() {
@@ -1235,7 +1241,7 @@ fn do_def (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     // Synonyms
 
     let word2 = word.to_string();
-    let mut syns = actix_web::rt::System::new("tmbot").block_on(async move { get_syns(&word2).await })?;
+    let mut syns = get_syns(&word2)?;
 
     if syns.is_empty() {
         cmdstruct
@@ -1259,16 +1265,16 @@ fn do_def (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_httpsget (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r"(?s)^/httpsget\s+((https://|http://)?(.+))$", &cmdstruct.message)?;
-    let url = cap.as_str(3)?;
+    let cap = must_regex_to_vec(r"^/httpsget\s+([^\s]+)$", &cmdstruct.message)?;
+    let url = cap.as_str(1)?;
 
     let mut msg = String::new();
     let url2 = url.to_string();
-    let body = actix_web::rt::System::new("tmbot").block_on(async move { get_https_raw(&url2).await })?;
+    let body = httpsget(&url2)?;
 
     if body.is_empty() {
         cmdstruct
-            .push_msg(&format!("*{}* body is empty or error", &url))
+            .push_msg(&format!("*{}* response body is empty", &url))
             .send_msg_id()?;
     } else {
         msg.push_str( &format!("{}", &body) );
@@ -1282,11 +1288,11 @@ fn do_httpsget (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_httpsbody(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r#"(?s)^/httpsbody\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
-    let url = cap.as_str(3)?;
-    let text = cap.get(4).and_then(|c|c.as_ref()).unwrap_or(&String::new()).to_string();
+    let cap = must_regex_to_vec(r#"(?s)^/httpsbody\s+([^\s]+)\s*(.+)"#, &cmdstruct.message)?;
+    let url = cap.as_str(1)?;
+    let text = cap.get(2).and_then(|c|c.as_ref()).unwrap_or(&String::new()).to_string();
 
-    let body = post_https_text(&url, text)?;
+    let body = httpsbody(&url, text)?;
 
     if body.is_empty() {
         cmdstruct
@@ -1300,30 +1306,27 @@ fn do_httpsbody(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_httpsjson (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r#"(?s)^/httpsjson\s+((https://|http://)?([^\s]+))\s*(.+)?$"#, &cmdstruct.message)?;
-
-    let txt =
-        cap.get(4)
-        .and_then(|c|c.as_ref())
-        .map( |s| {
+    let cap = must_regex_to_vec(r#"(?sx) ^ /httpsjson \s+ ([^\s]+) \s* (.+)? $ "#, &cmdstruct.message)?;
+    let url = cap.as_str(1)?;
+    let string_json =
+        cap.as_str(2)
+        .map(|s|
             if 2 < s.len()
-                && match s.chars().nth(0) { Some(c) => c=='"',  _ => false }
-                && match s.chars().last() { Some(c) => c=='"',  _ => false }
+                && s.chars().nth(0).map_or(false, |c| c == '"')
+                && s.chars().last().map_or(false, |c| c == '"')
             {
-                s.replace("\n","\\n")
+                s.replace("\n","\\n") // Replace escape newlines if a JSON string
             } else {
                 s.to_string()
-            }
-        })
-        .unwrap_or(String::new());
-    let url = cap.as_str(3)?;
-    let ret =
-        match post_https_json(&url, &txt) {
-            Ok(res) => if res.is_empty() { "*empty response*".into() } else { res },
-            Err(e) => e.to_string()
-        };
+            })?;
+    match httpsjson(url, string_json) {
+        Ok(mut res) => {
+           if res.is_empty() { res.push_str("*empty response*") }
+           cmdstruct.push_msg(&res).send_msg()
+        }
+        Err(e) => cmdstruct.push_msg(&e.to_string()).send_msg_id()
+    }?;
 
-    cmdstruct.push_msg(&ret).send_msg()?;
     Ok("COMPLETED.")
 }
 
@@ -1458,7 +1461,7 @@ fn do_quotes (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                 cmdstruct.push_msg(&format!("{}\n", res)).edit_msg()?;
                 found_tickers = true;
             },
-            e => { glogd!("doquotes_pretty => ", e); }
+            e => { glogd!("doquotes_pretty", e); }
         }
     }
 
@@ -1501,9 +1504,9 @@ fn do_portfolio(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
             }
 
             if pos.qty < 0.0 {
-                short += pos.qty * pos.quote.unwrap().price;
+                short += pos.qty * quote.price;
             } else {
-                long += pos.qty * pos.quote.unwrap().price;
+                long += pos.qty * quote.price;
             }
             cmdstruct.edit_msg()?;
         }
@@ -2120,7 +2123,7 @@ impl<'a> QuoteExecute<'a> {
                         let aposprice = aposition.price;
 
                         if 0.0 == aposqty {
-                            getsql!(dbconn, "INSERT INTO positions values(?, ?, ?, ?)", aid, &**ticker, xqty, value)?;
+                            getsql!(dbconn, "INSERT INTO positions VALUES(?, ?, ?, ?)", aid, &**ticker, xqty, value)?;
                         } else {
                             let newaposqty = roundqty(aposqty+aqty);
                             let newaposcost = (aposprice + value) / (aposqty + xqty);
@@ -2213,7 +2216,7 @@ impl<'a> QuoteExecute<'a> {
                             // Update my position
                             let dbconn = &envstruct.dbconn;
                             if 0.0 == posqty {
-                                getsql!(dbconn, "INSERT INTO positions values(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
+                                getsql!(dbconn, "INSERT INTO positions VALUES(?, ?, ?, ?)", id, &**ticker, xqty, value)?;
                             } else {
                                 let newposqty = roundqty(posqty+xqty);
                                 let newposcost = (posprice + value) / (posqty + xqty);
@@ -2551,7 +2554,7 @@ fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                 } else {
                     let message = format!("{}-${}", ticker, &diffstr);
                     cmdstruct.message = message;
-                    glogd!(" do_trade_sell =>", do_trade_sell(cmdstruct)); // Recurse on same cmsstruct but mutated message
+                    glogd!(" do_trade_sell", do_trade_sell(cmdstruct)); // Recurse on same cmsstruct but mutated message
                 }
                 //cmdstruct.edit_msg()?;
             }
@@ -2580,7 +2583,7 @@ fn do_rebalance (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                     let message = format!("{}+${}", ticker, &diffstr);
                     //cmdstruct.push_msg(&format!("\n{}\n", message));
                     cmdstruct.message = message;
-                    glogd!(" do_trade_buy =>", do_trade_buy(cmdstruct)); // Recurse on same cmsstruct but mutated message
+                    glogd!(" do_trade_buy", do_trade_buy(cmdstruct)); // Recurse on same cmsstruct but mutated message
                 }
                 //cmdstruct.send_msg()?;
             }
@@ -2644,7 +2647,7 @@ fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let msg = {
         let id = cmdstruct.id;
         let at = cmdstruct.at;
-        let topic = cmdstruct.topic;
+        let topic = &cmdstruct.topic;
         let now = cmdstruct.now;
         let envstruct = &getenvstruct!(cmdstruct);
         let dbconn = &envstruct.dbconn;
@@ -2689,13 +2692,13 @@ fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
             + days.find("f").map_or(0, |_| 1) + days.find("s").map_or(0, |_| 1)
             + days.find("u").map_or(0, |_| 1)
         { days = ""; }
-
+&
         // Save job
         if let Ok(command) = caps.as_str(6) {
                 info!("now:{} [id:{} at:{} topic:{} time:{} days:{} cmd:{:?}]",
-                    now, id, at, topic.unwrap_or(0), time, days, command);
+                    now, id, at, topic, time, days, command);
                 glog!(getsql!(dbconn, "INSERT INTO schedules VALUES (?, ?, ?, ?, ?, ?)",
-                    id, at, topic.unwrap_or(0), time, days, command));
+                    id, at, topic.parse::<i64>().unwrap_or(0), time, days, command));
                 format!("Scheduled: `{}Z {}` `{}`",
                     if time < 86400 { time2timestr } else { time2datetimestr }(time),
                     days,
@@ -2765,36 +2768,53 @@ fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_alias (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let expr = must_regex_to_vec(r"^/alias\s+([^\s]+)(\s+(.*))?$", &cmdstruct.message)?;
-
-    let (alias, cmd) = {
-        let alias = expr.as_str(1)?;
-        let cmd =   expr.as_str(3)?;
-
+    let caps = must_regex_to_vec(r"(?s)^/alias\s+/?([^\s]+)\s?(.*)$", &cmdstruct.message)?;
+    let alias = caps.as_str(1)?;
+    let mut cmd =  caps.as_string(2)?;
+    let action = {
         let dbconn = &getenvstruct!(cmdstruct).dbconn;
-        let ret = getsql!(dbconn, "INSERT OR REPLACE INTO aliases values(?, ?)", alias, cmd)?;
-        info!("do_alias => {:?}", ret);
-        (alias, cmd)
+        if "" == cmd { 
+            let rows = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", alias)?;
+            cmd = IF!(rows.is_empty(), "", rows[0].get_str("cmd")?).to_string();
+            ""
+        } else {
+            getsql!(dbconn, "INSERT OR REPLACE INTO aliases VALUES(?, ?)", alias, &cmd[..])?;
+            "Set "
+        }
     };
-
-    cmdstruct.push_msg(&format!("{} == {}", alias, cmd)).send_msg()?;
+    if "" == cmd {
+        cmdstruct
+            .push_msg(&format!("Unbound Alias: {}", alias))
+            .send_msg_id()?
+    } else {
+        cmdstruct
+            .push_msg(&format!("{}Alias: {}\n{}", action, alias, cmd))
+            .send_msg()?
+    }
 
     Ok("COMPLETED.")
+}
+
+fn wordle_score_normalize (score: &str) -> usize {
+    match score {
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "X" => 7,
+          _ => 0
+    }
 }
 
 fn do_wordle(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let expr = must_regex_to_vec(r"^Wordle \d+ ([123456X])/6(\*?)", &cmdstruct.message)?; // "Wordle 767 4/6\n\n..."
 
-    let resultext = post_https_text(
-        "world.dv8.org:4441/jsondb/v1/wordle",
-        format!(
-            "'{} {} 1 :wordle",
+    let resultext = httpsbody("world.dv8.org:4441/jsondb/v1/wordle",
+        format!("'{} {} 1 :wordle",
             getenvstruct!(cmdstruct).entity_id2name(cmdstruct.id)?,
-            match expr.as_str(1)? {
-                "X" => "7",
-                n => n,
-            }
-        ),
+            wordle_score_normalize(expr.as_str(1)?))
     )?;
 
     cmdstruct.push_msg(&resultext).send_msg()?;
@@ -2803,11 +2823,18 @@ fn do_wordle(cmdstruct: &mut CmdStruct) -> Bresult<&str> {
 }
 
 fn do_aliasRun(mut cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let expr = must_regex_to_vec(r"^/([^\s]+)( *.*)$", &cmdstruct.message)?;
+    let expr = must_regex_to_vec(r"(?sx) ^ /([^\s]+) \s? (.*) $ ", &cmdstruct.message)?;
+
+    let cmd = expr.as_str(1)?;
+
+    let cmd = cmd.rsplit_once('@').map_or(cmd, |(cmd, topic)| {
+        cmdstruct.topic = topic.to_string(); // /aliascmd@topic force topic
+        cmd
+    });
 
     let rawcmd = {
         let dbconn = &getenvstruct!(cmdstruct).dbconn;
-        let aliasCmd = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", expr.as_str(1)?)?;
+        let aliasCmd = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", cmd)?;
         if aliasCmd.is_empty() { Err("")? }
         aliasCmd[0]["cmd"].as_string().ok_or("bad alias cmd")?.to_string()
     };
@@ -2815,7 +2842,6 @@ fn do_aliasRun(mut cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     let args = expr.as_str(2)?;
     let parameters = args.split_ascii_whitespace().collect::<Vec<&str>>();
     let parametersCount = parameters.len().to_string();
-    info!("Expanding: {} -> {} {:?}", cmdstruct.message, rawcmd, parameters);
 
     let mut usedParameters = false;
     let mut parameterError = false;
@@ -2836,7 +2862,7 @@ fn do_aliasRun(mut cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                 m.as_str()
             } else {
                 usedParameters = true;
-                // Parameter replacement
+                // Parameter replacement {1}
                 if let Some(m) = c.get(2) {
                     parameters
                         .get(m.as_str().parse::<usize>().unwrap_or(usize::MAX))
@@ -2844,15 +2870,16 @@ fn do_aliasRun(mut cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                             parameterError = true;
                             &"?"
                         })
+                // Special parameter replacement {me} {*} {#}
                 } else if let Some(s) = c.get(3) {
                     match s.as_str() {
                         "me" => &me,
                         "#" => &parametersCount,
                         "*" => args,
-                        _ => "",
+                        _ => "?",
                     }
                 } else if let Some(m) = c.get(4) {
-                    // Escaped brace or null parameter
+                    // Escaped brace {{ or null parameter {}
                     if "{" == &m.as_str()[1..2] { "{" } else { "" }
                 } else {
                     // This should never happen
@@ -2913,9 +2940,9 @@ fn do_most (cmdstruct: &mut CmdStruct) {
     for f in lst {
         match f.0(cmdstruct) {
             Err(e) => if e.to_string() != "" {
-                error!("\x1b[1m{}() =>{:?}", f.1, e)
+                error!("{}() =>{:?}", f.1, e)
             }
-            r => info!("\x1b[1m{}() => {:?}", f.1, r),
+            r => info!("{}() => {:?}", f.1, r),
         }
     }
 }
@@ -2944,98 +2971,93 @@ fn do_all(cmdstruct: &mut CmdStruct) -> Bresult<()> {
     Ok(())
 }
 
-////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+// Scheduled Messages
 
-fn do_each_scheduled_job (
-    jobs: Vec<HashMap<String, sqlite::Value>>,
-    env:  Env,
-    now:  i64
+fn do_scheduled_job(
+    env: Env, job: HashMap<String, sqlite::Value>, now: i64
 ) -> Bresult<()> {
-    for job in jobs {
-        let env = env.clone();
-        let id = job.get_i64("id")?;
-        let at = job.get_i64("at")?;
-        let topic = job.get_i64("topic")?;
-        let command = job.get_str("cmd")?;
-        let mut cmdstruct =
-            match CmdStruct::new(env, now, id, at, at, if topic==0 {None} else { Some(topic) }, command.into()) {
-                Ok(cmdstruct) => cmdstruct,
-                e => { glog!(e); continue }
-            };
-        let days = job.get_str("days")?;
-        let day_now = match LocalDateTime::at(now).weekday() {
-            Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
-            Friday => "f" , Saturday => "s", Sunday => "u" };
-        if days.is_empty() || days.find(day_now).is_some() {
-            glogd!("do_all() =>", do_all(&mut cmdstruct));
-        }
-        let time = job.get_i64("time")?;
-        if 86400 <= time { // Delete the non-daily job
-            let cmdstruct = &getenvstruct!(cmdstruct).dbconn;
-            getsql!(
-                cmdstruct,
-                "DELETE FROM schedules WHERE id=? AND at=? AND topic=? AND time=? AND days='' AND cmd=?",
-                id, at, topic, time, command)
-            .unwrap();
-        }
+    let at = job.get_i64("at")?;
+    let mut cmdstruct =
+        CmdStruct::new(
+            env.clone(), now,
+            job.get_i64("id")?, at, at, job.to_string("topic")?,
+            job.get_string("cmd")?)?;
+    let days = job.get_str("days")?;
+    let day_now = match LocalDateTime::at(now).weekday() {
+        Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
+        Friday => "f" , Saturday => "s", Sunday => "u" };
+    if days.is_empty() || days.find(day_now).is_some() {
+        glogd!("do_all()", do_all(&mut cmdstruct));
+    }
+    let time = job.get_i64("time")?;
+    if 86400 <= time { // Delete the non-daily job
+        let dbconn = &getenvstruct!(cmdstruct).dbconn;
+        getsql!(
+            dbconn,
+            "DELETE FROM schedules WHERE id=? AND at=? AND topic=? AND time=? AND days='' AND cmd=?",
+            cmdstruct.id, cmdstruct.at, cmdstruct.topic.parse::<i64>().unwrap_or(0), time, &cmdstruct.message[..])?;
     }
     Ok(())
 }
 
-pub fn start_scheduler (env:Env) -> Bresult<()> {
-    info!("Spawned Scheduler Event Thread, 10s delay");
-    std::thread::spawn( move ||
-    loop {
+pub fn start_scheduler (env: Env) -> Bresult<&'static str> {
+    std::thread::spawn(move || loop {
         sleep_secs(10.0);
-
-        let now = {
-            let envstruct = env.lock().unwrap();
-            let dstsecs = 60 * 60 * envstruct.dst_hours_adjust as i64;
-            Instant::now().seconds() + dstsecs
-        };
+        let now = Instant::now().seconds() + 60*60*env.lock().unwrap().dst_hours_adjust as i64;
 
         let jobs = {
             let envstruct = env.lock().unwrap();
             let timeFrom = envstruct.time_scheduler % 86400;
             let mut timeTo = now % 86400;
             if timeTo < timeFrom { timeTo += 86400 } // might wrap to 0, make 'from' < 'to'
-            let res = getsqlquiet!(&envstruct.dbconn,
+            match getsqlquiet!(&envstruct.dbconn,
                 "SELECT id, at, topic, time, days, cmd FROM schedules WHERE (?<=time AND time<?) or (?<=time AND time<?) ORDER BY time",
-                envstruct.time_scheduler, now, // one-time jobs
-                timeFrom, timeTo); // daily jobs
-            if res.is_err() { glog!(res); continue }
-            res.unwrap()
+                envstruct.time_scheduler, now, /*one-time jobs*/
+                timeFrom, timeTo /*daily jobs*/)
+            {
+                Ok(jobs) => jobs,
+                err => { glog!(err); continue }
+            }
         };
         if 0 < jobs.len() {
-            info!("\x1b[1mSchedules start\x1b[0m {:?}", &jobs);
-            let env = env.clone();
-            let res = do_each_scheduled_job(jobs, env, now);
-            info!("\x1b[1mSchedules end. {:?}", res);
+            for job in jobs {
+                println!("");
+                info!("\x1b[1m::SCHEDULER~\x1b[0m {:?}", &job);
+                glogd!("\x1b[1m--SCHEDULER~\x1b[0m",
+                    do_scheduled_job(env.clone(), job, now));
+                }
         }
         env.lock().unwrap().time_scheduler = now;
-    } ); // loop, ||, thread
-    Ok(())
+    });
+    Ok("10s delay")
 }
 
 ////////////////////////////////////////
 
 fn headersPretty(hm: &HeaderMap) -> String {
     hm.iter()
-    .map(|(k,v)| format!("\x1b[0m{} \x1b[1;30m{}\x1b[0m", k, v.to_str().unwrap_or("?")))
+    .map(|(k,v)| format!("\x1b[0m {} \x1b[1;30m{}", k, v.to_str().unwrap_or("?")))
     .collect::<Vec<String>>()
-    .join(" ")
+    .join("") + "\x1b[0m"
 }
 
-fn reqPretty (req: &HttpRequest, body: &web::Bytes) -> String {
-    format!("\x1b[35m{} \x1b[1m{:?} \x1b[0;33;100m{} {}",
-        req.peer_addr().map(|sa|sa.ip().to_string()).as_deref().unwrap_or("?"),
+fn reqHttpPretty(req: &HttpRequest, body: &web::Bytes) -> String {
+    format!("\x1b[35m{} \x1b[1m{:?} \x1b[0;33;100m{}{}",
+        req.peer_addr()
+            .map(|sa| sa.ip().to_string())
+            .as_deref()
+            .unwrap_or("?"),
         req.uri(),
-        from_utf8(body).map(|s|s.to_string().replace("\n", " \x1b7\x08\x1b[43m \x1b8")).unwrap_or_else(|_|format!("{:?}", body)),
+        from_utf8(body)
+            .map(|s| s.to_string().replace("\n", " \x1b7\x08\x1b[43m \x1b8"))
+            .unwrap_or_else(|_|format!("{:?}", body)),
         headersPretty(req.headers())
     )
 }
 
 fn header_tmbot() {
+    println!();
     info!("\x1b[0;31;40m _____ __  __ ____        _   ");
     info!("\x1b[0;33;40m|_   _|  \\/  | __ )  ___ | |_™");
     info!("\x1b[0;32;40m  | | | |\\/| |  _ \\ / _ \\| __|");
@@ -3044,6 +3066,7 @@ fn header_tmbot() {
 }
 
 fn header_tmlog() {
+    println!();
     info!("\x1b[0;31;40m _____ __  __ _          __ _™");
     info!("\x1b[0;33;40m|_   _|  \\/  | |    ___ / _` |");
     info!("\x1b[0;32;40m  | | | |\\/| | |   / _ \\|(_| |");
@@ -3054,105 +3077,88 @@ fn header_tmlog() {
 ////////////////////////////////////////
 
 #[macro_export(local_inner_macros)]
-macro_rules! httpResponseOk { () => ({
-    let resp = HttpResponse::Ok().finish();
-    info!("\x1b[1;35m{}\x1b[0m {}", resp.status(), headersPretty(resp.headers()));
-    resp
-})}               
+macro_rules! httpResponseOk {
+    () => {{
+        let r = HttpResponse::Ok().finish();
+        info!("\x1b[1;35m{}{}",
+            r.status(),
+            headersPretty(r.headers()));
+        r
+    }};
+}
 
 #[macro_export(local_inner_macros)]
-macro_rules! httpResponseNotFound { () => ({
-    let resp = HttpResponse::NotFound().finish();
-    error!("\x1b[1;35m{}\x1b[0m {}",
-        resp.status(),
-        headersPretty(resp.headers())
-    );
-    resp
-})}               
+macro_rules! httpResponseNotFound {
+    () => {{
+        let r = HttpResponse::NotFound().finish();
+        error!("\x1b[1;35m{}{}\n",
+            r.status(),
+            headersPretty(r.headers()));
+        r
+    }};
+}
 
 ////////////////////////////////////////
 
-fn dispatch_tmbot(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+fn tmbot(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     header_tmbot();
-    info!("{}", reqPretty(&req, &body));
-    let env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-    std::thread::spawn(move || {
-        info!("::TMBot thread async");
-        glogd!("--TMBot thread async do_all() =>",
+    info!("{}", reqHttpPretty(&req, &body));
+    let env = req.app_data::<web::Data<Env>>().ok_or("app_data inaccessible")?.get_ref().clone();
+    std::thread::spawn(move ||
+        glogd!("--TMBOT~",
             bytes2json(&body)
                 .and_then(Msg::new)
-                .and_then(|tmsg| CmdStruct::new(
-                    env,
-                    Instant::now().seconds(),
-                    tmsg.id,
-                    tmsg.at,
-                    tmsg.to,
-                    tmsg.topic,
-                    tmsg.message
-                ))
-                .and_then(|mut cmd| do_all(&mut cmd))
-        )
-    });
+                .and_then(|msg| CmdStruct::new(env, Instant::now().seconds(), msg.id, msg.at, msg.to, msg.topic, msg.message))
+                .and_then(|mut cmd| do_all(&mut cmd))));
+    Ok(())
+}
+
+fn handler_tmbot(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    glogd!("::TMBOT~", tmbot(req, body));
     httpResponseOk!()
 }
 
 pub fn start_tmbot(env: Env) -> Bresult<()> {
+    info!("::TMBot");
     let ssl_acceptor_builder = {
         let envstruct = env.lock().unwrap();
         comm::new_ssl_acceptor_builder(&envstruct.telegram_key, &envstruct.telegram_cert)?
     };
-    info!("::TMBot Start");
-    actix_web::rt::System::new("tmbotWebServer").block_on(async move {
-        let listener = match TcpListener::bind("0.0.0.0:8443") {
-            Ok(listener) => listener, //listener.accept(), => Result<(TcpStream, SocketAddr)>
-            Err(e) => {
-                error!("{:?}", e);
-                return;
-            }
-        };
-        match HttpServer::new(move || {
-            App::new()
+    let httpServer =
+        HttpServer::new(move || App::new()
                 .data(env.clone())
-                .route("*", web::to(dispatch_tmbot))
-        })
-        .workers(2)
-        //.on_connect( |any, _extensions| warn!("{:?}", any.downcast_ref::<actix_tls::openssl::SslStream<actix_web::rt::net::TcpStream>>()) )
-        .listen_openssl(listener, ssl_acceptor_builder)
-        {
-            Ok(httpserver) => info!("  TMBot run() => {:?}", httpserver.run().await), // await returns after SIGINT
-            Err(e) => error!("  TMBot new() => {:?}", e),
-        };
-        warn!("--TMBot done.");
-    });
+                .route("*", web::to(handler_tmbot)))
+            .workers(2)
+            .bind_openssl("0.0.0.0:8443", ssl_acceptor_builder)?;
+    glogd!("--TMBot",
+        rt::System::new("TmbotServer")
+            .block_on(async move { httpServer.run().await }) // SIGINT causes return
+    );
     Ok(())
 }
 
 ////////////////////////////////////////
-fn dispatch_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+
+fn tmlog(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     header_tmlog();
-    info!("{}", reqPretty(&req, &body));
+    info!("{}", reqHttpPretty(&req, &body));
+    let capv = must_regex_to_vec(r#"(?x) ^ /(-?\d+) (/(-?\d+))? (/(.*))? $ "#, &req.path())?;
+    let env = req.app_data::<web::Data<Env>>().ok_or("app_data inaccessible")?.get_ref().clone();
+    let at    = capv.as_i64(1)?;
+    let topic = capv.as_str(3).unwrap_or("").to_string();
+    let header = capv.as_str(5).unwrap_or("").split('/').collect::<Vec<&str>>().join(" ");
+    let bodytxt = from_utf8(&body)?.to_string();
+    std::thread::spawn(move ||
+        glogd!("--TMLOG~",
+            CmdStruct::new(env, Instant::now().seconds(), 0, at, at, topic, "".into())
+            .and_then(|mut cmdstruct| cmdstruct.push_msg(&header).push_msg(&bodytxt).send_msg())));
+    Ok(())
+}
 
-    let (at, topic) = match must_regex_to_vec(r#"^/(-?\d+)(/(-?\d+))?/?$"#, &req.path()) {
-        Ok(capv) => (capv.as_i64(1).unwrap(), capv.as_i64(3).ok()),
-        Err(e) => {
-            error!("{:?}", e);
-            return httpResponseNotFound!();
-        }
-    };
-
-    let bodytxt = from_utf8(&body).unwrap_or("{badBodyBytes}").to_string();
-    let env: Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
-
-    std::thread::spawn(move || {
-        match CmdStruct::new(env, Instant::now().seconds(), 0, at, at, topic, "".into()) {
-            Ok(mut cmdstruct) => {
-                cmdstruct.push_msg(&bodytxt).send_msg().ok();
-            }
-            e => glog!(e),
-        }
-    });
-
-    httpResponseOk!()
+fn handler_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
+    let res = tmlog(req, body);
+    glogd!("::TMLOG~", res);
+    IF!(res.is_ok(), httpResponseOk!(), httpResponseNotFound!())
 }
 
 pub fn start_tmlog(env: Env) -> Bresult<()> {
@@ -3160,42 +3166,28 @@ pub fn start_tmlog(env: Env) -> Bresult<()> {
         let envstruct = env.lock().unwrap();
         comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
     };
-    std::thread::spawn(move || {
-        let httpserver = match HttpServer::new(move || {
-            App::new()
-                .data(env.clone())
-                .route("*", web::to(dispatch_tmlog))
-        })
-        .workers(2)
-        .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder)
+    info!("::TMlog");
+    std::thread::spawn(move ||
+        glogd!("--TMlog",
+            match HttpServer::new(
+                move || App::new().data(env.clone()).route("*", web::to(handler_tmlog)))
+            .workers(2)
+            .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder)
         {
-            Ok(httpserver) => httpserver,
-            Err(err) => {
-                error!("start_tmlog .bind_openssl() => {:?}", err);
-                return;
-            }
-        };
-        let res = actix_web::rt::System::new("tmbot").block_on(async move {
-            warn!(
-                "start_tmlog httpserver.run() => {:?}",
-                httpserver.run().await
-            )
-        }); // Thread returns after SIGINT
-        warn!("start_tmlog .block_on() => {:?}", res);
-    });
+            Ok(httpserver) => rt::System::new("TmlogServer").block_on(async move { httpserver.run().await }),
+            Err(err) => Err(err.into())
+        })
+    ); // Thread returns after SIGINT
 
     Ok(())
 }
 
 ////////////////////////////////////////
 
-fn _envstruct_get_entity<'e>(
-    envstruct: &'e EnvStruct,
-    name: &str
-) -> Bresult<&'e Entity> {
+fn _envstruct_get_entity<'a>(envstruct: &'a EnvStruct, name: &str) -> Bresult<&'a Entity> {
     envstruct.entitys
     .iter()
-    .find_map( |(_id,entity)|
+    .find_map( |(_id, entity)|
         if name == &entity.name { Some(entity) }
         else { None } )
     .ok_or("missing user".into())
@@ -3216,9 +3208,9 @@ fn _web_login (env: Env, name: &str) -> Bresult<i64> {
     warn!("web_login id = {:?}", id);
     std::thread::spawn( move || {
         let res =
-            actix_web::rt::System::new("websocketlogin")
+            rt::System::new("websocketlogin")
             .block_on(async move {
-                match CmdStruct::new(env, 0, id, id, id, None, "".into()) {
+                match CmdStruct::new(env, 0, id, id, id, "".into(), "".into()) {
                     Ok(mut cmdstruct) => {
                         let pw = ::rand::random::<usize>();
                         match cmdstruct.env.try_lock() {
@@ -3293,9 +3285,9 @@ async fn _web_stonks (cmdstruct: &mut CmdStruct) -> Bresult<String> {
                     pos.price.to_string(),
                     quote.price.to_string() ) );
             if pos.qty < 0.0 {
-                short += pos.qty * pos.quote.unwrap().price;
+                short += pos.qty * quote.price;
             } else {
-                long += pos.qty * pos.quote.unwrap().price;
+                long += pos.qty * quote.price;
             }
         }
     }
@@ -3343,7 +3335,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for CmdStruct {
     //let env2 = self.env.clone();
     //std::thread::spawn( move || {
     //    let res =
-    //        actix_web::rt::System::new("websocketlogin")
+    //        rt::System::new("websocketlogin")
     //        .block_on(async move {
     //            match CmdStruct::new(env2, 0, -572225120,-572225120,-572225120, "") {
     //                Ok(mut cmdstruct) => {
@@ -3420,12 +3412,11 @@ async fn _ws_handle_request (cmdstruct: &mut CmdStruct) -> String {
 }
 
 
-// This is called only during initial websocket creation so the CmdStruct should be created here?
 async fn ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
     warn!("ws_handler req={:?}", req);
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
 
-    let cmdstruct = match CmdStruct::new(env, 0, 0, 0, 0, None, "".into()) {
+    let cmdstruct = match CmdStruct::new(env, 0, 0, 0, 0, "".into(), "".into()) {
         Ok(cmdstruct) => cmdstruct,
         e => { glog!(e); return Ok("".into()) } // TODO: Return an error so the websocket connection closes?
     };
@@ -3450,7 +3441,7 @@ pub fn main_websocket(env: Env) -> Bresult<()> {
                     return;
                 }
             };
-        let res = actix_web::rt::System::new("websocket").block_on(async move {
+        let res = rt::System::new("websocket").block_on(async move {
             warn!("launch() => {:?}", srv.run().await)
         }); // This should never return
         error!("main_websocket => {:?}", res);
@@ -3478,7 +3469,7 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
                     return;
                 }
             };
-        let res = actix_web::rt::System::new("websocket").block_on(async move {
+        let res = rt::System::new("websocketssl").block_on(async move {
             println!("launch() => {:?}", srv.run().await)
         }); // This should never return
         error!("main_websocket_ssl => {:?}", res);
@@ -3489,8 +3480,7 @@ pub fn main_websocket_ssl(env: Env) -> Bresult<()> {
 ////////////////////////////////////////////////////////////////////////////////
 
 fn usage() {
-    println!(
-        r#"
+    println!(r#"
 USAGE:
     tmbot {{DST 0|1}}
 ENVIRONMENT:
@@ -3500,7 +3490,7 @@ ENVIRONMENT:
     TMBOT_CERT=tmbot_cert.pem
     TMBOT_KEY=tmbot_key.pem
     TMBOT_DB=tmbot.sqlite
-    "#);
+"#);
 }
 
 pub fn main_launch() -> Bresult<()> {
@@ -3509,56 +3499,16 @@ pub fn main_launch() -> Bresult<()> {
         usage();
         Err("invalid args")?
     }
-    if !true { glogd!("create_schema => ", create_schema()) } // Create DB
-    if !true { crate::fun(argv) }
-    // Playground
-    else {
+    if !true { glogd!("create_schema", create_schema()) } // Create DB
+    if true {
         let env = EnvStruct::new(argv)?;
-        //glogd!("websocket() =>", main_websocket(env.clone()));
-        //glogd!("websocketssl() =>", main_websocket_ssl(env.clone()));
-        glogd!("start_scheduler() =>", start_scheduler(env.clone()));
-        glogd!("start_tmlog() =>", start_tmlog(env.clone()));
-        glogd!("start_tmbot() =>", start_tmbot(env));
-        Ok(())
+        //glogd!("websocket()", main_websocket(env.clone()));
+        //glogd!("websocketssl()", main_websocket_ssl(env.clone()));
+        glogd!("start_scheduler()", start_scheduler(env.clone()));
+        glogd!("start_tmlog()", start_tmlog(env.clone()));
+        glogd!("start_tmbot()", start_tmbot(env));
+    } else { // Playground
+       info!("{:?}", argv);
     }
-}
-
-////////////////////////////////////////
-/*
-trait Monad<D,W> where W: Fn(D)->D{
-  fn data(&self) -> D;
-  fn work(&self) -> W;
-}
-////////////////////////////////////////
-struct Monad1<'a, D, E> {
-  data: D,
-  work: &'a dyn Fn(&D) -> E,
-}
-
-impl<D> Monad1<'_, D, E> {
-  fn work(&mut self) {
-    self.data = (*self.work)(&self.data)
-  }
-}
-*/
-
-fn fun (_argv: std::env::Args) -> Bresult<()>  {
-    info!("::fun {}", "\u{1F346}"); // Should never return
-  /*
-    let mut data = Monad1{data:5.0, work: &|m| m.data += m.data ;
-    println!("data = {:?}", data.data);
-
-    data.work();
-    println!("data = {:?}", data.data);
-
-    data.work = &|i|i*i;
-
-    data.work();
-    println!("data = {:?}", data.data);
-
-    data.work();
-    println!("data = {:?}", data.data);
-*/
-
     Ok(())
 }

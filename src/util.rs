@@ -1,14 +1,7 @@
-use ::std::{
-    thread,
-    time::{Duration},
-    str::{from_utf8},
-    error::{Error},
-    collections::{HashMap,
-        //hash_map::Entry
-    }
-};
-use ::regex::{Regex};
-pub use ::serde_json::{Value};
+pub use log::{error, info, warn};
+pub use regex::Regex;
+pub use serde_json::{json, Value};
+pub use std::{collections::HashMap, error::Error, str::from_utf8, thread, time::Duration};
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Types
@@ -16,37 +9,7 @@ pub use ::serde_json::{Value};
 pub type Bresult<T> = Result<T, Box<dyn Error>>;
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Logging
-
-//pub fn infoi<T:  std::fmt::Debug>(e: T) -> T { info!("{:?}",  e); e }
-//pub fn warni<T:  std::fmt::Debug>(e: T) -> T { warn!("{:?}",  e); e }
-//pub fn errori<T: std::fmt::Debug>(e: T) -> T { error!("{:?}", e); e }
-
-#[macro_export(local_inner_macros)]
-macro_rules! ginfod {
-    ($pre:expr, $arg:expr) => (
-        info!("{} {}",
-            $pre,
-            std::format!("{:?}", $arg).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\""))
-    )
-}
-
-#[macro_export(local_inner_macros)]
-macro_rules! gerrord {
-    ($pre:expr, $arg:expr) => (
-        error!("{} {}",
-            $pre,
-            std::format!("{:?}", $arg).replace("\n","").replace("\\\\", "\\").replace("\\\"", "\""))
-    )
-}
-
-//// Log error with debug formatting and return it
-//#[macro_export(local_inner_macros)]
-//macro_rules! errori {
-//    ($o:expr) => {
-//        error!("{:?}", $o)
-//    }
-//}
+/// General Logging
 
 #[macro_export(local_inner_macros)]
 macro_rules! glog {
@@ -62,9 +25,16 @@ macro_rules! glog {
 macro_rules! glogd {
     ($pre:expr, $arg:expr) => {
         match &$arg {
-            Ok(o)  => ::log::info!("{} {:?}", $pre, o),
-            Err(e) => ::log::error!("{} {:?}", $pre, e)
+            Ok(o)  => ::log::info!("{} => {:?}", $pre, o),
+            Err(e) => ::log::error!("{} => {:?}", $pre, e)
         }
+    }
+}
+
+#[macro_export(local_inner_macros)]
+macro_rules! fmthere {
+    ($s:expr) => {
+        std::format!("{}{} {}", std::module_path!(), std::line!(), $s)
     }
 }
 
@@ -76,7 +46,9 @@ fn n2heart2 (n :usize) -> String {
         0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
         1 => from_utf8(b"\xF0\x9F\x92\x94"), // red broken heart
         _ => Ok("?")
-    }.unwrap().to_string()
+    }
+    .map_err(|e| {error!("{:?}", e); e})
+    .unwrap_or("?").to_string()
 }
 
 fn n2heart13 (n :usize) -> String {
@@ -95,7 +67,9 @@ fn n2heart13 (n :usize) -> String {
         11 => from_utf8(b"\xF0\x9F\x92\x96"), // pink sparkling heart
         12 => from_utf8(b"\xF0\x9F\x92\x9D"), // heart with ribbon
         _ => Ok("?")
-    }.unwrap().to_string()
+    }
+    .map_err(|e| {error!("{:?}", e); e})
+    .unwrap_or("?").to_string()
 }
 
 //info!("HEARTS {}", &(-6..=14).map( num2heart ).collect::<Vec<&str>>().join(""));
@@ -119,66 +93,54 @@ pub fn num2heart (mut n :i64) -> String {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// JSON
+// JSON
 
-pub fn bytes2json (body: &[u8]) -> Bresult<Value> {
-    Ok( serde_json::from_str( from_utf8(&body)? )? )
+pub fn bytes2json(body: &[u8]) -> Bresult<Value> {
+    Ok(serde_json::from_str(from_utf8(&body)?)?)
 }
 
-////////////////////////////////////////
-
-pub fn getin<'a> (mut j :&'a Value, keys :&[&str]) -> &'a Value {
-    for k in keys { j = &j[*k] }
-    j
+pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
+    match v.pointer(ptr) {
+        Some(v) => &v,
+        None => &Value::Null
+    }
 }
 
-pub fn getin_i64 (json :&Value, keys :&[&str]) -> Result<i64, String> {
-    getin(json, keys)
+pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
+    getin(json, ptr)
     .as_i64()
-    .ok_or( format!("Unable to parse {:?} as_i64", keys) )
+    .ok_or( format!("Unable to parse {:?} as_i64", ptr) )
 }
 
-pub fn getin_i64_or (default:i64, json :&Value, keys :&[&str]) -> i64 {
-    getin(json, keys).as_i64().unwrap_or(default)
+pub fn getin_i64_or(default: i64, json: &Value, ptr :&str) -> i64 {
+    getin(json, ptr).as_i64().unwrap_or(default)
 }
 
-pub fn getin_f64 (json :&Value, keys :&[&str]) -> Result<f64, String> {
-    getin(json, keys)
+pub fn getin_f64(json: &Value, ptr: &str) -> Result<f64, String> {
+    getin(json, ptr)
     .as_f64()
-    .ok_or( format!("Unable to parse {:?} as_f64", keys) )
+    .ok_or( format!("Unable to parse {:?} as_f64", ptr) )
 }
 
-pub fn getin_str <'t> (json :&'t Value, keys :&[&str]) -> Result<String, String> {
-    getin(json, keys)
+pub fn getin_str(json: &Value, ptr: &str) -> Result<String, String> {
+    getin(json, ptr)
     .as_str()
     .map_or(
-        Err(format!("Unable to parse {:?} as_str", keys)),
+        Err(format!("Unable to parse {:?} as_str", ptr)),
         |j| Ok(j.to_string()) )
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// Regex
-
-/*
-#[derive(Debug)]
-pub struct Regexes(HashMap<&'static str, Regex>);
-
-impl Regexes {
-    pub fn new () -> Regexes {
-        Regexes(HashMap::new())
-    }
-    pub fn get<'a> (&'a mut self, re: &'static str) -> Bresult<&'a Regex> {
-        Ok(match self.0.entry(re){
-            Entry::Occupied(entry) => entry.get(),
-            Entry::Vacant(entry) => {
-                entry.insert(Regex::new(re)?);
-                self.0.get(re).ok_or("Regexes contradiction")?
-            }
-        })
-    }
+pub fn getin_string(json: &Value, ptr: &str) -> Result<String, String> {
+    json.pointer(ptr)
+    .ok_or(format!("json: bad path {}", ptr))
+    .map(|v|
+        v.as_str()
+        .map_or(
+            v.to_string(),
+            |v| v.to_string()))
 }
-*/
 
+////////////////////////////////////////////////////////////////////////////////
 // Regex enhancements
 
 // Return hashmap of the regex capture groups, if any.
@@ -205,77 +167,56 @@ pub fn regex_to_hashmap (re: &str, msg: &str) -> Bresult<HashMap<String, String>
 
 // Return vector of the regex capture groups, if any.
 pub fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Ok(Regex::new(re)? // Result<Regex>
-        .captures(msg) // Option<Captures>
-        .map(|caps| {
+    Ok(Regex::new(re)?  // Result<Regex>
+        .captures(msg)  // Option<Captures>
+        .map(|caps|
             caps.iter() // Iter::Option<match>
-                .map(|o_match| o_match.map(|mtch| mtch.as_str().into()))
-                .collect()
-        }) // Option<Vec<Option<String>>r
+                .map(|o_match|
+                    o_match.map(|mtch| mtch.as_str().into()))
+                .collect()) // Option<Vec<Option<String>>r
         .unwrap_or(Vec::new()))
 }
 
-// Return vector of the regex capture groups, error if no match
-pub fn must_regex_to_vec_OLD(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Regex::new(re) // Result<Regex>
-        .map_err(Box::from)
-        .and_then(|reg| {
-            reg.captures(msg) // Option<Captures>
-                .ok_or("".into())
-        })
-        .map(|caps| {
-            caps.iter()
-                .map(|o_match| o_match.map(|mtch| mtch.as_str().into()))
-                .collect::<Vec<Option<String>>>()
-        }) // Option<Vec<Option<String>>
-}
-
-// Return vector of the regex capture groups, error if no match
+// Return vector of the regex capture groups, Err("") if no match
 pub fn must_regex_to_vec(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Ok(Regex::new(re)? // Result<Regex>
-        .captures(msg) // Option<Captures>
-        .ok_or("")? // Result<Captures>
-        .iter()
-        .map(|om|   // Option<Match>
-        om.map(|m| m.as_str().into())) // Iter<Option<String>>
-        .collect::<Vec<Option<String>>>())
+    Ok(Regex::new(re)?  // Result<Regex>?
+        .captures(msg)  // Option<Captures>
+        .ok_or("")?     // Result<Captures>?
+        .iter()         // Iter<Option<Match>>
+        .map(|om|       // Option<Match>
+            om.map(|m|  // Match
+                m.as_str().into())) // Iter<Option<String>>
+        .collect::<Vec<Option<String>>>()) // Vec<Option<String>>
 }
 
-pub trait AsI64 { fn as_i64 (&self, i:usize) -> Bresult<i64>; }
-pub trait AsF64 { fn as_f64 (&self, i:usize) -> Bresult<f64>; }
-pub trait AsStr { fn as_str (&self, i:usize) -> Bresult<&str>; }
-pub trait AsString { fn as_string (&self, i:usize) -> Bresult<String>; }
+/// Regex captured strings 'as' impls
+pub trait ReAs {
+    fn as_i64 (&self, i:usize) -> Bresult<i64>;
+    fn as_f64 (&self, i:usize) -> Bresult<f64>;
+    fn as_str (&self, i:usize) -> Bresult<&str>;
+    fn as_string (&self, i:usize) -> Bresult<String>;
+}
 
-impl AsI64 for Vec<Option<String>> {
+impl ReAs for Vec<Option<String>> {
     fn as_i64 (&self, i:usize) -> Bresult<i64> {
         Ok(self.get(i).ok_or("Can't index vector")?
            .as_ref().ok_or("Can't parse i64 from None")?
            .parse::<i64>()?)
     }
-}
-
-impl AsF64 for Vec<Option<String>> {
     fn as_f64 (&self, i:usize) -> Bresult<f64> {
         Ok(self.get(i).ok_or("Can't index vector")?
            .as_ref().ok_or("Can't parse f64 from None")?
            .parse::<f64>()?)
     }
-}
-
-impl AsStr for Vec<Option<String>> {
     fn as_str (&self, i:usize) -> Bresult<&str> {
         Ok(self.get(i)
             .ok_or("can't index vector")?.as_ref()
             .ok_or("can't infer str from None")? )
     }
-}
-
-impl AsString for Vec<Option<String>> {
     fn as_string (&self, i:usize) -> Bresult<String> {
         self.as_str(i).map( String::from )
     }
 }
-
 
 
 ////////////////////////////////////////////////////////////////////////////////

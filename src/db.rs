@@ -26,7 +26,6 @@ impl fmt::Debug for Connection {
 }
 ////////////////////////////////////////////////////////////////////////////////
 // SQLite macros that facilitate placeholders
-////////////////////////////////////////////////////////////////////////////////
 
 #[macro_export]
 macro_rules! getsql {
@@ -47,14 +46,16 @@ macro_rules! getsql {
     })()};
 
     ( $conn:expr, $sql:expr, $($v:expr),* ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
-        info!("SQLite <= \x1b[1;36m{}", $sql);
+        info!("SQLite \x1b[1;36m{}", $sql);
         let mut statement = $conn.conn.prepare( $sql )?;
         let mut placeholderidx = 0;
+        let mut info = String::new();
         $(
             placeholderidx += 1;
-            info!("SQLite    \x1b[36m{} {}", placeholderidx, $v);
+            info.push_str(&format!(" {}:{}", placeholderidx, $v));
             statement.bind(placeholderidx, $v)?;
         )*
+        info!("SQLite\x1b[36m{}", info);
         let col_names :Vec<String> =
             Statement::column_names(&statement).into_iter().map( String::from ).collect();
         let mut cursor = Statement::into_cursor(statement);
@@ -94,20 +95,23 @@ macro_rules! getsqlquiet {
 // Primitive traits for accessing row values
 ////////////////////////////////////////////////////////////////////////////////
 
-pub trait GetI64    { fn get_i64 (&self, key:&str) -> Bresult<i64>; }
-pub trait GetF64    { fn get_f64 (&self, key:&str) -> Bresult<f64>; }
-pub trait GetStr    { fn get_str (&self, key:&str) -> Bresult<&str>; }
-pub trait GetString { fn get_string (&self, key:&str) -> Bresult<String>; }
+pub trait RowGet  {
+    fn get_i64 (&self, key:&str) -> Bresult<i64>;
+    fn get_f64 (&self, key:&str) -> Bresult<f64>;
+    fn get_str (&self, key:&str) -> Bresult<&str>;
+    fn get_string (&self, key:&str) -> Bresult<String>;
+    fn get_i64_or    (&self, default:i64,  key:&str) -> i64;
+    fn get_f64_or    (&self, default:f64,  key:&str) -> f64;
+    fn get_string_or (&self, default:&str, key:&str) -> String;
+    fn to_string (&self, key:&str) -> Bresult<String>;
+}
 
-impl GetI64 for HashMap<String, ::sqlite::Value> {
+impl RowGet for HashMap<String, ::sqlite::Value> {
     fn get_i64 (&self, key:&str) -> Bresult<i64> {
         Ok(self
             .get(key).ok_or(format!("Can't find key '{}'", key))?
             .as_integer().ok_or(format!("Not an integer '{}'", key))?)
     }
-}
-
-impl GetF64 for HashMap<String, ::sqlite::Value> {
     fn get_f64 (&self, key:&str) -> Bresult<f64> {
         self
             .get(key) /* Option */
@@ -116,55 +120,27 @@ impl GetF64 for HashMap<String, ::sqlite::Value> {
             .as_float() /* Option */
             .ok_or(format!("Not an integer '{}'", key).into()) /* Result */
     }
-}
-
-impl GetStr for HashMap<String, ::sqlite::Value> {
     fn get_str (&self, key:&str) -> Bresult<&str> {
         self
             .get(key).ok_or(format!("Can't find key '{}'", key))?
             .as_string().ok_or(format!("Not a string '{}'", key))
             .map_err( Box::from )
     }
-}
-
-impl GetString for HashMap<String, ::sqlite::Value> {
     fn get_string (&self, key:&str) -> Bresult<String> {
         Ok(self
             .get(key).ok_or(format!("Can't find key '{}'", key))?
             .as_string().ok_or(format!("Not a string '{}'", key))?
             .to_string())
     }
-}
-
-////////////////////////////////////////
-
-pub trait GetI64Or    { fn get_i64_or    (&self, default:i64,  key:&str) -> i64; }
-pub trait GetF64Or    { fn get_f64_or    (&self, default:f64,  key:&str) -> f64; }
-pub trait GetStringOr { fn get_string_or (&self, default:&str, key:&str) -> String; }
-
-impl GetI64Or for HashMap<String, ::sqlite::Value> {
     fn get_i64_or (&self, default:i64, key:&str) -> i64 {
         self.get(key).and_then( ::sqlite::Value::as_integer ).unwrap_or(default)
     }
-}
-
-impl GetF64Or for HashMap<String, ::sqlite::Value> {
     fn get_f64_or (&self, default:f64, key:&str) -> f64 {
         self.get(key).and_then( ::sqlite::Value::as_float ).unwrap_or(default)
     }
-}
-
-impl GetStringOr for HashMap<String, ::sqlite::Value> {
     fn get_string_or (&self, default:&str, key:&str) -> String {
         self.get(key).and_then( ::sqlite::Value::as_string ).unwrap_or(default).to_string()
     }
-}
-
-////////////////////////////////////////
-
-pub trait ToString { fn to_string (&self, key:&str) -> Bresult<String>; }
-
-impl ToString for HashMap<String, ::sqlite::Value> {
     fn to_string (&self, key:&str) -> Bresult<String> {
         let v = self.get(key).ok_or(format!("Can't find key '{}'", key))?; /* sqlite::Value */
         v.as_string()

@@ -1,37 +1,34 @@
-use std::io::Write;
-use log::{warn, Record, Level::{Error, Warn, Info, Debug, Trace}};
-use env_logger::fmt::{Formatter, Color};
+use env_logger::fmt::{Color, Formatter};
+use log::{
+    warn,
+    Level::{Debug, Error, Info, Trace, Warn},
+    Record
+};
+use std::io::{self, Write};
 
-/// Logger output serializer.
-fn _logger_formatter (buf :&mut Formatter, rec :&Record) -> std::io::Result<()> {
+fn logger_formatter(buf: &mut Formatter, rec: &Record) -> io::Result<()> {
     let mut style = buf.style();
     style.set_color(
             match rec.level() {
                 Error => Color::Red,
                 Warn  => Color::Yellow,
                 Info  => Color::Green,
-                Debug => Color::Cyan,
-                Trace => Color::Magenta
+                Debug => Color::Magenta,
+                Trace => Color::Cyan
             });
-    let pre = style.value(format!("{}{}", /*rec.level(),*/ rec.target(), rec.line().unwrap()));
+    let pre = style.value(format!("{}{}", rec.target(), rec.line().unwrap_or(0)));
     writeln!(buf, "{} {:?}", pre, rec.args())
 }
 
-/// Initialize logger
-fn logger_init () {
-    env_logger::builder()
-    //.format_timestamp(None).init()
-    //.filter_level(log::LevelFilter::max())
-    .format(_logger_formatter)
-    .init();
-    //log::error!("error"); log::warn!("warn"); log::info!("info"); log::debug!("debug"); log::trace!("trace"); 
+fn logger_init() {
+    env_logger::builder().format(logger_formatter).init();
 }
-
-//#[actix_web::main] async fn main() { ::tmbot::launch().await; }
 
 fn main() {
     logger_init();
     warn!("main tmbot::main_launch() => {:?}", ::tmbot::main_launch()); // Should never return
+    ::tmbot::util::sleep_secs(0.1);
+    println!()
 }
 
 ////////////////////////////////////////////////////////////////////////////////
