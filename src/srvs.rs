@@ -1,4 +1,5 @@
-use crate::*;
+use crate::util::*;
+use actix_web::rt;
 
 pub fn get_definition (word: &str) -> Bresult<Vec<String>> {
 
@@ -111,48 +112,10 @@ pub fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
 
     let body = rbody.or_else( |r| Err(format!("get_ticker_raw for {:?}  {:?}", ticker, r)) )?;
     let jsonstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_raw http body2str {:?} {:?}"#, ticker, r)) )?;
-
     bytes2json(jsonstr.as_bytes())
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-pub fn reqPretty(req: &ClientRequest, text: &str) -> String {
-    format!("<= \x1b[34m{:?} {} {} \x1b[33;100m{}{}",
-        req.get_version(),
-        req.get_method(),
-        req.get_uri()
-                .to_string()
-                .replace("/", "\x1b[1m/\x1b[22m")
-                .replace("?", "\x1b[1m?\x1b[22m")
-                .replace("=", "\x1b[1m=\x1b[22m")
-                .replace("&", "\x1b[1m&\x1b[22m"),
-        text.replace("\n", " \x1b7\x08\x1b[43m \x1b8"),
-        headersPretty(&req.headers()))
-}
-
-pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
-    format!("=> \x1b[34m{:?} {} \x1b[33;100m{}{}",
-        res.version(),
-        res.status(),
-        body.replace("\n", " \x1b7\x08\x1b[43m \x1b8"),
-        headersPretty(&res.headers()))
-}
-
-////////////////////////////////////////
-
-// ClientBuilder -> Client -> SendClientRequest -> ClientResponse
-fn newHttpsClient() -> Bresult<Client> {
-    Ok(Client::builder() // ClientBuilder
-        .connector(
-            Connector::new()
-                .ssl(SslConnector::builder(SslMethod::tls())?.build())
-                .timeout(std::time::Duration::new(90, 0))
-                .finish())
-        .header(actix_web::http::header::USER_AGENT, "TMBot")
-        .timeout(std::time::Duration::new(90, 0))
-        .finish()) // Client
-}
 
 fn normalizeUrl (url: &str) -> String {
     must_regex_to_vec("(?:https?://)?(.*)", url)
@@ -162,8 +125,6 @@ fn normalizeUrl (url: &str) -> String {
     .unwrap_or(url.into())
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
 pub fn httpsget(url: &str) -> Bresult<String> {
     let url = normalizeUrl(url);
     rt::System::new("getHttpsRaw").block_on(async move {
@@ -172,7 +133,7 @@ pub fn httpsget(url: &str) -> Bresult<String> {
         let mut clientResponse = clientRequest.send().await?;
         let body = from_utf8(&clientResponse.body().await?)?.to_string();
         info!("{}", resPretty(&clientResponse, &body));
-        Bresult::Ok(body)
+        Ok(body)
     })
 }
 
@@ -184,7 +145,7 @@ pub fn httpsbody(url: &str, txt: String) -> Bresult<String> {
         let mut clientResponse = clientRequest.send_body(txt).await?;
         let body = from_utf8(&clientResponse.body().await?)?.to_string();
         info!("{}", resPretty(&clientResponse, &body));
-        Bresult::Ok(body)
+        Ok(body)
     })
 }
 
@@ -201,6 +162,6 @@ pub fn httpsjson (url: &str, jsontxt: String) -> Bresult<String> {
             }.await?;
         let body = from_utf8(&clientResponse.body().await?)?.to_string();
         info!("{}", resPretty(&clientResponse, &body));
-        Bresult::Ok(body)
+        Ok(body)
     })
 }

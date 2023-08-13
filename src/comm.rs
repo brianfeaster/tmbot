@@ -1,18 +1,11 @@
 //! # Telegram Communication
 
-use crate::*;
-use actix_web::{
-    client::{Client, Connector},
-    rt,
-};
+use crate::util::*;
+use actix_web::rt;
 use openssl::ssl::{
-    NameType, SniError, SslAcceptor, SslAcceptorBuilder, SslAlert, SslConnector,
-    SslConnectorBuilder, SslMethod, SslRef,
+    NameType, SniError, SslAcceptor, SslAcceptorBuilder, SslAlert, SslFiletype, SslMethod, SslRef
 };
-use std::{
-    fmt::{self, Formatter},
-    time::Duration,
-};
+use std::fmt::{self, Formatter};
 
 pub fn verifyServerName (cert_pem: &str)
     -> Bresult<
@@ -59,13 +52,13 @@ pub fn new_ssl_acceptor_builder(key_pem: &str, cert_pem: &str) -> Bresult<SslAcc
     Ok(acceptor_builder)
 }
 
-// TELEGRAM_KEY_PEM, TELEGRAM_CERT_PEM
-pub fn new_ssl_connector_builder(key_pem: &str, cert_pem: &str) -> Bresult<SslConnectorBuilder> {
-    let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
-    ssl_connector_builder.set_private_key_file(key_pem, openssl::ssl::SslFiletype::PEM)?;
-    ssl_connector_builder.set_certificate_chain_file(cert_pem)?;
-    Ok(ssl_connector_builder)
-}
+//// TELEGRAM_KEY_PEM, TELEGRAM_CERT_PEM
+//pub fn new_ssl_connector_builder(key_pem: &str, cert_pem: &str) -> Bresult<SslConnectorBuilder> {
+//    let mut ssl_connector_builder = SslConnector::builder(SslMethod::tls())?;
+//    ssl_connector_builder.set_private_key_file(key_pem, openssl::ssl::SslFiletype::PEM)?;
+//    ssl_connector_builder.set_certificate_chain_file(cert_pem)?;
+//    Ok(ssl_connector_builder)
+//}
 
 ////////////////////////////////////////
 
@@ -93,18 +86,11 @@ impl fmt::Debug for Telegram {
 }
 
 impl Telegram {
-    pub fn new(url_api: String, telegram_key: &str, telegram_cert: &str) -> Bresult<Self> {
-        let ssl_connector_builder = new_ssl_connector_builder(telegram_key, telegram_cert)?;
+    pub fn new(url_api: &str) -> Bresult<Self> {
         let client = rt::System::new("Telegram::new").block_on(async move {
-            Client::builder() // ClientBuilder
-                .connector(Connector::new()
-                    .ssl( ssl_connector_builder.build() )
-                    .timeout(Duration::new(90,0))
-                    .finish())
-                .timeout(std::time::Duration::new(90, 0))
-                .finish()
-        });
-        Ok(Telegram {client, url_api})
+            newHttpsClient()
+        })?;
+        Ok(Telegram {client, url_api:url_api.to_string()})
     }
     pub fn send_msg(obj: &mut impl MsgDetails) -> Bresult<()> {
         let chat_id = obj.at().to_string();
@@ -154,36 +140,26 @@ impl Telegram {
         let theurl =
             format!("{}/{}",
                 obj.telegram().url_api,
-                if obj.msg_id().is_some() { "editmessagetext" } else { "sendmessage"} );
+                crate::IF!(obj.msg_id().is_some(), "editmessagetext", "sendmessage"));
 
         let clientRequest =
             obj.telegram().client
                 .get(theurl)
-                .header("User-Agent", "TMBot")
                 .query(&query)?;
 
         info!("{}", reqPretty(&clientRequest, &""));
 
-        let body = rt::System::new("tmbot").block_on(async move {
-            match clientRequest.send().await {
-                Ok(mut clientResponse) => {
-                    let body = clientResponse.body().await
-                        .as_deref()
-                        .map_err(|e|e.to_string())
-                        .and_then(|b|from_utf8(b)
-                            .map_err(|e|e.to_string()))
-                        .unwrap_or("?").to_string();
-                    info!("{}", resPretty(&clientResponse, &body));
-                    Ok(body)
-                }
-                Err(e) => Err(e.to_string()),
-            }
+        let body = rt::System::new("sendmsg").block_on(async move {
+            Bresult::Ok({
+                let mut resp = clientRequest.send().await?;
+                let body = from_utf8(&resp.body().await?)?.to_string();
+                info!("{}", resPretty(&resp, &body));
+                body
+            })
         })?;
 
         // Record new message id
         obj.set_msg_id(getin_i64(&serde_json::from_str(&body)?, "/result/message_id")?);
-
         Ok(())
     }
 }
-

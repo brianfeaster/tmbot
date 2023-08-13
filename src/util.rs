@@ -1,22 +1,40 @@
+pub use actix_web::{
+    client::{Client, ClientRequest, ClientResponse, Connector},
+    http::header::{self, HeaderMap},
+    web, HttpRequest,
+};
 pub use log::{error, info, warn};
+use openssl::ssl::{SslConnector, SslMethod};
 pub use regex::Regex;
 pub use serde_json::{json, Value};
 pub use std::{collections::HashMap, error::Error, str::from_utf8, thread, time::Duration};
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Types
+// Types
 
 pub type Bresult<T> = Result<T, Box<dyn Error>>;
 
 ////////////////////////////////////////////////////////////////////////////////
-/// General Logging
+// Useful
+
+pub fn sleep_secs(secs: f64) {
+    thread::sleep(Duration::from_millis( (secs*1000.0) as u64));
+}
+
+#[macro_export(local_inner_macros)]
+macro_rules! IF {
+    ($p:expr, $t:expr, $f:expr) => (if $p { $t } else { $f })
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Logging
 
 #[macro_export(local_inner_macros)]
 macro_rules! glog {
     ($arg:expr) => {
         match &$arg {
-            Ok(o)  => ::log::info!("{:?}", o),
-            Err(e) => ::log::error!("{:?}", e)
+            Ok(o)  => info!("{:?}", o),
+            Err(e) => error!("{:?}", e)
         }
     }
 }
@@ -25,8 +43,8 @@ macro_rules! glog {
 macro_rules! glogd {
     ($pre:expr, $arg:expr) => {
         match &$arg {
-            Ok(o)  => ::log::info!("{} => {:?}", $pre, o),
-            Err(e) => ::log::error!("{} => {:?}", $pre, e)
+            Ok(o)  => info!("{} => {:?}", $pre, o),
+            Err(e) => error!("{} => {:?}", $pre, e)
         }
     }
 }
@@ -39,9 +57,52 @@ macro_rules! fmthere {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-/// UTF-8
+// UTF-8
 
-fn n2heart2 (n :usize) -> String {
+pub const SAVE :&str = "\x1b7";
+pub const REST :&str = "\x1b8";
+
+pub const RST :&str = "\x1b[0m";
+pub const BLD :&str = "\x1b[1m";
+pub const NRM :&str = "\x1b[22m";
+
+pub const BLK :&str = "\x1b[30m";
+pub const RED :&str = "\x1b[31m";
+pub const GRN :&str = "\x1b[32m";
+pub const YEL :&str = "\x1b[33m";
+pub const BLU :&str = "\x1b[34m";
+pub const MAG :&str = "\x1b[35m";
+pub const CYN :&str = "\x1b[36m";
+pub const GRY :&str = "\x1b[37m";
+
+pub const BLD_BLK :&str = "\x1b[1;30m";
+pub const BLD_RED :&str = "\x1b[1;31m";
+pub const BLD_GRN :&str = "\x1b[1;32m";
+pub const BLD_YEL :&str = "\x1b[1;33m";
+pub const BLD_BLU :&str = "\x1b[1;34m";
+pub const BLD_MAG :&str = "\x1b[1;35m";
+pub const BLD_CYN :&str = "\x1b[1;36m";
+pub const BLD_GRY :&str = "\x1b[1;37m";
+
+pub const B_BLK :&str = "\x1b[40m";
+pub const B_RED :&str = "\x1b[41m";
+pub const B_GRN :&str = "\x1b[42m";
+pub const B_YEL :&str = "\x1b[43m";
+pub const B_BLU :&str = "\x1b[44m";
+pub const B_MAG :&str = "\x1b[45m";
+pub const B_CYN :&str = "\x1b[46m";
+pub const B_GRY :&str = "\x1b[47m";
+
+pub const B_BLD_BLK :&str = "\x1b[100m";
+pub const B_BLD_RED :&str = "\x1b[101m";
+pub const B_BLD_GRN :&str = "\x1b[102m";
+pub const B_BLD_YEL :&str = "\x1b[103m";
+pub const B_BLD_BLU :&str = "\x1b[104m";
+pub const B_BLD_MAG :&str = "\x1b[105m";
+pub const B_BLD_CYN :&str = "\x1b[106m";
+pub const B_BLD_GRY :&str = "\x1b[107m";
+
+pub fn n2heart2 (n :usize) -> String {
     match n%2 {
         0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
         1 => from_utf8(b"\xF0\x9F\x92\x94"), // red broken heart
@@ -51,7 +112,7 @@ fn n2heart2 (n :usize) -> String {
     .unwrap_or("?").to_string()
 }
 
-fn n2heart13 (n :usize) -> String {
+pub fn n2heart13 (n :usize) -> String {
     match n%13 {
         0 => from_utf8(b"\xF0\x9F\x96\xA4"), // black heart
         1 => from_utf8(b"\xE2\x9D\xA4\xEF\xB8\x8F"), // red heart
@@ -100,10 +161,7 @@ pub fn bytes2json(body: &[u8]) -> Bresult<Value> {
 }
 
 pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
-    match v.pointer(ptr) {
-        Some(v) => &v,
-        None => &Value::Null
-    }
+    v.pointer(ptr).unwrap_or(&Value::Null)
 }
 
 pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
@@ -137,7 +195,7 @@ pub fn getin_string(json: &Value, ptr: &str) -> Result<String, String> {
         v.as_str()
         .map_or(
             v.to_string(),
-            |v| v.to_string()))
+            |vs| vs.to_string()))
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -220,13 +278,59 @@ impl ReAs for Vec<Option<String>> {
 
 
 ////////////////////////////////////////////////////////////////////////////////
-/// Useful
+// Http
 
-pub fn sleep_secs(secs: f64) {
-    thread::sleep(Duration::from_millis( (secs*1000.0) as u64));
+// ClientBuilder -> Client -> SendClientRequest -> ClientResponse
+pub fn newHttpsClient() -> Bresult<Client> {
+    Ok(Client::builder()
+        .connector(Connector::new()
+            .ssl(SslConnector::builder(SslMethod::tls())?.build())
+            .timeout(std::time::Duration::new(60, 0))
+            .finish())
+        .header(header::USER_AGENT, "TMBot")
+        .timeout(std::time::Duration::new(60, 0))
+        .finish())
 }
 
-#[macro_export(local_inner_macros)]
-macro_rules! IF {
-    ($p:expr, $t:expr, $f:expr) => (if $p { $t } else { $f })
+pub fn headersPretty(hm: &HeaderMap) -> String {
+    hm.iter()
+    .map(|(k,v)| format!("{RST} {k} {BLD_BLK}{}", v.to_str().unwrap_or("?")))
+    .collect::<Vec<String>>()
+    .join("") + RST
+}
+
+pub fn httpReqPretty(req: &HttpRequest, body: &web::Bytes) -> String {
+    format!("{BLD_MAG}{} {:?} {RST}{YEL}{B_BLD_BLK}{}{}",
+        req.peer_addr()
+            .map(|sa| sa.ip().to_string())
+            .as_deref()
+            .unwrap_or("?"),
+        req.uri(),
+        from_utf8(body)
+            .map(|s| s.to_string().replace("\n", &format!("{SAVE}\x08{B_YEL} {REST}")))
+            .unwrap_or_else(|_|format!("{:?}", body)),
+        headersPretty(req.headers())
+    )
+}
+
+pub fn reqPretty(req: &ClientRequest, text: &str) -> String {
+    format!("<= {BLU}{:?} {} {} {YEL}{B_BLD_BLK}{}{}",
+        req.get_version(),
+        req.get_method(),
+        req.get_uri()
+            .to_string()
+            .replace("/", &format!("{BLD}/{NRM}"))
+            .replace("?", &format!("{BLD}?{NRM}"))
+            .replace("=", &format!("{BLD}={NRM}"))
+            .replace("&", &format!("{BLD}&{NRM}")),
+        text.replace("\n", &format!(" {SAVE}\x08{B_YEL} {REST}")),
+        headersPretty(&req.headers()))
+}
+
+pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
+    format!("=> {BLU}{:?} {} {YEL}{B_BLD_BLK}{}{}",
+        res.version(),
+        res.status(),
+        body.replace("\n", " {SAVE}\x08{B_YEL} {REST}"),
+        headersPretty(&res.headers()))
 }

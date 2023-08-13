@@ -1,9 +1,6 @@
-use ::std::{
-    fmt,
-    collections::{HashMap}};
-pub use sqlite::{Statement};
-//use crate::*;
 use crate::util::Bresult;
+pub use sqlite::Statement;
+use std::collections::HashMap;
 
 ////////////////////////////////////////////////////////////////////////////////
 pub struct Connection {
@@ -19,8 +16,8 @@ impl Connection {
     }
 }
 
-impl fmt::Debug for Connection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("Connection{{{:?}}}", self.filename))
     }
 }
@@ -30,7 +27,7 @@ impl fmt::Debug for Connection {
 #[macro_export]
 macro_rules! getsql {
     ( $conn:expr, $sql:expr ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
-        info!("SQLite <= \x1b[1;36m{}", $sql);
+        info!("SQLite <= {BLD_CYN}{}", $sql);
         let statement = $conn.conn.prepare( $sql )?;
         let col_names :Vec<String> =
             Statement::column_names(&statement).into_iter().map( String::from ).collect();
@@ -41,12 +38,12 @@ macro_rules! getsql {
                 .map( |(i, v)| (col_names[i].clone(), v.clone()) )
                 .collect() )
         }
-        info!("SQLiteRaw => \x1b[36m{:?}", rows);
-        Bresult::Ok(rows)
+        info!("SQLiteRaw => {CYN}{:?}", rows);
+        Ok(rows)
     })()};
 
     ( $conn:expr, $sql:expr, $($v:expr),* ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
-        info!("SQLite \x1b[1;36m{}", $sql);
+        info!("SQLite {BLD_CYN}{}", $sql);
         let mut statement = $conn.conn.prepare( $sql )?;
         let mut placeholderidx = 0;
         let mut info = String::new();
@@ -55,7 +52,7 @@ macro_rules! getsql {
             info.push_str(&format!(" {}:{}", placeholderidx, $v));
             statement.bind(placeholderidx, $v)?;
         )*
-        info!("SQLite\x1b[36m{}", info);
+        info!("SQLite{CYN}{}", info);
         let col_names :Vec<String> =
             Statement::column_names(&statement).into_iter().map( String::from ).collect();
         let mut cursor = Statement::into_cursor(statement);
@@ -65,8 +62,8 @@ macro_rules! getsql {
                 .map( |(i, v)| (col_names[i].clone(), v.clone()) )
                 .collect() )
         }
-        info!("SQLite => \x1b[36m{:?}", rows);
-        Bresult::Ok(rows)
+        info!("SQLite => {CYN}{:?}", rows);
+        Ok(rows)
     })() };
 }
 
@@ -87,13 +84,12 @@ macro_rules! getsqlquiet {
                 .map( |(i, v)| (col_names[i].clone(), v.clone()) )
                 .collect() )
         }
-        Bresult::Ok(rows)
+        Ok(rows)
     })()};
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 // Primitive traits for accessing row values
-////////////////////////////////////////////////////////////////////////////////
 
 pub trait RowGet  {
     fn get_i64 (&self, key:&str) -> Bresult<i64>;
