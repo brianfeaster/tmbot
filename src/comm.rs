@@ -1,7 +1,6 @@
 //! # Telegram Communication
 
 use crate::util::*;
-use actix_web::rt;
 use openssl::ssl::{
     NameType, SniError, SslAcceptor, SslAcceptorBuilder, SslAlert, SslFiletype, SslMethod, SslRef
 };
@@ -87,12 +86,10 @@ impl fmt::Debug for Telegram {
 
 impl Telegram {
     pub fn new(url_api: &str) -> Bresult<Self> {
-        let client = rt::System::new("Telegram::new").block_on(async move {
-            newHttpsClient()
-        })?;
+        let client = newHttpsClient()?;
         Ok(Telegram {client, url_api:url_api.to_string()})
     }
-    pub fn send_msg(obj: &mut impl MsgDetails) -> Bresult<()> {
+    pub async fn send_msg(obj: &mut impl MsgDetails) -> Bresult<()> {
         let chat_id = obj.at().to_string();
         let text = if obj.markdown() {
             obj.msg() // Quick and dirty uni/url decode
@@ -149,14 +146,9 @@ impl Telegram {
 
         info!("{}", reqPretty(&clientRequest, &""));
 
-        let body = rt::System::new("sendmsg").block_on(async move {
-            Bresult::Ok({
-                let mut resp = clientRequest.send().await?;
-                let body = from_utf8(&resp.body().await?)?.to_string();
-                info!("{}", resPretty(&resp, &body));
-                body
-            })
-        })?;
+        let mut resp = clientRequest.send().await?;
+        let body = from_utf8(&resp.body().await?)?.to_string();
+        info!("{}", resPretty(&resp, &body));
 
         // Record new message id
         obj.set_msg_id(getin_i64(&serde_json::from_str(&body)?, "/result/message_id")?);

@@ -1,8 +1,8 @@
 pub use actix_web::{
-    client::{Client, ClientRequest, ClientResponse, Connector},
     http::header::{self, HeaderMap},
     web, HttpRequest,
 };
+pub use awc::{ClientBuilder, Client, ClientRequest, ClientResponse, Connector};
 pub use log::{error, info, warn};
 use openssl::ssl::{SslConnector, SslMethod};
 pub use regex::Regex;
@@ -21,7 +21,7 @@ pub fn sleep_secs(secs: f64) {
     thread::sleep(Duration::from_millis( (secs*1000.0) as u64));
 }
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! IF {
     ($p:expr, $t:expr, $f:expr) => (if $p { $t } else { $f })
 }
@@ -29,7 +29,7 @@ macro_rules! IF {
 ////////////////////////////////////////////////////////////////////////////////
 // Logging
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! glog {
     ($arg:expr) => {
         match &$arg {
@@ -39,17 +39,17 @@ macro_rules! glog {
     }
 }
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! glogd {
     ($pre:expr, $arg:expr) => {
         match &$arg {
-            Ok(o)  => info!("{} => {:?}", $pre, o),
-            Err(e) => error!("{} => {:?}", $pre, e)
+            Ok(o)  => info!("{} -> {:?}", format!($pre), o),
+            Err(e) => error!("{} -> {:?}", format!($pre), e)
         }
     }
 }
 
-#[macro_export(local_inner_macros)]
+#[macro_export]
 macro_rules! fmthere {
     ($s:expr) => {
         std::format!("{}{} {}", std::module_path!(), std::line!(), $s)
@@ -282,12 +282,11 @@ impl ReAs for Vec<Option<String>> {
 
 // ClientBuilder -> Client -> SendClientRequest -> ClientResponse
 pub fn newHttpsClient() -> Bresult<Client> {
-    Ok(Client::builder()
+    Ok(ClientBuilder::new()
         .connector(Connector::new()
-            .ssl(SslConnector::builder(SslMethod::tls())?.build())
-            .timeout(std::time::Duration::new(60, 0))
-            .finish())
-        .header(header::USER_AGENT, "TMBot")
+            .openssl(SslConnector::builder(SslMethod::tls())?.build())
+            .timeout(std::time::Duration::new(60, 0)))
+        .add_default_header((header::USER_AGENT, "TMBot"))
         .timeout(std::time::Duration::new(60, 0))
         .finish())
 }
@@ -333,4 +332,26 @@ pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
         res.status(),
         body.replace("\n", " {SAVE}\x08{B_YEL} {REST}"),
         headersPretty(&res.headers()))
+}
+
+#[macro_export]
+macro_rules! httpResponseOk {
+    () => {{
+        let r = HttpResponse::Ok().finish();
+        info!("{BLD_MAG}{}{}",
+            r.status(),
+            headersPretty(r.headers()));
+        r
+    }};
+}
+
+#[macro_export]
+macro_rules! httpResponseNotFound {
+    () => {{
+        let r = HttpResponse::NotFound().finish();
+        error!("{BLD_MAG}{}{}\n",
+            r.status(),
+            headersPretty(r.headers()));
+        r
+    }};
 }

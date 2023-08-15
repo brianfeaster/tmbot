@@ -1,17 +1,14 @@
 use crate::util::*;
-use actix_web::rt;
 
-pub fn get_definition (word: &str) -> Bresult<Vec<String>> {
+pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
 
     let word2 = word.to_string();
-    let body = rt::System::new("postHttpsJson").block_on(async move { Bresult::Ok(
-        newHttpsClient()?
-            .get("https://www.onelook.com/")
-            .query(&[["q",&word2]])?
-            .send().await?
-            .body().await
-            .map_err(|e| format!(r#"get_definition http body {:?} for {:?}"#, e, word2))?
-    )})?;
+    let body = newHttpsClient()?
+        .get("https://www.onelook.com/")
+        .query(&[["q",&word2]])?
+        .send().await?
+        .body().await
+        .map_err(|e| format!(r#"get_definition http body {:?} for {:?}"#, e, word2))?;
 
     let domstr = from_utf8(&body)
         .map_err(|e| format!(r#"get_definition http from_utf8 {:?} for {:?}"#, e, word))?;
@@ -35,23 +32,21 @@ pub fn get_definition (word: &str) -> Bresult<Vec<String>> {
     Ok(lst)
 }
 
-pub fn get_syns (word: &str) -> Bresult<Vec<String>> {
+pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {
 
     let word2 = word.to_string();
-    let body = rt::System::new("postHttpsJson").block_on(async move { Bresult::Ok(
-        newHttpsClient()?
-            .get("https://www.onelook.com/")
-            .query(&[["clue", &word2]])?
-            .send().await?
-            .body().await
-            .map_err(|e| format!(r#"get_syns http body {:?} for {:?}"#, e, word2))?
-    )})?;
+    let body = newHttpsClient()?
+        .get("https://api.onelook.com/words")
+        .query(&[["max", "10"],["ml", &word2]])?
+        .send().await?
+        .body().await
+        .map_err(|e| format!(r#"get_syns http body {:?} for {:?}"#, e, word2))?;
 
 
     let domstr = from_utf8(&body)
         .map_err(|e|format!(r#"get_syns http body2str {:?} for {:?}"#, e, word))?;
 
-    Ok( Regex::new("w=([^:&\"<>]+)")?
+    Ok( Regex::new(r#""word":"(([^\\"]|\\\\|\\")+)""#)?
         .captures_iter(&domstr)
         .map( |cap| cap[1].to_string() )
         .collect::<Vec<String>>() )
@@ -81,7 +76,7 @@ pub async fn _get_ticker_raw_2 (ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
     let body = newHttpsClient()?
         .get("https://query1.finance.yahoo.com/v7/finance/quote".to_string())
-        .header("Referer", "https://finance.yahoo.com/__finStreamer-worker.js")
+        .insert_header(("Referer", "https://finance.yahoo.com/__finStreamer-worker.js"))
         .query(&[["symbols", ticker],["events","split"]]).unwrap()
         .send().await?
         .body().await;
@@ -93,22 +88,22 @@ pub async fn _get_ticker_raw_2 (ticker: &str) -> Bresult<Value> {
 }
 */
 
-pub fn get_ticker_raw (ticker: &str) -> Bresult<Value> {
+pub async fn get_ticker_raw(ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
     let client = newHttpsClient()?;
     let ticker2 = ticker.to_string();
-    let rbody = rt::System::new("getTickerRaw").block_on( async move {
+    let rbody =
         match client
-        .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker2) )
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36")
-        .send().await {
+            .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker2) )
+            .insert_header(("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"))
+            .send().await
+        {
             Ok(mut clientResponse) => match clientResponse.body().await {
                 Ok(resp) => Ok(resp),
                 err => Err(format!("{:?}", err))
             }
             err => Err(format!("{:?}", err))
-        }
-    });
+        };
 
     let body = rbody.or_else( |r| Err(format!("get_ticker_raw for {:?}  {:?}", ticker, r)) )?;
     let jsonstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_raw http body2str {:?} {:?}"#, ticker, r)) )?;
@@ -125,43 +120,37 @@ fn normalizeUrl (url: &str) -> String {
     .unwrap_or(url.into())
 }
 
-pub fn httpsget(url: &str) -> Bresult<String> {
+pub async fn httpsget(url: &str) -> Bresult<String> {
     let url = normalizeUrl(url);
-    rt::System::new("getHttpsRaw").block_on(async move {
-        let clientRequest = newHttpsClient()?.get(&url);
-        info!("{}", reqPretty(&clientRequest, ""));
-        let mut clientResponse = clientRequest.send().await?;
-        let body = from_utf8(&clientResponse.body().await?)?.to_string();
-        info!("{}", resPretty(&clientResponse, &body));
-        Ok(body)
-    })
+    let clientRequest = newHttpsClient()?.get(&url);
+    info!("{}", reqPretty(&clientRequest, ""));
+    let mut clientResponse = clientRequest.send().await?;
+    let body = from_utf8(&clientResponse.body().await?)?.to_string();
+    info!("{}", resPretty(&clientResponse, &body));
+    Ok(body)
 }
 
-pub fn httpsbody(url: &str, txt: String) -> Bresult<String> {
+pub async fn httpsbody(url: &str, txt: String) -> Bresult<String> {
     let url = normalizeUrl(url);
-    rt::System::new("postHttpsText").block_on(async move {
-        let clientRequest = newHttpsClient()?.post(&url);
-        info!("{}", reqPretty(&clientRequest, &txt));
-        let mut clientResponse = clientRequest.send_body(txt).await?;
-        let body = from_utf8(&clientResponse.body().await?)?.to_string();
-        info!("{}", resPretty(&clientResponse, &body));
-        Ok(body)
-    })
+    let clientRequest = newHttpsClient()?.post(&url);
+    info!("{}", reqPretty(&clientRequest, &txt));
+    let mut clientResponse = clientRequest.send_body(txt).await?;
+    let body = from_utf8(&clientResponse.body().await?)?.to_string();
+    info!("{}", resPretty(&clientResponse, &body));
+    Ok(body)
 }
 
-pub fn httpsjson (url: &str, jsontxt: String) -> Bresult<String> {
+pub async fn httpsjson (url: &str, jsontxt: String) -> Bresult<String> {
     let url = normalizeUrl(url);
-    rt::System::new("postHttpsJson").block_on(async move {
-        let clientRequest = newHttpsClient()?.post(url);
-        info!("{}", reqPretty(&clientRequest, &jsontxt));
-        let mut clientResponse =
-            if jsontxt == "" {
-                clientRequest.header("Content-Type", "application/json").send()
-            } else {
-                clientRequest.send_json(&bytes2json(jsontxt.as_ref())?)
-            }.await?;
-        let body = from_utf8(&clientResponse.body().await?)?.to_string();
-        info!("{}", resPretty(&clientResponse, &body));
-        Ok(body)
-    })
+    let clientRequest = newHttpsClient()?
+        .post(url)
+        .insert_header((header::CONTENT_TYPE, "application/json"));
+    info!("{}", reqPretty(&clientRequest, &jsontxt));
+    let mut clientResponse = crate::IF!(jsontxt == "",
+        clientRequest.send(),
+        clientRequest.send_json(&bytes2json(jsontxt.as_ref())?)
+    ).await?;
+    let body = from_utf8(&clientResponse.body().await?)?.to_string();
+    info!("{}", resPretty(&clientResponse, &body));
+    Ok(body)
 }

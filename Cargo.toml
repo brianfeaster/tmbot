@@ -1,6 +1,6 @@
 [package]
 name = "tmbot"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["b f <brianf@geemale.kom>"]
 edition = "2018"
 
@@ -11,18 +11,14 @@ lto = "off"
 [dependencies]
 log = "*"
 env_logger = "*"
-regex = "*"
-tokio = { version = "0.2", features = ["full"] }
-actix = "0.10"
-actix-tls = "2.*"
-actix-web = { version = "3", features = ["openssl"] }
-actix-web-actors = "3"
-actix-http = "2.2.1"
-openssl = { version = "0.10" }
-serde_json = "*"
-#serde_urlencoded = "*"
-sqlite = "*"
-datetime = "*"
-awc = "*"
 rand = "*"
-futures = "*"
+datetime = "*"
+regex = "*"
+serde_json = "*"
+sqlite = "*"
+openssl = "*"
+actix = "*"
+awc = { version = "*", features = ["openssl"] }
+actix-web = { version = "*", features = ["openssl"] }
+actix-web-actors = "*"
+percent-encoding = "*"
