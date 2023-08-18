@@ -3385,7 +3385,7 @@ pub fn main_launch() -> Bresult<()> {
         //glogd!("websocket()", _main_websocket(env.clone()));
         //glogd!("websocketssl()", _main_websocket_ssl(env.clone()));
         glogd!("start_scheduler()", start_scheduler(env.clone()));
-        glogd!("start_tmlog()", crate::tmlog::start_tmlog(env.clone()));
+        glogd!("start_tmlog()", tmlog::start(env.clone()));
         glogd!("start_tmbot()", start_tmbot(env));
     } else { // Playground
        info!("{:?}", argv);

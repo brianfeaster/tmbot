@@ -1,9 +1,7 @@
-use crate::{
-    comm, glogd, httpResponseNotFound, httpResponseOk, rt, util::*, App, CmdStruct, Env,
-    HttpResponse, HttpServer, Instant, IF,
-};
+//use crate::{comm, glogd, httpResponseNotFound, httpResponseOk, rt, util::*, App, CmdStruct, Env, HttpResponse, HttpServer, Instant, IF};
+use crate::*;
 
-fn header_tmlog() {
+fn header() {
     println!();
     info!("{RST}{RED}{B_BLK} _____ __  __ _          __ _™");
     info!("{RST}{YEL}{B_BLK}|_   _|  \\/  | |    ___ / _` |");
@@ -13,7 +11,7 @@ fn header_tmlog() {
 }
 
 fn tmlog(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
-    header_tmlog();
+    header();
     info!("{}", httpReqPretty(&req, &body));
     let capv = must_regex_to_vec(r#"(?x) ^ /(-?\d+) (/(-?\d+))? (/(.*))? $ "#, &req.path())?;
     let env = req.app_data::<web::Data<Env>>().ok_or("tmlog app_data")?.get_ref().clone();
@@ -35,7 +33,7 @@ async fn handler_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     IF!(res.is_ok(), httpResponseOk!(), httpResponseNotFound!())
 }
 
-pub fn start_tmlog(env: Env) -> Bresult<()> {
+pub fn start(env: Env) -> Bresult<()> {
     let ssl_acceptor_builder = {
         let envstruct = env.lock().unwrap();
         comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
@@ -55,4 +53,3 @@ pub fn start_tmlog(env: Env) -> Bresult<()> {
 
     Ok(())
 }
-

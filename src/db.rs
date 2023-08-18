@@ -1,5 +1,5 @@
 use crate::util::Bresult;
-pub use sqlite::{Cursor, Statement};
+pub use sqlite::{Statement};
 use std::collections::HashMap;
 
 ////////////////////////////////////////////////////////////////////////////////

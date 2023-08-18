@@ -167,7 +167,7 @@ pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
 pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
     getin(json, ptr)
     .as_i64()
-    .ok_or( format!("Unable to parse {:?} as_i64", ptr) )
+    .ok_or( format!("getin_i64 {}", ptr) )
 }
 
 pub fn getin_i64_or(default: i64, json: &Value, ptr :&str) -> i64 {
@@ -177,20 +177,20 @@ pub fn getin_i64_or(default: i64, json: &Value, ptr :&str) -> i64 {
 pub fn getin_f64(json: &Value, ptr: &str) -> Result<f64, String> {
     getin(json, ptr)
     .as_f64()
-    .ok_or( format!("Unable to parse {:?} as_f64", ptr) )
+    .ok_or( format!("getin_f64 {}", ptr) )
 }
 
 pub fn getin_str(json: &Value, ptr: &str) -> Result<String, String> {
     getin(json, ptr)
     .as_str()
-    .map_or(
-        Err(format!("Unable to parse {:?} as_str", ptr)),
-        |j| Ok(j.to_string()) )
+    .map_or_else(
+        || Err(format!("getin_str {}", ptr)),
+        |j| Ok(j.to_string()))
 }
 
 pub fn getin_string(json: &Value, ptr: &str) -> Result<String, String> {
     json.pointer(ptr)
-    .ok_or(format!("json: bad path {}", ptr))
+    .ok_or(format!("getin_string {}", ptr))
     .map(|v|
         v.as_str()
         .map_or(
@@ -306,7 +306,7 @@ pub fn httpReqPretty(req: &HttpRequest, body: &web::Bytes) -> String {
             .unwrap_or("?"),
         req.uri(),
         from_utf8(body)
-            .map(|s| s.to_string().replace("\n", &format!("{SAVE}\x08{B_YEL} {REST}")))
+            .map(|s| s.to_string().replace("\n", &format!(" {SAVE}\x08{B_YEL} {REST}")))
             .unwrap_or_else(|_|format!("{:?}", body)),
         headersPretty(req.headers())
     )
