@@ -352,6 +352,7 @@ pub struct EnvStruct {
     dst_hours_adjust: i8,     // 1 = DST, 0 = ST
     time_scheduler:   i64,    // Time the scheduler last ran
     entitys:          HashMap<i64, Entity>,
+    data:             Value
 }
 
 type Env = Arc<Mutex<EnvStruct>>;
@@ -452,6 +453,7 @@ fn new(mut argv: std::env::Args) -> Bresult<Env> {
         quote_delay_secs:   QUOTE_DELAY_SECS,
         time_scheduler:     Instant::now().seconds(),
         entitys,
+        data: json!({})
     }.into())
 } }
 
@@ -468,8 +470,8 @@ struct CmdStruct { // Represents an incoming Telegram message and session/servic
     at: i64, // Channel (group/entity) msg sent to     message.chat.id
     to: i64, // Entity replied to ('at' if non-reply)  message.reply_to_message.from.id
     topic: String, // topic id
-    //message_id: i64,  // Message's unique id in channel.  TODO map this to msg_id so edits are reflected to the same response msg.
     message: String, // The incoming message
+    inline: bool, // inline_query message type?
     id_level: i64, // Echo level [0,1,2] for each id.  Higher can't write to lower.  Generally kept at 2 for most people and bots.
     at_level: i64, // Lowering channel's echo level results in less chatter, assuming speaker echo level is larger.
     // Telegram outgoing/response message details
@@ -485,11 +487,10 @@ impl CmdStruct {
         let edited_message = &json["edited_message"];
         let message = if edited_message.is_object() { edited_message } else { &json["message"] };
         let now = Instant::now().seconds();
-        //let message_id = getin_i64(message, "/message_id").unwrap_or(0);
         if inline_query.is_object() { // Inline queries are DMs so no other associated channels
             let id = getin_i64(inline_query, "/from/id")?;
             let message = getin_str(inline_query, "/query")?;
-            CmdStruct::new(env, now, id, id, id, "".into(), message)
+            CmdStruct::new(env, now, id, id, id, "".into(), message, true)
         } else if message.is_object() { // An incoming message could be a reply or normal.
             let id = getin_i64(message, "/from/id")?;
             let at = getin_i64(message, "/chat/id")?;
@@ -501,10 +502,10 @@ impl CmdStruct {
                     getin_string(message, "/message_thread_id")?
                 };
             let message = getin_str(message, "/text")?;
-            CmdStruct::new(env, now, id, at, to, topic, message)
+            CmdStruct::new(env, now, id, at, to, topic, message, false)
         } else { Err("Invalid messenger JSON")? }
     }
-    fn new(env: Env, now:i64, id:i64, at:i64, to:i64, topic:String, message:String) -> Bresult<CmdStruct> {
+    fn new(env: Env, now:i64, id:i64, at:i64, to:i64, topic:String, message:String, inline: bool) -> Bresult<CmdStruct> {
         let (telegram, id_level, at_level) =  {
             let envstruct = env.lock().map_err(|e| <std::sync::PoisonError<_> as std::string::ToString>::to_string(&e))?;
             ( Telegram::new(&envstruct.url_api)?,
@@ -518,7 +519,7 @@ impl CmdStruct {
             markdown: false,
             dm: None,
             msg_id: None,
-            msg: String::new()
+            msg: String::new(), inline
         })
     }
 
@@ -546,6 +547,10 @@ impl CmdStruct {
     // Edit last message (last msg_id is always cached)
     async fn edit_msg (&mut self) -> Bresult<()> {
         Telegram::send_msg(self).await
+    }
+    // Delete mssage
+    async fn _del_msg (&mut self) -> Bresult<()> {
+        Telegram::del_msg(self).await
     }
     // Send new message to self (TODO: implement edit message to self?)
     async fn send_msg_id (&mut self) -> Bresult<()> {
@@ -2700,11 +2705,64 @@ async fn do_schedule (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
     Ok("COMPLETED.")
 }
 
-async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
-    let expr = must_regex_to_vec(r"^(={1,3}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
+async fn do_map (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let mtch = if cmdstruct.inline { must_regex_to_vec(r#"(?s)(.*)"#, &cmdstruct.message)? } else { return Err("".into()); };
+    let msg = mtch.as_string(1)?; 
+    let k = msg.chars().last().unwrap_or('?');
 
+    let (s, msgid, mutated) = {
+        let mut env = getenvstruct!(cmdstruct)?;
+
+        if env.data["map"].is_null()  {
+            env.data["map"] = json!({"field":[
+                [".",".",".",".","."],
+                [".",".",".",".","."],
+                [".",".",".",".","."],
+                [".",".",".",".","."],
+            ], "x":0, "y":0, "msgid":null});
+        };
+
+        let map = &mut env.data["map"];
+        let oy = getin_i64(map, "/y")? as usize;
+        let ox = getin_i64(map, "/x")? as usize;
+        map["field"][oy][ox] = json!(",");
+
+        let y = (oy + match k { 'j' => 1, 'k' => 3, _ => 0}) % 4;
+        let x = (ox + match k { 'l' => 1, 'h' => 4, _ => 0}) % 5;
+        map["field"][y][x] = json!("@");
+        map["y"] = y.into();
+        map["x"] = x.into();
+    
+        let s = getin(map, "/field").as_array().unwrap_or(&Vec::new()).iter()
+            .map(|row|
+                row.as_array().unwrap_or(&Vec::new()).iter()
+                .map(|s| s.as_str().unwrap_or("?"))
+                .collect::<Vec<&str>>().join(""))
+            .collect::<Vec<String>>().join("\n");
+
+        (format!("```text\n{}```", s), getin_i64(map, "/msgid").ok(), oy != y || ox != x)
+    };
+
+    if mutated {
+        cmdstruct.at = -509096909;
+        cmdstruct.msg_id = msgid;
+
+        if cmdstruct.markdown().set_msg(&s).edit_msg().await.is_err() {
+            cmdstruct.markdown().set_msg(&s).send_msg().await?;
+        }
+
+        getenvstruct!(cmdstruct)?.data["map"]["msgid"]
+            = Value::from(cmdstruct.msg_id);
+    }
+
+    Ok("COMPLETED.")
+}
+
+async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
+    let cmd = must_regex_to_vec(r"^(={1,2}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &cmdstruct.message)?;
+    let expr = cmd.as_string(2)?;
     let mut stack = Vec::new();
-    for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr.as_string(2)?) {
+    for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr) {
         if let Some(num) = toks.get(1) { // Push a number
             stack.push(num.as_str().parse::<f64>()?)
         } else if let Some(op) = toks.get(4) { // Compute a mathematical operation on top most numbers in stack
@@ -2724,14 +2782,14 @@ async fn do_rpn (cmdstruct: &mut CmdStruct) -> Bresult<&str> {
                 "/" => stack.push(a/b),
                 _ => ()
             }
-        } else if let Some(op) = toks.get(5) {
+        } else if let Some(op) = toks.get(5) { // Push value/index number of unicode character
             stack.push(
                 op.as_str().chars().next().unwrap_or('\0')
                 as u32 as f64);
         }
         cmdstruct.set_msg( &stack.iter().map( |f| f.to_string() ).collect::<Vec<String>>().join(" ") ).edit_msg().await?;
     }
-    if expr.as_string(1)? == "==" {
+    if cmd.as_string(1)? == "==" {
         let v = stack[0] as u32;
         cmdstruct.push_msg(
             &format!(r#" "{}" 0x{:x} {:x?}"#,
@@ -2929,6 +2987,7 @@ async fn do_most (cmdstruct: &mut CmdStruct) {
     dolog!(do_fmt(cmdstruct));
     dolog!(do_rebalance(cmdstruct));
     dolog!(do_rpn(cmdstruct));
+    dolog!(do_map(cmdstruct));
     dolog!(do_alias(cmdstruct));
     dolog!(do_wordle(cmdstruct));
 }
@@ -2966,7 +3025,7 @@ async fn do_scheduled_job(
         CmdStruct::new(
             env.clone(), now,
             job.get_i64("id")?, at, at, job.to_string("topic")?,
-            job.get_string("cmd")?)?;
+            job.get_string("cmd")?, false)?;
     let days = job.get_str("days")?;
     let day_now = match LocalDateTime::at(now).weekday() {
         Monday => "m", Tuesday => "t", Wednesday => "w", Thursday => "h",
@@ -3093,7 +3152,7 @@ async fn _web_login (env: Env, name: &str) -> Bresult<i64> {
     warn!("web_login id = {:?}", id);
     //thread::Builder::new().name("webLogin".into()).spawn( move || {
         let res =
-                match CmdStruct::new(env, 0, id, id, id, "".into(), "".into()) {
+                match CmdStruct::new(env, 0, id, id, id, "".into(), "".into(), false) {
                     Ok(mut cmdstruct) => {
                         let pw = ::rand::random::<usize>();
                         match cmdstruct.env.try_lock() {
@@ -3299,7 +3358,7 @@ async fn _ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpRespo
     let env :Env = req.app_data::<web::Data<Env>>().unwrap().get_ref().clone();
         
 
-    let cmdstruct = match CmdStruct::new(env, 0, 0, 0, 0, "".into(), "".into()) {
+    let cmdstruct = match CmdStruct::new(env, 0, 0, 0, 0, "".into(), "".into(), false) {
         Ok(cmdstruct) => cmdstruct,
         e => { glog!(e); return Err(actix_web::error::ErrorNotFound("")) } // TODO: Return an error so the websocket connection closes?
     };
@@ -3388,7 +3447,15 @@ pub fn main_launch() -> Bresult<()> {
         glogd!("start_tmlog()", tmlog::start(env.clone()));
         glogd!("start_tmbot()", start_tmbot(env));
     } else { // Playground
-       info!("{:?}", argv);
+       let mut j = json!({"a":null});
+       info!("{:?}", j);
+
+       j["aa"]["bb"] = json!(",");
+       info!("{:?}", j);
+
+       let v :Option<isize> = None;
+       j["a"] = Value::from(v);
+       info!("{:?}", j);
     }
     Ok(())
 }

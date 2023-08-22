@@ -164,6 +164,10 @@ pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
     v.pointer(ptr).unwrap_or(&Value::Null)
 }
 
+pub fn getinmut<'a>(v: &'a mut Value, ptr: &str) -> Result<&'a mut Value, String> {
+    v.pointer_mut(ptr).ok_or(format!("getinmut {}", ptr))
+}
+
 pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
     getin(json, ptr)
     .as_i64()

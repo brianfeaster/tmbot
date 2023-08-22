@@ -20,7 +20,7 @@ fn tmlog(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     let message =
         capv.as_str(5).unwrap_or("").split('/').collect::<Vec<_>>().join(" ")
         + from_utf8(&body)?;
-    let mut cmdstruct = CmdStruct::new(env, Instant::now().seconds(), 0, at, 0, topic, "".into())?;
+    let mut cmdstruct = CmdStruct::new(env, Instant::now().seconds(), 0, at, 0, topic, "".into(), false)?;
     rt::spawn( async move {
         glogd!("--tmlog", cmdstruct.push_msg(&message).send_msg().await)
     });

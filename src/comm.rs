@@ -154,4 +154,21 @@ impl Telegram {
         obj.set_msg_id(getin_i64(&serde_json::from_str(&body)?, "/result/message_id")?);
         Ok(())
     }
+    pub async fn del_msg(obj: &mut impl MsgDetails) -> Bresult<()> {
+        let chat_id = obj.at().to_string();
+        let edit_msg_id_str = obj.msg_id().ok_or("missing msg_id")?.to_string();
+
+        let clientRequest =
+            obj.telegram().client
+                .get(format!("{}/deleteMessage", obj.telegram().url_api))
+                .query(&vec![["chat_id", &chat_id], ["message_id", &edit_msg_id_str]])?;
+
+        info!("{}", reqPretty(&clientRequest, &""));
+
+        let mut resp = clientRequest.send().await?;
+        let body = from_utf8(&resp.body().await?)?.to_string();
+        info!("{}", resPretty(&resp, &body));
+
+        Ok(())
+    }
 }
