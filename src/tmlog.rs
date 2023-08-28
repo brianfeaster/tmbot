@@ -13,18 +13,21 @@ fn header() {
 fn tmlog(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     header();
     info!("{}", httpReqPretty(&req, &body));
+
     let capv = must_regex_to_vec(r#"(?x) ^ /(-?\d+) (/(-?\d+))? (/(.*))? $ "#, &req.path())?;
-    let env = req.app_data::<web::Data<Env>>().ok_or("tmlog app_data")?.get_ref().clone();
+
     let at    = capv.as_i64(1)?;
-    let topic = capv.as_str(3).unwrap_or("").to_string();
-    let message =
-        capv.as_str(5).unwrap_or("").split('/').collect::<Vec<_>>().join(" ")
-        + from_utf8(&body)?;
-    let mut cmdstruct = CmdStruct::new(env, Instant::now().seconds(), 0, at, 0, topic, "".into(), false)?;
-    rt::spawn( async move {
-        glogd!("--tmlog", cmdstruct.push_msg(&message).send_msg().await)
-    });
-    Ok(())
+    let topic = capv.as_string_or("", 3);
+
+    let urlPathAndBodyMessage =
+        capv.as_str_or("", 5).split('/').collect::<Vec<_>>().join(" ")
+        + trimmedQuotes(from_utf8(&body)?);
+
+    Env::new(req.app_data::<WebData>().ok_or("tmlog app_data")?.clone(),
+            Instant::now().seconds(),
+            0, at, 0, topic, "".into(), false)?
+        .push_msg(&urlPathAndBodyMessage)
+        .send_msg()
 }
 
 async fn handler_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
@@ -33,20 +36,22 @@ async fn handler_tmlog(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     IF!(res.is_ok(), httpResponseOk!(), httpResponseNotFound!())
 }
 
-pub fn start(env: Env) -> Bresult<()> {
+pub fn start(wd: WebData) -> Bresult<()> {
     let ssl_acceptor_builder = {
-        let envstruct = env.lock().unwrap();
-        comm::new_ssl_acceptor_builder(&envstruct.tmbot_key, &envstruct.tmbot_cert)?
+        let tge = tgelock!(wd)?;
+        comm::new_ssl_acceptor_builder(&tge.tmbot_key, &tge.tmbot_cert)?
     };
     info!("::TMLOG");
     thread::Builder::new().name("httptmlog".into()).spawn(move ||
         glogd!("--TMLOG",
             match HttpServer::new(move ||
-                App::new().app_data(web::Data::new(env.clone())).route("{tail:.*}", web::to(handler_tmlog)))
+                App::new()
+                    .app_data(wd.clone())
+                    .route("{tail:.*}", web::to(handler_tmlog)))
             .workers(2)
             .bind_openssl("0.0.0.0:7065", ssl_acceptor_builder)
         {
-            Ok(httpserver) => rt::System::new().block_on(async move { httpserver.run().await }),
+            Ok(httpserver) => rt::System::new().block_on(httpserver.run()),
             Err(err) => Err(err.into())
         })
     )?; // Thread returns after SIGINT

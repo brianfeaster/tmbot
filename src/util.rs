@@ -60,7 +60,7 @@ macro_rules! fmthere {
 // UTF-8
 
 pub const SAVE :&str = "\x1b7";
-pub const REST :&str = "\x1b8";
+pub const RSTR :&str = "\x1b8";
 
 pub const RST :&str = "\x1b[0m";
 pub const BLD :&str = "\x1b[1m";
@@ -151,6 +151,12 @@ pub fn num2heart (mut n :i64) -> String {
         if n < 1 { break }
     }
     sheart
+}
+
+pub fn trimmedQuotes(s: &str) -> &str {
+    IF!(2<s.len() && s.ends_with("\"") && s.starts_with("\""),
+        &s[1 .. s.len()-1],
+        s)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -256,27 +262,35 @@ pub trait ReAs {
     fn as_i64 (&self, i:usize) -> Bresult<i64>;
     fn as_f64 (&self, i:usize) -> Bresult<f64>;
     fn as_str (&self, i:usize) -> Bresult<&str>;
+    fn as_str_or (&self, s: &'static str, i:usize) -> &str;
     fn as_string (&self, i:usize) -> Bresult<String>;
+    fn as_string_or (&self, s: &str, i:usize) -> String;
 }
 
 impl ReAs for Vec<Option<String>> {
-    fn as_i64 (&self, i:usize) -> Bresult<i64> {
+    fn as_i64(&self, i: usize) -> Bresult<i64> {
         Ok(self.get(i).ok_or("Can't index vector")?
            .as_ref().ok_or("Can't parse i64 from None")?
            .parse::<i64>()?)
     }
-    fn as_f64 (&self, i:usize) -> Bresult<f64> {
+    fn as_f64(&self, i: usize) -> Bresult<f64> {
         Ok(self.get(i).ok_or("Can't index vector")?
            .as_ref().ok_or("Can't parse f64 from None")?
            .parse::<f64>()?)
     }
-    fn as_str (&self, i:usize) -> Bresult<&str> {
+    fn as_str(&self, i: usize) -> Bresult<&str> {
         Ok(self.get(i)
             .ok_or("can't index vector")?.as_ref()
             .ok_or("can't infer str from None")? )
     }
-    fn as_string (&self, i:usize) -> Bresult<String> {
+    fn as_str_or(&self, s: &'static str, i: usize) -> &str {
+        self.as_str(i).unwrap_or(s)
+    }
+    fn as_string(&self, i: usize) -> Bresult<String> {
         self.as_str(i).map( String::from )
+    }
+    fn as_string_or(&self, s: &str, i: usize) -> String {
+        self.as_str(i).unwrap_or(s).to_string()
     }
 }
 
@@ -310,7 +324,7 @@ pub fn httpReqPretty(req: &HttpRequest, body: &web::Bytes) -> String {
             .unwrap_or("?"),
         req.uri(),
         from_utf8(body)
-            .map(|s| s.to_string().replace("\n", &format!(" {SAVE}\x08{B_YEL} {REST}")))
+            .map(|s| s.to_string().replace("\n", &format!(" {SAVE}\x08{B_YEL} {RSTR}")))
             .unwrap_or_else(|_|format!("{:?}", body)),
         headersPretty(req.headers())
     )
@@ -326,7 +340,7 @@ pub fn reqPretty(req: &ClientRequest, text: &str) -> String {
             .replace("?", &format!("{BLD}?{NRM}"))
             .replace("=", &format!("{BLD}={NRM}"))
             .replace("&", &format!("{BLD}&{NRM}")),
-        text.replace("\n", &format!(" {SAVE}\x08{B_YEL} {REST}")),
+        text.replace("\n", &format!(" {SAVE}\x08{B_YEL} {RSTR}")),
         headersPretty(&req.headers()))
 }
 
@@ -334,7 +348,7 @@ pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
     format!("=> {BLU}{:?} {} {YEL}{B_BLD_BLK}{}{}",
         res.version(),
         res.status(),
-        body.replace("\n", " {SAVE}\x08{B_YEL} {REST}"),
+        body.replace("\n", " {SAVE}\x08{B_YEL} {RSTR}"),
         headersPretty(&res.headers()))
 }
 

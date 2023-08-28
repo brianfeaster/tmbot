@@ -1,27 +1,29 @@
 use env_logger::fmt::{Color, Formatter};
-use log::{info, Level, Record};
+use log::{error, Level, Record};
 use std::io::Write;
 use tmbot::{main_launch, util::sleep_secs};
 
-fn logger_formatter(buf: &mut Formatter, rec: &Record) -> std::io::Result<()> {
-    let mut style = buf.style();
+fn logger_formatter(fmt: &mut Formatter, rec: &Record) -> std::io::Result<()> {
+    let mut style = fmt.style();
     let pre = style
         .set_color(match rec.level() {
-            Level::Error => Color::Red,
-            Level::Warn  => Color::Yellow,
+            Level::Error => Color::Ansi256(9),
+            Level::Warn  => Color::Ansi256(11),
             Level::Info  => Color::Green,
             Level::Debug => Color::Magenta,
             Level::Trace => Color::Cyan,
         })
         .value(format!("{}{}", rec.target(), rec.line().unwrap_or(0)));
-    writeln!(buf, "{} {:?}", pre, rec.args())
+    writeln!(fmt, "{} {:?}", pre, rec.args())
 }
 
 fn main() {
     env_logger::builder().format(logger_formatter).init();
-    info!("::main tmbot::main_launch() -> {:?}", main_launch()); // Should never return
-    sleep_secs(0.1);
-    println!()
+    sleep_secs(0.5);
+    main_launch()
+        .map(|r| println!("{}", r))
+        .map_err(|e| error!("{}", e))
+        .ok();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
