@@ -1,7 +1,7 @@
 use env_logger::fmt::{Color, Formatter};
 use log::{error, Level, Record};
 use std::io::Write;
-use tmbot::{main_launch, util::sleep_secs};
+use ::tmbot::main_launch;
 
 fn logger_formatter(fmt: &mut Formatter, rec: &Record) -> std::io::Result<()> {
     let mut style = fmt.style();
@@ -19,11 +19,11 @@ fn logger_formatter(fmt: &mut Formatter, rec: &Record) -> std::io::Result<()> {
 
 fn main() {
     env_logger::builder().format(logger_formatter).init();
-    sleep_secs(0.5);
     main_launch()
         .map(|r| println!("{}", r))
         .map_err(|e| error!("{}", e))
         .ok();
+    //tmbot::sleep_secs(1.0);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

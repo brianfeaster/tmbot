@@ -1,4 +1,3 @@
-//use crate::{comm, glogd, httpResponseNotFound, httpResponseOk, rt, util::*, App, CmdStruct, Env, HttpResponse, HttpServer, Instant, IF};
 use crate::*;
 
 fn header() {
@@ -14,13 +13,15 @@ fn tmlog(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     header();
     info!("{}", httpReqPretty(&req, &body));
 
-    let capv = must_regex_to_vec(r#"(?x) ^ /(-?\d+) (/(-?\d+))? (/(.*))? $ "#, &req.path())?;
+    let capv = must_re_to_vec(regex!(r#"(?x) ^ /(-?\d+) (/(-?\d+))? (/(.*))? $ "#), &req.path())?;
 
     let at    = capv.as_i64(1)?;
     let topic = capv.as_string_or("", 3);
 
+    let urltostr = capv.as_str_or("", 5).split('/').collect::<Vec<_>>().join(" ").replace("+", " ");
+
     let urlPathAndBodyMessage =
-        capv.as_str_or("", 5).split('/').collect::<Vec<_>>().join(" ")
+       percent_decode_str(&urltostr).decode_utf8()?
         + trimmedQuotes(from_utf8(&body)?);
 
     Env::new(req.app_data::<WebData>().ok_or("tmlog app_data")?.clone(),

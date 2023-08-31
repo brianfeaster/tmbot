@@ -1,4 +1,4 @@
-use crate::util::*;
+use crate::*;
 
 pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
 
@@ -113,7 +113,7 @@ pub async fn get_ticker_raw(ticker: &str) -> Bresult<Value> {
 ////////////////////////////////////////////////////////////////////////////////
 
 fn normalizeUrl (url: &str) -> String {
-    must_regex_to_vec("(?:https?://)?(.*)", url)
+    must_re_to_vec(regex!("(?:https?://)?(.*)"), url)
     .and_then(|caps|
         caps.as_str(1)
         .map(|s| format!("https://{}", s)))
@@ -144,7 +144,7 @@ pub async fn httpsjson (url: &str, jsontxt: String) -> Bresult<String> {
     let url = normalizeUrl(url);
     let clientRequest = newHttpsClient()?
         .post(url)
-        .insert_header((header::CONTENT_TYPE, "application/json"));
+        .insert_header((CONTENT_TYPE, "application/json"));
     info!("{}", reqPretty(&clientRequest, &jsontxt));
     let mut clientResponse = crate::IF!(jsontxt == "",
         clientRequest.send(),

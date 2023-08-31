@@ -1,13 +1,67 @@
 pub use actix_web::{
-    http::header::{self, HeaderMap},
+    http::header::{HeaderMap, CONTENT_TYPE, USER_AGENT},
     web, HttpRequest,
 };
-pub use awc::{ClientBuilder, Client, ClientRequest, ClientResponse, Connector};
+pub use awc::{Client, ClientBuilder, ClientRequest, ClientResponse, Connector};
 pub use log::{error, info, warn};
 use openssl::ssl::{SslConnector, SslMethod};
 pub use regex::Regex;
 pub use serde_json::{json, Value};
-pub use std::{collections::HashMap, error::Error, str::from_utf8, thread, time::Duration};
+pub use std::{
+    collections::HashMap, error::Error, str::from_utf8, sync::OnceLock, thread, time::Duration,
+};
+pub use ansi_colors::*;
+
+////////////////////////////////////////////////////////////////////////////////
+// ANSI color constants
+
+pub mod ansi_colors {
+#![allow(dead_code)]
+    pub const BS :&str = "\x08";
+
+    pub const SAVE :&str = "\x1b7";
+    pub const RSTR :&str = "\x1b8";
+
+    pub const RST :&str = "\x1b[0m";
+    pub const BLD :&str = "\x1b[1m";
+    pub const NRM :&str = "\x1b[22m";
+
+    pub const BLK :&str = "\x1b[30m";
+    pub const RED :&str = "\x1b[31m";
+    pub const GRN :&str = "\x1b[32m";
+    pub const YEL :&str = "\x1b[33m";
+    pub const BLU :&str = "\x1b[34m";
+    pub const MAG :&str = "\x1b[35m";
+    pub const CYN :&str = "\x1b[36m";
+    pub const GRY :&str = "\x1b[37m";
+
+    pub const BLD_BLK :&str = "\x1b[1;30m";
+    pub const BLD_RED :&str = "\x1b[1;31m";
+    pub const BLD_GRN :&str = "\x1b[1;32m";
+    pub const BLD_YEL :&str = "\x1b[1;33m";
+    pub const BLD_BLU :&str = "\x1b[1;34m";
+    pub const BLD_MAG :&str = "\x1b[1;35m";
+    pub const BLD_CYN :&str = "\x1b[1;36m";
+    pub const BLD_GRY :&str = "\x1b[1;37m";
+
+    pub const B_BLK :&str = "\x1b[40m";
+    pub const B_RED :&str = "\x1b[41m";
+    pub const B_GRN :&str = "\x1b[42m";
+    pub const B_YEL :&str = "\x1b[43m";
+    pub const B_BLU :&str = "\x1b[44m";
+    pub const B_MAG :&str = "\x1b[45m";
+    pub const B_CYN :&str = "\x1b[46m";
+    pub const B_GRY :&str = "\x1b[47m";
+
+    pub const B_BLD_BLK :&str = "\x1b[100m";
+    pub const B_BLD_RED :&str = "\x1b[101m";
+    pub const B_BLD_GRN :&str = "\x1b[102m";
+    pub const B_BLD_YEL :&str = "\x1b[103m";
+    pub const B_BLD_BLU :&str = "\x1b[104m";
+    pub const B_BLD_MAG :&str = "\x1b[105m";
+    pub const B_BLD_CYN :&str = "\x1b[106m";
+    pub const B_BLD_GRY :&str = "\x1b[107m";
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Types
@@ -57,50 +111,7 @@ macro_rules! fmthere {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// UTF-8
-
-pub const SAVE :&str = "\x1b7";
-pub const RSTR :&str = "\x1b8";
-
-pub const RST :&str = "\x1b[0m";
-pub const BLD :&str = "\x1b[1m";
-pub const NRM :&str = "\x1b[22m";
-
-pub const BLK :&str = "\x1b[30m";
-pub const RED :&str = "\x1b[31m";
-pub const GRN :&str = "\x1b[32m";
-pub const YEL :&str = "\x1b[33m";
-pub const BLU :&str = "\x1b[34m";
-pub const MAG :&str = "\x1b[35m";
-pub const CYN :&str = "\x1b[36m";
-pub const GRY :&str = "\x1b[37m";
-
-pub const BLD_BLK :&str = "\x1b[1;30m";
-pub const BLD_RED :&str = "\x1b[1;31m";
-pub const BLD_GRN :&str = "\x1b[1;32m";
-pub const BLD_YEL :&str = "\x1b[1;33m";
-pub const BLD_BLU :&str = "\x1b[1;34m";
-pub const BLD_MAG :&str = "\x1b[1;35m";
-pub const BLD_CYN :&str = "\x1b[1;36m";
-pub const BLD_GRY :&str = "\x1b[1;37m";
-
-pub const B_BLK :&str = "\x1b[40m";
-pub const B_RED :&str = "\x1b[41m";
-pub const B_GRN :&str = "\x1b[42m";
-pub const B_YEL :&str = "\x1b[43m";
-pub const B_BLU :&str = "\x1b[44m";
-pub const B_MAG :&str = "\x1b[45m";
-pub const B_CYN :&str = "\x1b[46m";
-pub const B_GRY :&str = "\x1b[47m";
-
-pub const B_BLD_BLK :&str = "\x1b[100m";
-pub const B_BLD_RED :&str = "\x1b[101m";
-pub const B_BLD_GRN :&str = "\x1b[102m";
-pub const B_BLD_YEL :&str = "\x1b[103m";
-pub const B_BLD_BLU :&str = "\x1b[104m";
-pub const B_BLD_MAG :&str = "\x1b[105m";
-pub const B_BLD_CYN :&str = "\x1b[106m";
-pub const B_BLD_GRY :&str = "\x1b[107m";
+// Unicode
 
 pub fn n2heart2 (n :usize) -> String {
     match n%2 {
@@ -160,7 +171,7 @@ pub fn trimmedQuotes(s: &str) -> &str {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// JSON
+// Json
 
 pub fn bytes2json(body: &[u8]) -> Bresult<Value> {
     Ok(serde_json::from_str(from_utf8(&body)?)?)
@@ -168,10 +179,6 @@ pub fn bytes2json(body: &[u8]) -> Bresult<Value> {
 
 pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
     v.pointer(ptr).unwrap_or(&Value::Null)
-}
-
-pub fn getinmut<'a>(v: &'a mut Value, ptr: &str) -> Result<&'a mut Value, String> {
-    v.pointer_mut(ptr).ok_or(format!("getinmut {}", ptr))
 }
 
 pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
@@ -209,7 +216,7 @@ pub fn getin_string(json: &Value, ptr: &str) -> Result<String, String> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Regex enhancements
+// Regex
 
 // Return hashmap of the regex capture groups, if any.
 pub fn regex_to_hashmap (re: &str, msg: &str) -> Bresult<HashMap<String, String>> {
@@ -234,8 +241,8 @@ pub fn regex_to_hashmap (re: &str, msg: &str) -> Bresult<HashMap<String, String>
 }
 
 // Return vector of the regex capture groups, if any.
-pub fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Ok(Regex::new(re)?  // Result<Regex>
+pub fn re_to_vec (re: &Regex, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Ok(re
         .captures(msg)  // Option<Captures>
         .map(|caps|
             caps.iter() // Iter::Option<match>
@@ -246,8 +253,8 @@ pub fn regex_to_vec (re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
 }
 
 // Return vector of the regex capture groups, Err("") if no match
-pub fn must_regex_to_vec(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
-    Ok(Regex::new(re)?  // Result<Regex>?
+pub fn must_re_to_vec(re: &Regex, msg: &str) -> Bresult<Vec<Option<String>>> {
+    Ok(re
         .captures(msg)  // Option<Captures>
         .ok_or("")?     // Result<Captures>?
         .iter()         // Iter<Option<Match>>
@@ -257,7 +264,7 @@ pub fn must_regex_to_vec(re: &str, msg: &str) -> Bresult<Vec<Option<String>>> {
         .collect::<Vec<Option<String>>>()) // Vec<Option<String>>
 }
 
-/// Regex captured strings 'as' impls
+// Regex captured strings impls
 pub trait ReAs {
     fn as_i64 (&self, i:usize) -> Bresult<i64>;
     fn as_f64 (&self, i:usize) -> Bresult<f64>;
@@ -294,6 +301,14 @@ impl ReAs for Vec<Option<String>> {
     }
 }
 
+#[macro_export]
+macro_rules! regex {
+    ($re:expr) => {{
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new($re).unwrap())
+    }}
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // Http
@@ -304,52 +319,9 @@ pub fn newHttpsClient() -> Bresult<Client> {
         .connector(Connector::new()
             .openssl(SslConnector::builder(SslMethod::tls())?.build())
             .timeout(std::time::Duration::new(60, 0)))
-        .add_default_header((header::USER_AGENT, "TMBot"))
+        .add_default_header((USER_AGENT, "TMBot"))
         .timeout(std::time::Duration::new(60, 0))
         .finish())
-}
-
-pub fn headersPretty(hm: &HeaderMap) -> String {
-    hm.iter()
-    .map(|(k,v)| format!("{RST} {k} {BLD_BLK}{}", v.to_str().unwrap_or("?")))
-    .collect::<Vec<String>>()
-    .join("") + RST
-}
-
-pub fn httpReqPretty(req: &HttpRequest, body: &web::Bytes) -> String {
-    format!("{BLD_MAG}{} {:?} {RST}{YEL}{B_BLD_BLK}{}{}",
-        req.peer_addr()
-            .map(|sa| sa.ip().to_string())
-            .as_deref()
-            .unwrap_or("?"),
-        req.uri(),
-        from_utf8(body)
-            .map(|s| s.to_string().replace("\n", &format!(" {SAVE}\x08{B_YEL} {RSTR}")))
-            .unwrap_or_else(|_|format!("{:?}", body)),
-        headersPretty(req.headers())
-    )
-}
-
-pub fn reqPretty(req: &ClientRequest, text: &str) -> String {
-    format!("<= {BLU}{:?} {} {} {YEL}{B_BLD_BLK}{}{}",
-        req.get_version(),
-        req.get_method(),
-        req.get_uri()
-            .to_string()
-            .replace("/", &format!("{BLD}/{NRM}"))
-            .replace("?", &format!("{BLD}?{NRM}"))
-            .replace("=", &format!("{BLD}={NRM}"))
-            .replace("&", &format!("{BLD}&{NRM}")),
-        text.replace("\n", &format!(" {SAVE}\x08{B_YEL} {RSTR}")),
-        headersPretty(&req.headers()))
-}
-
-pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
-    format!("=> {BLU}{:?} {} {YEL}{B_BLD_BLK}{}{}",
-        res.version(),
-        res.status(),
-        body.replace("\n", " {SAVE}\x08{B_YEL} {RSTR}"),
-        headersPretty(&res.headers()))
 }
 
 #[macro_export]
@@ -372,4 +344,59 @@ macro_rules! httpResponseNotFound {
             headersPretty(r.headers()));
         r
     }};
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Logging
+
+pub fn jsonPretty(json: &str) -> String {
+    json.replace("{\"", &format!("{{\"{BLD}"))
+        .replace("\n\"", &format!("\n\"{BLD}")) // Telegram inserts a newline for some reason.
+        .replace(",\"", &format!(",\"{BLD}"))
+        .replace("\":", &format!("{NRM}\":"))
+        .replace("\n", &format!(" {SAVE}{BS}{B_YEL} {RSTR}"))
+}
+pub fn urlPretty(urlstr: &str) -> String {
+    urlstr
+        .replace("?", &format!("?{BLD}"))
+        .replace("&", &format!("&{BLD}"))
+        .replace("=", &format!("{NRM}="))
+}
+
+pub fn headersPretty(hm: &HeaderMap) -> String {
+    hm.iter()
+    .map(|(k,v)| format!("{RST} {k} {BLD_BLK}{}", v.to_str().unwrap_or("?")))
+    .collect::<Vec<String>>()
+    .join("") + RST
+}
+
+pub fn httpReqPretty(req: &HttpRequest, body: &web::Bytes) -> String {
+    format!("{BLD_MAG}{} {:?} {RST}{YEL}{B_BLD_BLK}{}{}",
+        req.peer_addr()
+            .map(|sa| sa.ip().to_string())
+            .as_deref()
+            .unwrap_or("?"),
+        req.uri(),
+        from_utf8(body)
+            .map(jsonPretty)
+            .unwrap_or_else(|_| format!("{:?}", body)),
+        headersPretty(req.headers())
+    )
+}
+
+pub fn reqPretty(req: &ClientRequest, text: &str) -> String {
+    format!("<= {BLU}{:?} {} {} {YEL}{B_BLD_BLK}{}{}",
+        req.get_version(),
+        req.get_method(),
+        urlPretty(&req.get_uri().to_string()),
+        jsonPretty(text),
+        headersPretty(&req.headers()))
+}
+
+pub fn resPretty<T> (res: &ClientResponse<T>, body: &str) -> String {
+    format!("=> {BLU}{:?} {} {YEL}{B_BLD_BLK}{}{}",
+        res.version(),
+        res.status(),
+        jsonPretty(body),
+        headersPretty(&res.headers()))
 }

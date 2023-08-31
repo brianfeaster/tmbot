@@ -1,17 +1,20 @@
-#![allow(non_snake_case)]
-
 //! # External Chat Service Robot
+
+#![allow(non_snake_case)]
 
 mod comm;
 mod db;
 mod srvs;
-pub mod util;
 mod tmlog;
+mod util;
 
+use openssl::ssl::{
+    NameType, SniError, SslAcceptor, SslAcceptorBuilder, SslAlert, SslFiletype, SslMethod, SslRef,
+};
 use crate::comm::*;
 use crate::db::*;
 use crate::srvs::*;
-pub use crate::util::*;
+use crate::util::*;
 
 use actix::{prelude::*, Actor, StreamHandler};
 use actix_web::{rt, web, App, HttpRequest, HttpResponse, HttpServer};
@@ -19,25 +22,27 @@ use actix_web_actors::ws;
 use datetime::{
     DatePiece, Duration, Instant, LocalDate, LocalDateTime, LocalTime, TimePiece, Weekday::*,
 };
+use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
+use sqlite::Statement;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     env::{args, var_os},
     mem::transmute,
     str::{from_utf8, FromStr},
-    sync::{Mutex},
-    thread
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex,
+    },
+    thread,
 };
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-
 
 ////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_SECS :i64 = 30;
 const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // Abstracted primitive types helpers
@@ -445,9 +450,9 @@ impl Tge {
                     quote:    String::new(),
                     position: String::new(),
                     _uuid:    String::new()});
-    
+
         let msgr = Messenger::new(endpoint)?;
-    
+
         Ok(Tge{
             msgr, telegram_key, telegram_cert, tmbot_key, tmbot_cert, dbconn,
             dst_hours_adjust:   argv.nth(1).and_then(|s| s.parse::<i8>().ok()).ok_or(fmthere!("args[1] DST"))?,
@@ -512,7 +517,7 @@ impl MsgDetails for Msg {
 
 
 #[derive(Debug)]
-pub struct Env {
+struct Env {
     wd: WebData,
     msg: Msg
 }
@@ -536,7 +541,7 @@ macro_rules! tgelock {($m:expr) => {
     match $m.try_lock() {
         Ok(tge) => Ok(tge),
         Err(e) => {
-            warn!("{BLD_YEL}{}.try_lock() -> {}", stringify!($m), e);
+            warn!("{}.try_lock() -> {}", stringify!($m), e);
             $m.lock()
             .map_err(|e| format!("{}{} {}.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
          }
@@ -545,7 +550,7 @@ macro_rules! tgelock {($m:expr) => {
 
 
 impl Env {
-    fn from_json(wd: &WebData, json: &Value) -> Bresult<Env> {
+    fn from_json(wd: WebData, json: &Value) -> Bresult<Env> {
         let inline_query = &json["inline_query"];
         let edited_message = &json["edited_message"];
         let message = if edited_message.is_object() { edited_message } else { &json["message"] };
@@ -553,7 +558,7 @@ impl Env {
         if inline_query.is_object() { // Inline queries are DMs so no other associated channels
             let id = getin_i64(inline_query, "/from/id")?;
             let message = getin_str(inline_query, "/query")?;
-            Env::new(wd.clone(), now, id, id, id, "".into(), message, true)
+            Env::new(wd, now, id, id, id, "".into(), message, true)
         } else if message.is_object() { // An incoming message could be a reply or normal.
             let id = getin_i64(message, "/from/id")?;
             let at = getin_i64(message, "/chat/id")?;
@@ -565,7 +570,7 @@ impl Env {
                     getin_string(message, "/message_thread_id")?
                 };
             let message = getin_str(message, "/text")?;
-            Env::new(wd.clone(), now, id, at, to, topic, message, false)
+            Env::new(wd, now, id, at, to, topic, message, false)
         } else { Err("Invalid messenger JSON")? }
     }
     fn new(wd: WebData, now:i64, id:i64, at:i64, to:i64, topic:String, message:String, inline: bool) -> Bresult<Env> {
@@ -927,7 +932,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "B" => s.push_str(&format!("{}", money_pretty(self.amount.abs()))), // inter-day delta
                     "C" => s.push_str(&percent_squish(self.percent.abs())), // inter-day percent
                     "D" => s.push_str(gain_glyphs.0), // red/green light
-                    "E" => s.push_str(&reference_ticker(tge, &self.ticker).replacen("_", "\\_", 10000)),  // ticker symbol
+                    "E" => s.push_str(&reference_ticker(tge, &self.ticker).replace("_", "\\_")),  // ticker symbol
                     "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str( // Market regular, pre, after
@@ -1043,7 +1048,7 @@ impl Position { // Format the position using its format string.
                 "C" => s.push_str( gain_glyphs.1), // Arrow
                 "D" => s.push_str( &percent_squish(gain_percent)), // gain%
                 "E" => s.push_str( gain_glyphs.0 ), // Color
-                "F" => s.push_str( &reference_ticker(tge, &self.ticker).replacen("_", "\\_", 10000) ), // Ticker
+                "F" => s.push_str( &reference_ticker(tge, &self.ticker).replace("_", "\\_") ), // Ticker
                 "G" => s.push_str( &money_pretty(price) ), // latet stonks value
                 "H" =>
                     if qty == 0.0 { s.push_str("0") }
@@ -1076,13 +1081,13 @@ struct Trade<'a> {
 impl<'a> Trade<'a> {
     fn new_trade(env: &'a mut Env) -> Bresult<Option<Trade>> {
         //                           _____ticker____  _+-_  _$_   ____________amt_______________
-        let caps = regex_to_vec(
+        let caps = re_to_vec(regex!(
             r"(?xi)^
                 ([A-Za-z0-9^.-]+)         ### ticker symbol
                 ([+-])                    ### + buy, - sell
                 ([$])?                    ### amount is dollars
                 (\d+\.?|(\d*\.\d{1,4}))?  ### float amount
-                $",
+                $"),
             &env.msg.message)?;
         if caps.is_empty() { return Ok(None) }
         Ok(Some(Trade{
@@ -1100,7 +1105,7 @@ impl<'a> Trade<'a> {
 ////////////////////////////////////////////////////////////////////////////////
 
 fn do_echo_lvl(env: &mut Env) -> Bresult<&str> {
-    let caps = must_regex_to_vec("^/echo ?([0-9]+)?", &env.msg.message)?;
+    let caps = must_re_to_vec(regex!("^/echo ?([0-9]+)?"), &env.msg.message)?;
 
     let msg = match caps.as_i64(1) {
         Ok(echo) => { // Update existing echo level
@@ -1130,7 +1135,7 @@ fn do_echo_lvl(env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_help (env: &mut Env) -> Bresult<&str> {
-    must_regex_to_vec(r"/help", &env.msg.message)?;
+    must_re_to_vec(regex!(r"/help"), &env.msg.message)?;
     let delay = envtgelock!(env)?.quote_delay_secs;
     let msg = format!(
 r#"`          ™Bot Commands          `
@@ -1165,20 +1170,20 @@ r#"`          ™Bot Commands          `
 }
 
 fn do_curse(env: &mut Env) -> Bresult<&str> {
-    must_regex_to_vec("/curse", &env.msg.message)?;
+    must_re_to_vec(regex!("/curse"), &env.msg.message)?;
     env.push_msg(["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7])
         .send_msg()?;
     Ok("COMPLETED.")
 }
 
 fn do_say (env: &mut Env) -> Bresult<&str> {
-    let rev = must_regex_to_vec(r"(?s)^/say (.*)$", &env.msg.message)?;
+    let rev = must_re_to_vec(regex!(r"(?s)^/say (.*)$"), &env.msg.message)?;
     env.push_msg(rev.as_str(1)?).send_msg()?;
     Ok("COMPLETED.")
 }
 
 fn do_like (env: &mut Env) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r"^([+-])1$", &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r"^([+-])1$"), &env.msg.message)?;
     let adj =
         if env.msg.id == env.msg.to {
             return Ok("SKIP self plussed");
@@ -1219,7 +1224,7 @@ fn do_like_info (env: &mut Env) -> Bresult<&str> {
 
 
 async fn do_def (env: &mut Env) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r"^([A-Za-z-]+):$", &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r"^([A-Za-z-]+):$"), &env.msg.message)?;
     let word = cap.as_str(1)?;
 
     info!("{BLD}::do_def(){RST} {:?}", word);
@@ -1238,11 +1243,11 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
     } else {
         msg.push_str( &format!("*{}", word) );
         if 1 == defs.len() { // If multiple definitions, leave off the colon
-            msg.push_str( &format!(":* {}", defs[0].to_string().replacen("`", "\\`", 10000)));
+            msg.push_str( &format!(":* {}", defs[0].to_string().replace("`", "\\`")));
         } else {
-            msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string().replacen("`", "\\`", 10000)));
+            msg.push_str( &format!(" ({})* {}", 1, defs[0].to_string().replace("`", "\\`")));
             for i in 1..std::cmp::min(4, defs.len()) {
-                msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replacen("`", "\\`", 10000)));
+                msg.push_str( &format!(" *({})* {}", i+1, defs[i].to_string().replace("`", "\\`")));
             }
         }
     }
@@ -1273,7 +1278,7 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_httpsget (env: &mut Env) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r"^/httpsget\s+([^\s]+)$", &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r"^/httpsget\s+([^\s]+)$"), &env.msg.message)?;
     let url = cap.as_str(1)?;
 
     let mut msg = String::new();
@@ -1296,7 +1301,7 @@ async fn do_httpsget (env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_httpsbody(env: &mut Env) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r#"(?s)^/httpsbody\s+([^\s]+) ?(.+)"#, &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r#"(?s)^/httpsbody\s+([^\s]+) ?(.+)"#), &env.msg.message)?;
     let url = cap.as_str(1)?;
     let text = cap.get(2).and_then(|c|c.as_ref()).unwrap_or(&String::new()).to_string();
 
@@ -1314,7 +1319,7 @@ async fn do_httpsbody(env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_httpsjson (env: &mut Env) -> Bresult<&str> {
-    let cap = must_regex_to_vec(r#"(?sx) ^ /httpsjson \s+ ([^\s]+) \s* (.+)? $ "#, &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r#"(?sx) ^ /httpsjson \s+ ([^\s]+) \s* (.+)? $ "#), &env.msg.message)?;
     let url = cap.as_str(1)?;
     let string_json =
         cap.as_str(2)
@@ -1339,7 +1344,7 @@ async fn do_httpsjson (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_json(env: &mut Env) -> Bresult<&str> {
-    match must_regex_to_vec(r#"(?s)^/json\s+(.+)$"#, &env.msg.message)?
+    match must_re_to_vec(regex!(r#"(?s)^/json\s+(.+)$"#), &env.msg.message)?
     .as_str(1)
     .map(|s| {
         if 2 < s.len() && s.ends_with("\"") && s.starts_with("\"") {
@@ -1360,7 +1365,7 @@ fn do_json(env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_sql (env: &mut Env) -> Bresult<&str> {
-    let rev = must_regex_to_vec("^(.*)ß$", &env.msg.message)?;
+    let rev = must_re_to_vec(regex!("^(.*)ß$"), &env.msg.message)?;
     if env.msg.id != 308188500 { return Ok("Wrong User"); }
     let sqlexpr = if rev.is_empty() { return Ok("*no stmt*") } else { rev.as_str(1)? };
     let sqlres = {
@@ -1479,7 +1484,7 @@ async fn do_quotes (env: &mut Env) -> Bresult<&str> {
 ////////////////////////////////////////
 
 async fn do_portfolio(env: &mut Env) -> Bresult<&str> {
-    let caps = must_regex_to_vec(r"(?i)/stonks( .+)?", &env.msg.message)?;
+    let caps = must_re_to_vec(regex!(r"(?i)/stonks( .+)?"), &env.msg.message)?;
 
     let dosort = caps[1].is_none();
     let positions = Position::get_users_positions(env)?;
@@ -1528,7 +1533,7 @@ async fn do_portfolio(env: &mut Env) -> Bresult<&str> {
 
 // Handle: /yolo
 async fn do_yolo (env: &mut Env) -> Bresult<&str> {
-    must_regex_to_vec(r"/yolo", &env.msg.message)?;
+    must_re_to_vec(regex!(r"/yolo"), &env.msg.message)?;
 
     env.markdown().push_msg("...").send_msg()?;
 
@@ -1951,7 +1956,7 @@ struct ExQuote<'a> { // Local Exchange Quote Structure
 impl<'a> ExQuote<'a> {
     fn scan (env: &'a mut Env) -> Bresult<Option<ExQuote<'a>>> {
          //                         ____ticker____  _____________qty____________________  $@  ___________price______________
-        let caps = regex_to_vec(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$", &env.msg.message)?;
+        let caps = re_to_vec(regex!(r"^(@[A-Za-z^.-_]+)([+-]([0-9]+[.]?|[0-9]*[.][0-9]{1,4}))[$@]([0-9]+[.]?|[0-9]*[.][0-9]{1,2})$"), &env.msg.message)?;
         if caps.is_empty() { return Ok(None) }
 
         let thing = caps.as_string(1)?;
@@ -2293,8 +2298,8 @@ async fn do_exchange_bidask (env: &mut Env) -> Bresult<&str> {
             .markdown()
             .push_msg(
                 &ret.msg
-                .replacen("_", "\\_", 1000)
-                .replacen(">", "\\>", 1000))
+                .replace("_", "\\_")
+                .replace(">", "\\>"))
             .send_msg()?;
     } // Report to group
     Ok("COMPLETED.")
@@ -2308,11 +2313,11 @@ async fn do_orders (env: &mut Env) -> Bresult<&str> {
         let tge = &envtgelock!(env)?;
         let dbconn = &tge.dbconn;
 
-        must_regex_to_vec(r"(?i)/orders", &env.msg.message)?;
+        must_re_to_vec(regex!(r"(?i)/orders"), &env.msg.message)?;
 
         for order in getsql!(dbconn, "SELECT * FROM exchange WHERE id=?", id)? {
             let ticker = order.get_string("ticker")?;
-            let stonk = reference_ticker(&tge, &ticker).replacen("_", "\\_", 10000);
+            let stonk = reference_ticker(&tge, &ticker).replace("_", "\\_");
             let qty = order.get_f64("qty")?;
             let price = order.get_f64("price")?;
             if qty < 0.0 {
@@ -2418,7 +2423,7 @@ const FORMAT_STRINGS_HELP: &str =
 ";
 
 fn do_fmt (env: &mut Env) -> Bresult<&str> {
-    let caps = must_regex_to_vec(r"^/fmt( ([qp?])[ ]?(.*)?)?$", &env.msg.message)?;
+    let caps = must_re_to_vec(regex!(r"^/fmt( ([qp?])[ ]?(.*)?)?$"), &env.msg.message)?;
     //caps.iter().for_each( |c| println!("{BLD_MAG}{:?}", c));
 
     let id = env.msg.id;
@@ -2465,15 +2470,15 @@ fn do_fmt (env: &mut Env) -> Bresult<&str> {
     // make change to DB
     getsql!(dbconn, "INSERT OR IGNORE INTO formats VALUES (?, '', '')", id)?;
     getsql!(dbconn, format!("UPDATE formats SET {}=? WHERE id=?", format_type),
-        &*new_format_str.replacen("\"", "\"\"", 10000), id)?;
+        &*new_format_str.replace("\"", "\"\""), id)?;
 
     Ok("COMPLETED.")
 }
 
 async fn do_rebalance (env: &mut Env) -> Bresult<&str> {
-    let caps = must_regex_to_vec(
+    let caps = must_re_to_vec(
         //             _______float to 2 decimal places______                                    ____________float_____________
-        r"(?i)^/rebalance( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* (([0-9]*[.][0-9]+)|([0-9]+[.]?)))+)",
+        regex!(r"(?i)^/rebalance( (-?[0-9]+[.]?|(-?[0-9]*[.][0-9]{1,2})))?(( [@^]?[A-Z_a-z][-.0-9=A-Z_a-z]* (([0-9]*[.][0-9]+)|([0-9]+[.]?)))+)"),
         &env.msg.message)?;
 
     env
@@ -2597,7 +2602,7 @@ async fn do_rebalance (env: &mut Env) -> Bresult<&str> {
 
 async fn do_schedule (env: &mut Env) -> Bresult<&str> {
     let caps =
-        must_regex_to_vec(
+        must_re_to_vec(regex!(
             r"(?sxi)^/schedule
             (
                 (?: ### Fixed GMT
@@ -2614,7 +2619,7 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
                 )?
                 #### Command
                 (?: \ + (.+))?
-            )",
+            )"),
             &env.msg.message )?;
 
     env.markdown();
@@ -2656,7 +2661,7 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
         let dbconn = &tge.dbconn;
 
         let duration_caps =
-            regex_to_vec(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d*)", caps.as_str(4).unwrap_or(""))?;
+            re_to_vec(regex!(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d*)"), caps.as_str(4).unwrap_or(""))?;
         let neg = IF!(duration_caps.as_str(1).is_ok(),-1,1);
         let hours = duration_caps.as_i64(2).unwrap_or(0);
         let mins = duration_caps.as_i64(3).unwrap_or(0);
@@ -2727,7 +2732,7 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_map (env: &mut Env) -> Bresult<&str> {
-    let mtch = if env.msg.inline { must_regex_to_vec(r#"(?s)(.*)"#, &env.msg.message)? } else { return Err("".into()); };
+    let mtch = if env.msg.inline { must_re_to_vec(regex!(r#"(?s)(.*)"#), &env.msg.message)? } else { return Err("".into()); };
     let msg = mtch.as_string(1)?;
     let k = msg.chars().last().unwrap_or('?');
 
@@ -2780,7 +2785,7 @@ fn do_map (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_rpn (env: &mut Env) -> Bresult<&str> {
-    let cmd = must_regex_to_vec(r"^(={1,2}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$", &env.msg.message)?;
+    let cmd = must_re_to_vec(regex!(r"^(={1,2}) *(((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?)|[^ ] | )*[^ ]?)$"), &env.msg.message)?;
     let expr = cmd.as_string(2)?;
     let mut stack = Vec::new();
     for toks in Regex::new(r" *((-?[0-9]*[.][0-9]+)|(-?[0-9]+[.]?))|([+*/-])|([^ ])")?.captures_iter(&expr) {
@@ -2824,7 +2829,7 @@ fn do_rpn (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_alias (env: &mut Env) -> Bresult<&str> {
-    let caps = must_regex_to_vec(r"(?s)^/alias\s+/?([^\s]+)\s?(.*)$", &env.msg.message)?;
+    let caps = must_re_to_vec(regex!(r"(?s)^/alias\s+/?([^\s]+)\s?(.*)$"), &env.msg.message)?;
     let alias = caps.as_str(1)?;
     let mut cmd =  caps.as_string(2)?;
     let action = {
@@ -2865,7 +2870,7 @@ fn wordle_score_normalize (score: &str) -> usize {
 }
 
 async fn do_wordle(env: &mut Env) -> Bresult<&str> {
-    let expr = must_regex_to_vec(r"^Wordle \d+ ([123456X])/6(\*?)", &env.msg.message)?; // "Wordle 767 4/6\n\n..."
+    let expr = must_re_to_vec(regex!(r"^Wordle \d+ ([123456X])/6(\*?)"), &env.msg.message)?; // "Wordle 767 4/6\n\n..."
 
     let resultext = httpsbody("world.dv8.org:4441/jsondb/v1/wordle",
         format!("'{} {} 1 :wordle",
@@ -2879,7 +2884,7 @@ async fn do_wordle(env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_aliasRun(mut env: &mut Env) -> Bresult<&str> {
-    let expr = must_regex_to_vec(r"(?sx) ^ /([^\s]+) \s? (.*) $ ", &env.msg.message)?;
+    let expr = must_re_to_vec(regex!(r"(?sx) ^ /([^\s]+) \s? (.*) $ "), &env.msg.message)?;
 
     let cmd = expr.as_str(1)?;
 
@@ -2890,7 +2895,7 @@ async fn do_aliasRun(mut env: &mut Env) -> Bresult<&str> {
 
     let rawcmd = {
         let dbconn = &envtgelock!(env)?.dbconn;
-        let aliasCmd = getsql!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", cmd)?;
+        let aliasCmd = getsqlquiet!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", cmd)?;
         if aliasCmd.is_empty() { Err("")? }
         aliasCmd[0]["cmd"].try_into::<&str>().or(Err("bad alias cmd"))?.to_string()
     };
@@ -3063,13 +3068,13 @@ async fn do_scheduled_job(wd: WebData, job: HashMap<String, sqlite::Value>, now:
     Ok(())
 }
 
-pub fn start_scheduler (wd: WebData) -> Bresult<&'static str> {
+fn start_scheduler (wd: WebData) -> Bresult<&'static str> {
     thread::spawn(move || loop {
         sleep_secs(10.0);
-        let now = Instant::now().seconds() + 60*60*wd.lock().unwrap().dst_hours_adjust as i64;
 
-        let jobs = {
+        let (jobs, now) = {
             let tge = tgelock!(wd).unwrap();
+            let now = Instant::now().seconds() + 60*60*tge.dst_hours_adjust as i64;
             let timeFrom = tge.time_scheduler % 86400;
             let mut timeTo = now % 86400;
             if timeTo < timeFrom { timeTo += 86400 } // might wrap to 0, make 'from' < 'to'
@@ -3078,7 +3083,7 @@ pub fn start_scheduler (wd: WebData) -> Bresult<&'static str> {
                 tge.time_scheduler, now, /*one-time jobs*/
                 timeFrom, timeTo /*daily jobs*/)
             {
-                Ok(jobs) => jobs,
+                Ok(jobs) => (jobs, now),
                 err => { glog!(err); continue }
             }
         };
@@ -3102,17 +3107,17 @@ pub fn start_scheduler (wd: WebData) -> Bresult<&'static str> {
 
 fn header_tmbot() {
     println!();
-    info!("{RST}{RED}{B_BLK} _____ __  __ ____        _   ");
-    info!("{RST}{YEL}{B_BLK}|_   _|  \\/  | __ )  ___ | |_™");
-    info!("{RST}{GRN}{B_BLK}  | | | |\\/| |  _ \\ / _ \\| __|");
-    info!("{RST}{BLU}{B_BLK}  | | | |  | | |_) | (_) | |_ ");
-    info!("{RST}{MAG}{B_BLK}  |_| |_|  |_|____/ \\___/ \\__|");
+    info!("{RED} _____ __  __ ____        _   ");
+    info!("{YEL}|_   _|  \\/  | __ )  ___ | |_™");
+    info!("{GRN}  | | | |\\/| |  _ \\ / _ \\| __|");
+    info!("{BLU}  | | | |  | | |_) | (_) | |_ ");
+    info!("{MAG}  |_| |_|  |_|____/ \\___/ \\__|");
 }
 
 async fn tmbot(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
     let wd = req.app_data::<WebData>().ok_or("tmbot() app_data")?;
     let mut cmd = bytes2json(&body)
-        .and_then(|json| Env::from_json(&wd, &json))?;
+        .and_then(|json| Env::from_json(wd.clone(), &json))?;
     do_all(&mut cmd).await
 }
 
@@ -3125,7 +3130,7 @@ async fn handler_tmbot(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     httpResponseOk!()
 }
 
-pub fn start_tmbot(wd: WebData) -> Bresult<()> {
+fn start_tmbot(wd: WebData) -> Bresult<()> {
     info!("::TMBOT");
     let ssl_acceptor_builder = {
         let tge = tgelock!(wd)?;
@@ -3156,7 +3161,7 @@ fn _envstruct_get_entity<'a>(tge: &'a Tge, name: &str) -> Bresult<&'a Entity> {
 
 #[derive(Message)]
 #[rtype(result = "()")]
-pub struct Line {
+struct Line {
     line: String,
 }
 
@@ -3387,7 +3392,7 @@ async fn _ws_handler(req: HttpRequest, stream: web::Payload) -> Result<HttpRespo
     resp
 }
 
-pub fn _main_websocket(wb: WebData) -> Bresult<()> {
+fn _main_websocket(wb: WebData) -> Bresult<()> {
     thread::spawn( move || {
         let srv =
             match HttpServer::new(move ||
@@ -3410,7 +3415,7 @@ pub fn _main_websocket(wb: WebData) -> Bresult<()> {
     Ok(())
 }
 
-pub fn _main_websocket_ssl(wb: WebData) -> Bresult<()> {
+fn _main_websocket_ssl(wb: WebData) -> Bresult<()> {
     let ssl_acceptor_builder = {
         let tge = tgelock!(wb)?;
         comm::new_ssl_acceptor_builder(&tge.tmbot_key, &tge.tmbot_cert)?
@@ -3449,6 +3454,8 @@ ENVIRONMENT:
     TMBOT_DB=tmbot.sqlite
 "# }
 
+
+
 pub fn main_launch() -> Bresult<&'static str> {
     if !true { glogd!("create_schema", create_schema()) } // Create DB
     if true {
@@ -3464,15 +3471,7 @@ pub fn main_launch() -> Bresult<&'static str> {
             Err(e) => { error!("{:?}", e); return Ok(usage()) }
         }
     } else { // Playground
-       let mut j = json!({"a":null});
-       info!("{:?}", j);
-
-       j["aa"]["bb"] = json!(",");
-       info!("{:?}", j);
-
-       let v :Option<isize> = None;
-       j["a"] = Value::from(v);
-       info!("{:?}", j);
+        error!("{:#?}", &Regex::new(r"^Wordle \d+ ([123456X])/6(\*?)")?);
     }
     Ok("done.")
 }

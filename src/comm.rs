@@ -1,15 +1,9 @@
 //! # Telegram Communication
 
-use crate::util::*;
-use actix_web::{rt};
-use openssl::ssl::{
-    NameType, SniError, SslAcceptor, SslAcceptorBuilder, SslAlert, SslFiletype, SslMethod, SslRef
-};
-use std::{
-    sync::mpsc::{Receiver, Sender, channel}
-};
+use crate::*;
 
-pub fn verifyServerName (cert_pem: &str)
+
+fn verifyServerName (cert_pem: &str)
     -> Bresult<
         impl Fn(&mut SslRef, &mut SslAlert)
         -> Result<(), SniError> >
@@ -128,26 +122,26 @@ async fn send_msg(client: &Client, url: &str, msg: &mut Msg) -> Bresult<()> {
     let chat_id = msg.at.to_string();
     let text = if msg.markdown {
         msg.msg // Quick and dirty uni/url decode
-        .replacen("%20", " ", 10000)
-        .replacen("%27", "'", 10000)
-        .replacen("%28", "(", 10000)
-        .replacen("%29", ")", 10000)
-        .replacen("%3D", "=", 10000)
-        .replacen("%2C", ",", 10000)
-        .replacen("%26%238217%3B", "'", 10000)
+        .replace("%20", " ")
+        .replace("%27", "'")
+        .replace("%28", "(")
+        .replace("%29", ")")
+        .replace("%3D", "=")
+        .replace("%2C", ",")
+        .replace("%26%238217%3B", "'")
         // Telegram required markdown escapes
-        .replacen(".", "\\.", 10000)
-        .replacen("(", "\\(", 10000)
-        .replacen(")", "\\)", 10000)
-        .replacen("{", "\\{", 10000)
-        .replacen("}", "\\}", 10000)
-        .replacen("-", "\\-", 10000)
-        .replacen("+", "\\+", 10000)
-        .replacen("=", "\\=", 10000)
-        .replacen("#", "\\#", 10000)
-        .replacen("'", "\\'", 10000)
-        .replacen("!", "\\!", 10000)
-        .replacen("|", "\\|", 10000)
+        .replace(".", "\\.")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace("-", "\\-")
+        .replace("+", "\\+")
+        .replace("=", "\\=")
+        .replace("#", "\\#")
+        .replace("'", "\\'")
+        .replace("!", "\\!")
+        .replace("|", "\\|")
     } else { msg.msg.to_string() };
 
     let mut query = vec![

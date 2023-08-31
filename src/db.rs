@@ -1,8 +1,6 @@
-use crate::util::Bresult;
-pub use sqlite::{Statement};
-use std::collections::HashMap;
+use crate::*;
 
-////////////////////////////////////////////////////////////////////////////////
+
 pub struct Connection {
     pub conn: ::sqlite::Connection,
     pub filename: String
