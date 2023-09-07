@@ -2916,17 +2916,17 @@ async fn do_aliasRun(mut env: &mut Env) -> Bresult<&str> {
         .to_string();
     let cmd = Regex::new(r#"(?x)
             \{ (
-                (\d+) (:[a-z]+)?  #2 {num}  #3:transform
-                | ( [a-z*\#]+ )   #4 {str}
+                (\d+) (:[a-z]+)?           #2 {num} #3:transform
+                | ( [a-z*\#]+ ) (:[a-z]+)? #4 {str} #5:transform
             ) \}
-            | ( \{ [}{] )         #5 {{ {}
-            | ( . [^{]* )         #6 text
+            | ( \{ [}{] )                  #6 {{ {}
+            | ( . [^{]* )                  #7 text
         "#)?
         .captures_iter(&rawcmd)
         .into_iter()
         .map(|c| {
             // Normal text
-            if let Some(m) = c.get(6) {
+            if let Some(m) = c.get(7) {
                 m.as_str().to_string()
             } else {
                 usedParameters = true;
@@ -2944,12 +2944,14 @@ async fn do_aliasRun(mut env: &mut Env) -> Bresult<&str> {
                 // Special parameter replacement {me} {*} {#}
                 } else if let Some(s) = c.get(4) {
                     match s.as_str() {
-                        "me" => &me,
-                        "#" => &parametersCount,
-                        "*" => args,
-                        _ => "?",
-                    }.to_string()
-                } else if let Some(m) = c.get(5) {
+                        "me" => me.to_string(),
+                        "#" => parametersCount.to_string(),
+                        "*" => IF!(Some(":urlencode") == c.get(5).map(|m| m.as_str()),
+                                utf8_percent_encode(args, NON_ALPHANUMERIC).to_string(),
+                                args.to_string()),
+                        _ => "?".to_string(),
+                    }
+                } else if let Some(m) = c.get(6) {
                     // Escaped brace {{ or null parameter {}
                     if "{" == &m.as_str()[1..2] { "{" } else { "" }.to_string()
                 } else {
