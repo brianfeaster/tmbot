@@ -1277,6 +1277,29 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
     Ok("COMPLETED.")
 }
 
+async fn do_httpget (env: &mut Env) -> Bresult<&str> {
+    let cap = must_re_to_vec(regex!(r"^/httpget\s+([^\s]+)$"), &env.msg.message)?;
+    let url = cap.as_str(1)?;
+
+    let mut msg = String::new();
+    let url2 = url.to_string();
+    let body = httpget(&url2).await?;
+
+    if body.is_empty() {
+        env
+            .push_msg(&format!("*{}* response body is empty", &url))
+            .send_msg_id()?;
+    } else {
+        msg.push_str( &format!("{}", &body) );
+    }
+
+    if !msg.is_empty() {
+        env.push_msg(&msg).send_msg()?;
+    }
+
+    Ok("COMPLETED.")
+}
+
 async fn do_httpsget (env: &mut Env) -> Bresult<&str> {
     let cap = must_re_to_vec(regex!(r"^/httpsget\s+([^\s]+)$"), &env.msg.message)?;
     let url = cap.as_str(1)?;
@@ -3000,6 +3023,7 @@ async fn do_most (env: &mut Env) {
     dolog!(do_like(env));
     dolog!(do_like_info(env));
     dolog!(do_def(env).await);
+    dolog!(do_httpget(env).await);
     dolog!(do_httpsget(env).await);
     dolog!(do_httpsbody(env).await);
     dolog!(do_httpsjson(env).await);

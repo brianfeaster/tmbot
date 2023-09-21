@@ -120,6 +120,15 @@ fn normalizeUrl (url: &str) -> String {
     .unwrap_or(url.into())
 }
 
+pub async fn httpget(url: &str) -> Bresult<String> {
+    let clientRequest = newHttpsClient()?.get(url);
+    info!("{}", reqPretty(&clientRequest, ""));
+    let mut clientResponse = clientRequest.send().await?;
+    let body = from_utf8(&clientResponse.body().await?)?.to_string();
+    info!("{}", resPretty(&clientResponse, &body));
+    Ok(body)
+}
+
 pub async fn httpsget(url: &str) -> Bresult<String> {
     let url = normalizeUrl(url);
     let clientRequest = newHttpsClient()?.get(&url);
