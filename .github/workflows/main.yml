@@ -1,0 +1,17 @@
+on:
+  push:
+
+jobs:
+  notify-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: git clone https://github.com/${{github.repository}}.git .
+      - env:
+          CMD: curl -sS https://world.dv8.org:7065/-509096909 -d
+        run: |
+          $CMD "A Rustacian added to the greater good:
+           \"${{github.event.head_commit.message}}\"
+           Tabs: $(<main.rs tr -d \\n | tr \\t \\n | wc -l)
+           unwrap()s: $(<main.rs tr -d \\n | sed 's/unwrap()/\n/g' | wc -l)
+           ${{github.event.head_commit.url}}"
