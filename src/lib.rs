@@ -332,6 +332,11 @@ fn create_schema() -> Bresult<()> {
         CREATE TABLE IF NOT EXISTS aliases (
             alias TEXT NOT NULL UNIQUE,
             cmd   TEXT NOT NULL);")?;
+
+    getsql!(&conn,"
+        CREATE TABLE IF NOT EXISTS abouts (
+            id    INTEGER NOT NULL UNIQUE,
+            plan  TEXT NOT NULL);")?;
     Ok(())
 }
 
@@ -2893,15 +2898,44 @@ fn wordle_score_normalize (score: &str) -> usize {
 }
 
 async fn do_wordle(env: &mut Env) -> Bresult<&str> {
-    let expr = must_re_to_vec(regex!(r"^Wordle \d+ ([123456X])/6(\*?)"), &env.msg.message)?; // "Wordle 767 4/6\n\n..."
+    let expr = must_re_to_vec(regex!(r"^Wordle.*([123456X])/6\*?"), &env.msg.message)?; // "Wordle 767 4/6\n\n..."
 
-    let resultext = httpsbody("world.dv8.org:4441/jsondb/v1/wordle",
+    let resultext = httpsbody("world.dv8.org:4442/jsondb/v1/wordle",
         format!("'{} {} 1 :wordle",
             envtgelock!(env)?.entity_id2name(env.msg.id)?,
             wordle_score_normalize(expr.as_str(1)?))
     ).await?;
 
     env.push_msg(&resultext).send_msg()?;
+
+    Ok("COMPLETED.")
+}
+
+async fn do_plan(env: &mut Env) -> Bresult<&str> {
+    let caps = must_re_to_vec(regex!(r"(?s)^/.plan (.*)"), &env.msg.message)?;
+    let id = env.msg.id;
+    let txt = caps.as_str(1)?;
+
+    let dbconn = &envtgelock!(env)?.dbconn;
+    // make change to DB
+    getsql!(dbconn, "INSERT OR IGNORE INTO abouts VALUES (?, '')", id)?;
+    getsql!(dbconn, "UPDATE abouts SET plan=? WHERE id=?", txt, id)?;
+
+    Ok("COMPLETED.")
+}
+
+async fn do_finger(env: &mut Env) -> Bresult<&str> {
+    let caps = must_re_to_vec(regex!(r"/finger ([^ ]+)"), &env.msg.message)?;
+    let name = caps.as_str(1)?;
+
+    let txt = {
+      let dbconn = &envtgelock!(env)?.dbconn;
+      let rows = getsql!(dbconn, "SELECT plan FROM abouts NATURAL JOIN entitys WHERE name=?", name)?;
+      if rows.is_empty() { Err("")? }
+      rows[0]["plan"].try_into::<&str>().or(Err("missing .plan"))?.to_string()
+    };
+
+    env.markdown().push_msg(&format!("`{}`", &txt)).send_msg()?;
 
     Ok("COMPLETED.")
 }
@@ -3042,6 +3076,8 @@ async fn do_most (env: &mut Env) {
     dolog!(do_map(env));
     dolog!(do_alias(env));
     dolog!(do_wordle(env).await);
+    dolog!(do_plan(env).await);
+    dolog!(do_finger(env).await);
 }
 
 async fn do_all(env: &mut Env) -> Bresult<()> {
