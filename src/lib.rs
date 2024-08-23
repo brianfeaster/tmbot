@@ -1169,7 +1169,9 @@ r#"`          ™Bot Commands          `
 `/schedule [ISO-8601] [-][1h][2m][3] [mtwhfsu*] CMD` `schedule CMD now or ISO-8601 GMT o'clock, offset 1h 2m 3s, repeat on day(s)`
 `/httpsget URL` `https get request`
 `/httpsbody URL TEXT` `https post request`
-`/httpsjson URL JSON` `https post request`"#, delay);
+`/httpsjson URL JSON` https post request
+`/.plan TEXT` update .plan
+`/finger NICK` finger NICK's .plan"#, delay);
     env.markdown().push_msg(&msg).send_msg()?;
     Ok("COMPLETED.")
 }
@@ -2640,7 +2642,12 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
                     (?: Z | [-+]0{1,4})
                 )?
                 (?: ### Duration
-                    \ + (-?  \d+ (?: h (?: \d+ m)? | m)? \d*)
+                    \ + (-? (?: \d+d (?: \d+h)? (?: \d+m)? (?: \d+s?)?
+                                |        \d+h   (?: \d+m)? (?: \d+s?)?
+                                |                   \d+m   (?: \d+s?)?
+                                |                              \d+s?
+                            )
+                        )
                 )?
                 (?: ### days
                     \ + ([*]|[mtwhfsu]+)
@@ -2689,11 +2696,12 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
         let dbconn = &tge.dbconn;
 
         let duration_caps =
-            re_to_vec(regex!(r"(?xi) (-)?  (?:(\d+)h)?  (?:(\d+)m)?  (\d*)"), caps.as_str(4).unwrap_or(""))?;
+            re_to_vec(regex!(r"(?xi) (-)?  (?:(\d+)d)?  (?:(\d+)h)?  (?:(\d+)m)?  (?:(\d+)s?)?"), caps.as_str(4).unwrap_or(""))?;
         let neg = IF!(duration_caps.as_str(1).is_ok(),-1,1);
-        let hours = duration_caps.as_i64(2).unwrap_or(0);
-        let mins = duration_caps.as_i64(3).unwrap_or(0);
-        let secs = duration_caps.as_i64(4).unwrap_or(0);
+        let days = duration_caps.as_i64(2).unwrap_or(0);
+        let hours = duration_caps.as_i64(3).unwrap_or(0);
+        let mins = duration_caps.as_i64(4).unwrap_or(0);
+        let secs = duration_caps.as_i64(5).unwrap_or(0);
 
         let mut time =
             if let Ok(datestr) = caps.as_str(2) {
@@ -2713,7 +2721,7 @@ async fn do_schedule (env: &mut Env) -> Bresult<&str> {
                 let dstsecs = 60 * 60 * tge.dst_hours_adjust as i64;
                 now + dstsecs
             }
-            + neg*(hours*60*60 + mins*60 + secs);
+            + neg*(days*24*60*60 + hours*60*60 + mins*60 + secs);
 
         let daily = caps.as_str(5);
         if daily.is_ok() { time = time.rem_euclid(86400)}
@@ -2858,6 +2866,7 @@ fn do_rpn (env: &mut Env) -> Bresult<&str> {
 
 fn do_alias (env: &mut Env) -> Bresult<&str> {
     let caps = must_re_to_vec(regex!(r"(?s)^/alias\s+/?([^\s]+)\s?(.*)$"), &env.msg.message)?;
+
     let alias = caps.as_str(1)?;
     let mut cmd =  caps.as_string(2)?;
     let action = {
@@ -2925,7 +2934,7 @@ async fn do_plan(env: &mut Env) -> Bresult<&str> {
 }
 
 async fn do_finger(env: &mut Env) -> Bresult<&str> {
-    let caps = must_re_to_vec(regex!(r"/finger ([^ ]+)"), &env.msg.message)?;
+    let caps = must_re_to_vec(regex!(r"/finger +@?([^ ]+)"), &env.msg.message)?;
     let name = caps.as_str(1)?;
 
     let txt = {
@@ -3515,7 +3524,6 @@ ENVIRONMENT:
     TMBOT_KEY=tmbot_key.pem
     TMBOT_DB=tmbot.sqlite
 "# }
-
 
 
 pub fn main_launch() -> Bresult<&'static str> {
