@@ -1,20 +1,21 @@
-use env_logger::fmt::{Color, Formatter};
+use env_logger::fmt::{Formatter, style::{Color, AnsiColor::*, Ansi256Color}};
+
 use log::{error, Level, Record};
 use std::io::Write;
 use ::tmbot::main_launch;
 
 fn logger_formatter(fmt: &mut Formatter, rec: &Record) -> std::io::Result<()> {
-    let mut style = fmt.style();
-    let pre = style
-        .set_color(match rec.level() {
-            Level::Error => Color::Ansi256(9),
-            Level::Warn  => Color::Ansi256(11),
-            Level::Info  => Color::Green,
-            Level::Debug => Color::Magenta,
-            Level::Trace => Color::Cyan,
-        })
-        .value(format!("{}{}", rec.target(), rec.line().unwrap_or(0)));
-    writeln!(fmt, "{} {:?}", pre, rec.args())
+    let level = rec.level();
+    let style = fmt
+        .default_level_style(level)
+        .fg_color(match level {
+            Level::Error => Some(Color::Ansi256(Ansi256Color(9))),
+            Level::Warn  => Some(Color::Ansi256(Ansi256Color(11))),
+            Level::Info  => Some(Color::Ansi(Green)),
+            Level::Debug => Some(Color::Ansi(Magenta)),
+            Level::Trace => Some(Color::Ansi(Cyan)),
+        });
+    writeln!(fmt, "{style}{}{} {:?}", /*rec.level()*/ rec.target(), rec.line().unwrap_or(0), rec.args())
 }
 
 fn main() {
