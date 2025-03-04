@@ -1140,7 +1140,7 @@ fn do_echo_lvl(env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_help (env: &mut Env) -> Bresult<&str> {
-    must_re_to_vec(regex!(r"/help"), &env.msg.message)?;
+    must_re_to_vec(regex!(r"^/help"), &env.msg.message)?;
     let delay = envtgelock!(env)?.quote_delay_secs;
     let msg = format!(
 r#"`          ™Bot Commands          `
@@ -1190,7 +1190,7 @@ fn do_say (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_like (env: &mut Env) -> Bresult<&str> {
-    let cap = must_re_to_vec(regex!(r"^([+-])1$"), &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r"^([+-])1"), &env.msg.message)?;
     let adj =
         if env.msg.id == env.msg.to {
             return Ok("SKIP self plussed");
