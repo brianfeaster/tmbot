@@ -722,9 +722,21 @@ impl Quote { // Query internet for ticker details
 
         let last = getin_f64(&details, "/previousClose").unwrap_or(0.0);
 
-        let count = closes.as_array().ok_or("close prices not array")?.len();
-        let price = getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0);
-        let time = getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0);
+        let mut count = closes.as_array().unwrap_or(&vec![]).len();
+
+        let (mut price, mut time) = if 0==count {
+          return Err("no ticker or prices found")?;
+          //(0.0, 0)
+        } else {
+          (getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0),
+           getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0))
+        };
+
+        while 0.0==price && 1<count {
+          count = count-1;
+          price = getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0);
+          time = getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0);
+        }
 
         let preStart = getin_i64(&details, "/currentTradingPeriod/pre/start").unwrap_or(0);
         let regStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
@@ -1598,27 +1610,34 @@ async fn do_portfolio(env: &mut Env) -> Bresult<&str> {
     let mut positions_table :Vec<(f64,String)> = Vec::new();
     for mut pos in positions {
         if !is_self_stonk(&pos.ticker) {
-            pos.update_quote(&env).await?;
+            let _ = pos.update_quote(&env).await;
             info!("{} position {:?}", env.msg.id, &pos);
-            let quote = pos.quote.as_ref().ok_or("quote not acquired")?;
-            let pretty_position = pos.format_position(&*envtgelock!(env)?, env.msg.id)?;
-            if dosort {
-                let gain = pos.qty*(quote.price - pos.price);
-                positions_table.push( (gain, pretty_position) );
-                positions_table.sort_by( |a,b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Less) );
-                env.set_msg( // Refresh message with sorted stonks
-                    &positions_table.iter()
-                        .map( |(_,s)| s.to_string())
+            match  pos.quote.as_ref() {
+              Some(quote) => {
+                let pretty_position = pos.format_position(&*envtgelock!(env)?, env.msg.id)?;
+                if dosort {
+                    let gain = pos.qty*(quote.price - pos.price);
+                    positions_table.push( (gain, pretty_position) );
+                    positions_table.sort_by( |a,b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Less) );
+                    env.set_msg( // Refresh message with sorted stonks
+                        &positions_table.iter()
+                            .map( |(_,s)| s.to_string())
                         .collect::<Vec<String>>().join(""));
-            } else {
-                env.push_msg(&pretty_position);
-            }
+                } else {
+                    env.push_msg(&pretty_position);
+                }
+    
+                if pos.qty < 0.0 {
+                    short += pos.qty * quote.price;
+                } else {
+                    long += pos.qty * quote.price;
+                }
+              },
+              None => {
+                  env.push_msg(&format!("{} unavailable", pos.ticker));
+              }
+            };
 
-            if pos.qty < 0.0 {
-                short += pos.qty * quote.price;
-            } else {
-                long += pos.qty * quote.price;
-            }
             env.edit_msg()?;
         }
     }
