@@ -678,13 +678,85 @@ struct Quote {
 impl Quote { // Query internet for ticker details
     async fn new_market_quote (wd: WebData, ticker: &str) -> Bresult<Self> {
         let json = srvs::get_ticker_raw(ticker).await?;
-        //warn!("{}", json);
-        let details =
-            getin(&json, "/chart/result")
-            .get(0)
-            .ok_or("chart.result failed on json response")
-            .map( |j| getin(j, "/meta") )?;
+        let result = getin(&json, "/chart/result/0");
+
+        let details = getin(result, "/meta");
         info!("{}", details);
+
+        let timestamps = getin(result, "/timestamp");
+        //timestamps.as_array().inspect(|o|info!("timestamp len: {} {:?}", o.len(), o));
+
+        let closes = getin(result, "/indicators/quote/0/close");
+        //info!("closes :{:?}", closes);
+        //closes.as_array().inspect(|o|info!("close len: {} {:?}", o.len(), o));
+
+        let title_raw =
+            &getin_str(&details, "/longName")
+            .or_else( |_e| getin_str(&details, "/shortName") )
+            .or_else( |_e| getin_str(&details, "/symbol") )
+            .unwrap_or( "???".to_string() );
+        let mut title :&str = title_raw;
+        let title = loop { // Repeatedly strip title of useless things
+            let title_new = title
+                .trim_end_matches(".")
+                .trim_end_matches(" ")
+                .trim_end_matches(",")
+                .trim_end_matches("Inc")
+                .trim_end_matches("Corp")
+                .trim_end_matches("Corporation")
+                .trim_end_matches("Holdings")
+                .trim_end_matches("Brands")
+                .trim_end_matches("Company")
+                .trim_end_matches("USD");
+            if title == title_new { break title_new.to_string() }
+            title = title_new;
+        };
+        info!("clean title: '{}' -> '{}'", title_raw, &title);
+
+        let exchange = getin_str(&details, "/exchangeName")?;
+
+        let timeStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
+        let timeEnd   = getin_i64(&details, "/currentTradingPeriod/regular/end").unwrap_or(0);
+        let seconds = timeEnd - timeStart;
+        let hours :i64 = if 23400 < seconds { 24 } else { 16 };
+
+        let last = getin_f64(&details, "/previousClose").unwrap_or(0.0);
+
+        let count = closes.as_array().ok_or("close prices not array")?.len();
+        let price = getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0);
+        let time = getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0);
+
+        let preStart = getin_i64(&details, "/currentTradingPeriod/pre/start").unwrap_or(0);
+        let regStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
+        let aftStart = getin_i64(&details, "/currentTradingPeriod/post/start").unwrap_or(0);
+
+        let market = IF!(aftStart<time, "a", IF!(regStart<time,"r",IF!(preStart<time,"p","?"))).to_string();
+
+        Ok(Quote{
+            wd,
+            ticker:  ticker.to_string(),
+            price, last,
+            amount:  roundqty(price-last),
+            percent: percentify(last, price),
+            market,
+            hours, exchange, title,
+            updated: true})
+    } // Quote::new_market_quote
+
+    /*
+    async fn new_market_quote_2 (wd: WebData, ticker: &str) -> Bresult<Self> {
+        let json = srvs::get_ticker_raw(ticker).await?;
+        let result = getin(&json, "/chart/result/0");
+
+        let details = getin(result, "/meta");
+        info!("{}", details);
+
+        let timestamps = getin(result, "/timestamp");
+        //timestamps.as_array().inspect(|o|info!("timestamp len: {} {:?}", o.len(), o));
+
+        let closes = getin(result, "/indicators/quote/0/close");
+        //info!("closes :{:?}", closes);
+        //closes.as_array().inspect(|o|info!("close len: {} {:?}", o.len(), o));
 
         let title_raw =
             &getin_str(&details, "/longName")
@@ -731,13 +803,13 @@ impl Quote { // Query internet for ticker details
             (reg_market_price, previous_close,   "r", getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0)),
             (pst_market_price, previous_close,   "a", getin_i64(&details, "/currentTradingPeriod/post/start").unwrap_or(0))];
 
-        /* // Log all prices for sysadmin requires "use ::datetime::ISO"
-        use ::datetime::ISO;
-        error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
-            ticker, title, exchange, hours,
-            LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
-            LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
-            LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2); */
+        //// Log all prices for sysadmin requires "use ::datetime::ISO"
+        //use ::datetime::ISO;
+        //error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
+        //    ticker, title, exchange, hours,
+        //    LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
+        //    LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
+        //    LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2);
 
         //details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 
@@ -754,7 +826,6 @@ impl Quote { // Query internet for ticker details
             updated: true})
     } // Quote::new_market_quote
 
-    /*
     async fn _new_market_quote_1(tge: Tge, ticker: &str) -> Bresult<Self> {
         let json = srvs::_get_ticker_raw_1(ticker).await?;
 
@@ -803,13 +874,13 @@ impl Quote { // Query internet for ticker details
             (reg_market_price, previous_close,   "r", getin_i64(&details, "/regularMarketTime").unwrap_or(0)),
             (pst_market_price, previous_close,   "a", getin_i64(&details, "/postMarketTime").unwrap_or(0))];
 
-        /* // Log all prices for sysadmin requires "use ::datetime::ISO"
-        use ::datetime::ISO;
-        error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
-            ticker, title, exchange, hours,
-            LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
-            LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
-            LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2); */
+        //// Log all prices for sysadmin requires "use ::datetime::ISO"
+        //use ::datetime::ISO;
+        //error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
+        //    ticker, title, exchange, hours,
+        //    LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
+        //    LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
+        //    LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2);
 
         details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
 

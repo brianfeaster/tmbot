@@ -1,4 +1,5 @@
 use crate::*;
+pub use actix_web::http::header::USER_AGENT;
 
 pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
 
@@ -95,7 +96,12 @@ pub async fn get_ticker_raw(ticker: &str) -> Bresult<Value> {
     let rbody =
         match client
             .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker2) )
-            .insert_header(("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"))
+            .query(&[["includePrePost", "true"],
+                //["period1", "1745592300"],
+                //["period2", "1745592660"],
+            ])?
+            .insert_header((USER_AGENT,
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"))
             .send().await
         {
             Ok(mut clientResponse) => match clientResponse.body().await {
@@ -107,7 +113,8 @@ pub async fn get_ticker_raw(ticker: &str) -> Bresult<Value> {
 
     let body = rbody.or_else( |r| Err(format!("get_ticker_raw for {:?}  {:?}", ticker, r)) )?;
     let jsonstr = from_utf8(&body).or_else( |r| Err(format!(r#"get_ticker_raw http body2str {:?} {:?}"#, ticker, r)) )?;
-    bytes2json(jsonstr.as_bytes())
+    let t = jsonstr.as_bytes();
+    bytes2json(t)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
