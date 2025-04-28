@@ -574,7 +574,7 @@ impl Env {
                 } else {
                     getin_string(message, "/message_thread_id")?
                 };
-            let message = getin_str(message, "/text")?;
+            let message = getin_str(message, "/text").unwrap_or("".into());
             Env::new(wd, now, id, at, to, topic, message, false)
         } else { Err("Invalid messenger JSON")? }
     }
@@ -738,9 +738,9 @@ impl Quote { // Query internet for ticker details
           time = getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0);
         }
 
-        let preStart = getin_i64(&details, "/currentTradingPeriod/pre/start").unwrap_or(0);
-        let regStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
-        let aftStart = getin_i64(&details, "/currentTradingPeriod/post/start").unwrap_or(0);
+        let preStart = getin_i64(&details, "/tradingPeriods/pre/0/0/start").unwrap_or(0);
+        let regStart = getin_i64(&details, "/tradingPeriods/regular/0/0/start").unwrap_or(0);
+        let aftStart = getin_i64(&details, "/tradingPeriods/post/0/0/start").unwrap_or(0);
 
         let market = IF!(aftStart<time, "a", IF!(regStart<time,"r",IF!(preStart<time,"p","?"))).to_string();
 
