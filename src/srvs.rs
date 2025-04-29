@@ -5,15 +5,30 @@ pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
 
     let word2 = word.to_string();
     let body = newHttpsClient()?
-        .get("https://www.onelook.com/")
-        .query(&[["q",&word2]])?
+        .get("https://www.onelook.com/api/words/")
+        .query(&[
+            ["max","1"],
+            ["k","ol_related"],
+            ["qe","sp"],
+            ["md","c"],
+            ["sp",&word2]
+        ])?
         .send().await?
         .body().await
         .map_err(|e| format!(r#"get_definition http body {:?} for {:?}"#, e, word2))?;
 
-    let domstr = from_utf8(&body)
-        .map_err(|e| format!(r#"get_definition http from_utf8 {:?} for {:?}"#, e, word))?;
+    let json = from_utf8(&body)
+        .map_err(|e| format!(r#"get_definition from_utf8 {:?} for {:?}"#, e, word))?
+        .as_bytes();
 
+    getin_ary(&bytes2json(json)?, "/0/defs")
+        .map_err(|e| format!(r#"get_definition bytes2json {:?} for {:?}"#, e, word).into())
+        .map(|ary| ary.into_iter()
+            .map(|s| s.as_str().unwrap_or("  bad def").chars().skip(2).collect())
+            .take(3)
+            .collect::<Vec<String>>())
+
+/*
     // The optional US definitions
     let usdef =
         Regex::new(r"var mm_US_def = '[^']+")?
@@ -29,8 +44,8 @@ pub async fn get_definition (word: &str) -> Bresult<Vec<String>> {
     Regex::new(r#"easel_def_+[0-9]+">([^<]+)"#)?
         .captures_iter(&domstr)
         .for_each( |cap| lst.push( cap[1].to_string() ) );
+*/
 
-    Ok(lst)
 }
 
 pub async fn get_syns (word: &str) -> Bresult<Vec<String>> {

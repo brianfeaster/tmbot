@@ -181,6 +181,12 @@ pub fn getin<'a>(v: &'a Value, ptr: &str) -> &'a Value {
     v.pointer(ptr).unwrap_or(&Value::Null)
 }
 
+pub fn getin_ary<'a>(json: &'a Value, ptr: &str) -> Result<&'a Vec<Value>, String> {
+    getin(json, ptr)
+    .as_array()
+    .ok_or( format!("getin_ary {}", ptr) )
+}
+
 pub fn getin_i64(json: &Value, ptr: &str) -> Result<i64, String> {
     getin(json, ptr)
     .as_i64()

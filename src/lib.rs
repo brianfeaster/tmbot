@@ -1348,13 +1348,13 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
 
     if syns.is_empty() {
         env
-            .push_msg(&format!("*{}* syns is empty", word))
+            .push_msg(&format!("\n\n*{}* syns is empty", word))
             .send_msg_id()?;
     } else {
         if msg.is_empty() {
-            msg.push_str( &format!("*{}:* _", word) );
+            msg.push_str( &format!("\n\n*{}:* _", word) );
         } else {
-            msg.push_str("\n_");
+            msg.push_str("\n\n_");
         }
         syns.truncate(12);
         msg.push_str( &syns.join(", ") );
@@ -1727,9 +1727,10 @@ async fn do_yolo (env: &mut Env) -> Bresult<&str> {
 
     let mut msg = "*YOLOlians*".to_string();
     for row in sql_results {
-        msg.push_str( &format!(" `{:.2}@{}`",
-            row.get_f64("yolo")?,
-            row.get_string("name")?) );
+        msg.push_str( &format!("\n`{}`@`{:.2}`",
+            row.get_string("name")?,
+            row.get_f64("yolo")?)
+        )
     }
     env.set_msg(&msg).edit_msg()?;
     Ok("COMPLETED.")
