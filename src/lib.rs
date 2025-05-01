@@ -680,20 +680,15 @@ impl Quote { // Query internet for ticker details
         let json = srvs::get_ticker_raw(ticker).await?;
         let result = getin(&json, "/chart/result/0");
 
-        let details = getin(result, "/meta");
-        info!("{}", details);
-
+        let meta = getin(result, "/meta");
+        info!("{}", meta);
         let timestamps = getin(result, "/timestamp");
-        //timestamps.as_array().inspect(|o|info!("timestamp len: {} {:?}", o.len(), o));
-
         let closes = getin(result, "/indicators/quote/0/close");
-        //info!("closes :{:?}", closes);
-        //closes.as_array().inspect(|o|info!("close len: {} {:?}", o.len(), o));
 
         let title_raw =
-            &getin_str(&details, "/longName")
-            .or_else( |_e| getin_str(&details, "/shortName") )
-            .or_else( |_e| getin_str(&details, "/symbol") )
+            &getin_str(&meta, "/longName")
+            .or_else( |_e| getin_str(&meta, "/shortName") )
+            .or_else( |_e| getin_str(&meta, "/symbol") )
             .unwrap_or( "???".to_string() );
         let mut title :&str = title_raw;
         let title = loop { // Repeatedly strip title of useless things
@@ -713,202 +708,45 @@ impl Quote { // Query internet for ticker details
         };
         info!("clean title: '{}' -> '{}'", title_raw, &title);
 
-        let exchange = getin_str(&details, "/exchangeName")?;
+        let exchange = getin_str(&meta, "/exchangeName")?;
 
-        let timeStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
-        let timeEnd   = getin_i64(&details, "/currentTradingPeriod/regular/end").unwrap_or(0);
-        let seconds = timeEnd - timeStart;
-        let hours :i64 = if 23400 < seconds { 24 } else { 16 };
-
-        let last = getin_f64(&details, "/previousClose").unwrap_or(0.0);
+        let timeStart = getin_i64(&meta, "/currentTradingPeriod/regular/start").unwrap_or(0);
+        let timeEnd   = getin_i64(&meta, "/currentTradingPeriod/regular/end").unwrap_or(0);
+        let hours :i64 = if 23400 < timeEnd-timeStart { 24 } else { 16 };
 
         let mut count = closes.as_array().unwrap_or(&vec![]).len();
-
-        let (mut price, mut time) = if 0==count {
-          return Err("no ticker or prices found")?;
-          //(0.0, 0)
-        } else {
-          (getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0),
-           getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0))
-        };
-
+        let (mut price, mut time) = (0.0, 0);
         while 0.0==price && 1<count {
           count = count-1;
-          price = getin_f64(closes, &format!("/{}", count-1)).unwrap_or(0.0);
-          time = getin_i64(timestamps, &format!("/{}", count-1)).unwrap_or(0);
+          price = getin_f64(closes, &format!("/{}", count)).unwrap_or(0.0);
+          time = getin_i64(timestamps, &format!("/{}", count)).unwrap_or(0);
         }
 
-        let preStart = getin_i64(&details, "/tradingPeriods/pre/0/0/start").unwrap_or(0);
-        let regStart = getin_i64(&details, "/tradingPeriods/regular/0/0/start").unwrap_or(0);
-        let aftStart = getin_i64(&details, "/tradingPeriods/post/0/0/start").unwrap_or(0);
+        let preStart = getin_i64(&meta, "/tradingPeriods/pre/0/0/start").unwrap_or(0);
+        let regStart = getin_i64(&meta, "/tradingPeriods/regular/0/0/start").unwrap_or(0);
+        let aftStart = getin_i64(&meta, "/tradingPeriods/post/0/0/start").unwrap_or(0);
+        let rmp = getin_f64(&meta, "/regularMarketPrice").unwrap_or(0.0);
+        let pc =  getin_f64(&meta, "/previousClose").unwrap_or(0.0); // maybe 2 days ago
 
-        let market = IF!(aftStart<time, "a", IF!(regStart<time,"r",IF!(preStart<time,"p","?"))).to_string();
+        if 0.0==price {
+          price = rmp;
+          time = regStart;
+        }
+
+        let market = IF!(aftStart<=time, "a", IF!(regStart<=time,"r",IF!(preStart<=time,"p","?"))).to_string();
+
+        let last = IF!(market=="p", rmp, pc);
 
         Ok(Quote{
             wd,
-            ticker:  ticker.to_string(),
+            ticker: ticker.to_string(),
             price, last,
-            amount:  roundqty(price-last),
+            amount: roundqty(price-last),
             percent: percentify(last, price),
             market,
             hours, exchange, title,
             updated: true})
     } // Quote::new_market_quote
-
-    /*
-    async fn new_market_quote_2 (wd: WebData, ticker: &str) -> Bresult<Self> {
-        let json = srvs::get_ticker_raw(ticker).await?;
-        let result = getin(&json, "/chart/result/0");
-
-        let details = getin(result, "/meta");
-        info!("{}", details);
-
-        let timestamps = getin(result, "/timestamp");
-        //timestamps.as_array().inspect(|o|info!("timestamp len: {} {:?}", o.len(), o));
-
-        let closes = getin(result, "/indicators/quote/0/close");
-        //info!("closes :{:?}", closes);
-        //closes.as_array().inspect(|o|info!("close len: {} {:?}", o.len(), o));
-
-        let title_raw =
-            &getin_str(&details, "/longName")
-            .or_else( |_e| getin_str(&details, "/shortName") )
-            .or_else( |_e| getin_str(&details, "/symbol") )
-            .unwrap_or( "???".to_string() );
-        let mut title :&str = title_raw;
-        let title = loop { // Repeatedly strip title of useless things
-            let title_new = title
-                .trim_end_matches(".")
-                .trim_end_matches(" ")
-                .trim_end_matches(",")
-                .trim_end_matches("Inc")
-                .trim_end_matches("Corp")
-                .trim_end_matches("Corporation")
-                .trim_end_matches("Holdings")
-                .trim_end_matches("Brands")
-                .trim_end_matches("Company")
-                .trim_end_matches("USD");
-            if title == title_new { break title_new.to_string() }
-            title = title_new;
-        };
-        info!("clean title: '{}' -> '{}'", title_raw, &title);
-
-        let exchange = getin_str(&details, "/exchangeName")?;
-
-        let timeStart = getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0);
-        let timeEnd   = getin_i64(&details, "/currentTradingPeriod/regular/end").unwrap_or(0);
-        let seconds = timeEnd - timeStart;
-        let hours :i64 = if 23400 < seconds { 24 } else { 16 };
-
-        let previous_close   = getin_f64(&details, "/previousClose").unwrap_or(0.0);
-        let pre_market_price = getin_f64(&details, "/previousClose").unwrap_or(0.0);
-        let reg_market_price = getin_f64(&details, "/regularMarketPrice").unwrap_or(0.0);
-        let pst_market_price = getin_f64(&details, "/previousClose").unwrap_or(0.0);
-
-        // This array will be sorted on market time for the latest market data.  Prices
-        // are relative to the previous day's market close, including pre and post markets,
-        // because most online charts I've come across ignore previous day's after market
-        // closing price for next day deltas.  Non-regular markets are basically forgotten
-        // after the fact.
-        let details = [
-            (pre_market_price, reg_market_price, "p", getin_i64(&details, "/currentTradingPeriod/pre/start").unwrap_or(0)),
-            (reg_market_price, previous_close,   "r", getin_i64(&details, "/currentTradingPeriod/regular/start").unwrap_or(0)),
-            (pst_market_price, previous_close,   "a", getin_i64(&details, "/currentTradingPeriod/post/start").unwrap_or(0))];
-
-        //// Log all prices for sysadmin requires "use ::datetime::ISO"
-        //use ::datetime::ISO;
-        //error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
-        //    ticker, title, exchange, hours,
-        //    LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
-        //    LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
-        //    LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2);
-
-        //details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
-
-        let price = details[1].0;
-        let last = details[1].1;
-        Ok(Quote{
-            wd,
-            ticker:  ticker.to_string(),
-            price, last,
-            amount:  roundqty(price-last),
-            percent: percentify(last,price),
-            market:  details[1].2.to_string(),
-            hours, exchange, title,
-            updated: true})
-    } // Quote::new_market_quote
-
-    async fn _new_market_quote_1(tge: Tge, ticker: &str) -> Bresult<Self> {
-        let json = srvs::_get_ticker_raw_1(ticker).await?;
-
-        let details = getin(&json, "/context/dispatcher/stores/QuoteSummaryStore/price");
-        if details.is_null() { Err("Unable to find quote data in json key 'QuoteSummaryStore'")? }
-        info!("{}", details);
-
-        let title_raw =
-            &getin_str(&details, "/longName")
-            .or_else( |_e| getin_str(&details, "/shortName") )?;
-        let mut title :&str = title_raw;
-        let title = loop { // Repeatedly strip title of useless things
-            let title_new = title
-                .trim_end_matches(".")
-                .trim_end_matches(" ")
-                .trim_end_matches(",")
-                .trim_end_matches("Inc")
-                .trim_end_matches("Corp")
-                .trim_end_matches("Corporation")
-                .trim_end_matches("Holdings")
-                .trim_end_matches("Brands")
-                .trim_end_matches("Company")
-                .trim_end_matches("USD");
-            if title == title_new { break title_new.to_string() }
-            title = title_new;
-        };
-        info!("cleane title: '{}' -> '{}'", title_raw, &title);
-
-        let exchange = getin_str(&details, "/exchange")?;
-
-        let hours = getin(&details, "/volume24Hr");
-        let hours :i64 = if hours.is_object() && 0 != hours.as_object().unwrap().keys().len() { 24 } else { 16 };
-
-        let previous_close   = getin_f64(&details, "/regularMarketPreviousClose/raw").unwrap_or(0.0);
-        let pre_market_price = getin_f64(&details, "/preMarketPrice/raw").unwrap_or(0.0);
-        let reg_market_price = getin_f64(&details, "/regularMarketPrice/raw").unwrap_or(0.0);
-        let pst_market_price = getin_f64(&details, "/postMarketPrice/raw").unwrap_or(0.0);
-
-        // This array will be sorted on market time for the latest market data.  Prices
-        // are relative to the previous day's market close, including pre and post markets,
-        // because most online charts I've come across ignore previous day's after market
-        // closing price for next day deltas.  Non-regular markets are basically forgotten
-        // after the fact.
-        let mut details = [
-            (pre_market_price, reg_market_price, "p", getin_i64(&details, "/preMarketTime").unwrap_or(0)),
-            (reg_market_price, previous_close,   "r", getin_i64(&details, "/regularMarketTime").unwrap_or(0)),
-            (pst_market_price, previous_close,   "a", getin_i64(&details, "/postMarketTime").unwrap_or(0))];
-
-        //// Log all prices for sysadmin requires "use ::datetime::ISO"
-        //use ::datetime::ISO;
-        //error!("{} \"{}\" ({}) {}hrs\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%\n{:.2} {:.2} {} {:.2}%",
-        //    ticker, title, exchange, hours,
-        //    LocalDateTime::from_instant(Instant::at(details[0].3)).iso(), details[0].0, details[0].1, details[0].2,
-        //    LocalDateTime::from_instant(Instant::at(details[1].3)).iso(), details[1].0, details[1].1, details[1].2,
-        //    LocalDateTime::from_instant(Instant::at(details[2].3)).iso(), details[2].0, details[2].1, details[2].2);
-
-        details.sort_by( |a,b| b.3.cmp(&a.3) ); // Find latest quote details
-
-        let price = details[0].0;
-        let last = details[0].1;
-        Ok(Quote{
-            tge,
-            ticker:  ticker.to_string(),
-            price, last,
-            amount:  roundqty(price-last),
-            percent: percentify(last,price),
-            market:  details[0].2.to_string(),
-            hours, exchange, title,
-            updated: true})
-    } // Quote::_new_market_quote_1
-    */
 }
 
 impl Quote {// Query local cache or internet for ticker details
