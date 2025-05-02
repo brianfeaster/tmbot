@@ -129,12 +129,11 @@ async fn send_msg(client: &Client, url: &str, msg: &mut Msg) -> Bresult<()> {
         .replace("%3D", "=")
         .replace("%2C", ",")
         .replace("%26%238217%3B", "'")
-        // Telegram required markdown escapes on: _*~  []()`>#+-=|{}.!
+        // Telegram required markdown escapes on: _*~`  []()>#+-=|{}.!
         .replace("[", "\\[")
         .replace("]", "\\]")
         .replace("(", "\\(")
         .replace(")", "\\)")
-        .replace("`", "\\`")
         .replace(">", "\\>")
         .replace("#", "\\#")
         .replace("+", "\\+")
