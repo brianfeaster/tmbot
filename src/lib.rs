@@ -853,13 +853,13 @@ fn amt_as_glyph (qty: f64, amt: f64) -> (&'static str, &'static str) {
 }
 
 impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
-// Markets regular pre after
+    // Markets regular pre after
     fn market_glyph(&self) -> &str {
         match &*self.market {
+            _ if self.hours == 24 => "∞",
             "r" => "",
             "p" => "ρ",
             "a" => "α",
-            _ if self.hours == 24 => "∞",
             _ => "?",
         }
     }
