@@ -853,6 +853,16 @@ fn amt_as_glyph (qty: f64, amt: f64) -> (&'static str, &'static str) {
 }
 
 impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
+// Markets regular pre after
+    fn market_glyph(&self) -> &str {
+        match &*self.market {
+            "r" => "",
+            "p" => "ρ",
+            "a" => "α",
+            _ if self.hours == 24 => "∞",
+            _ => "?",
+        }
+    }
     fn format_quote (&self, id:i64) -> Bresult<String> {
         let tge = &envtgelock!(self)?;
         let gain_glyphs = amt_as_glyph(0.0, self.amount);
@@ -868,10 +878,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "E" => s.push_str(&reference_ticker(tge, &self.ticker).replace("_", "\\_")),  // ticker symbol
                     "F" => s.push_str(&format!("{}", money_pretty(self.price))), // current stonk value
                     "G" => s.push_str(&self.title),  // ticker company title
-                    "H" => s.push_str( // Market regular, pre, after
-                        if self.hours == 24 { "∞" }
-                        else { match &*self.market { "r"=>"", "p"=>"ρ", "a"=>"α", _=>"?" } },
-                    ),
+                    "H" => s.push_str(self.market_glyph()),
                     "I" => s.push_str( if self.updated { "·" } else { "" } ),
                     c => fmt_decode_to(c, &mut s) }
                 } else {
