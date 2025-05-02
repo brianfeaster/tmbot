@@ -129,19 +129,22 @@ async fn send_msg(client: &Client, url: &str, msg: &mut Msg) -> Bresult<()> {
         .replace("%3D", "=")
         .replace("%2C", ",")
         .replace("%26%238217%3B", "'")
-        // Telegram required markdown escapes
-        .replace(".", "\\.")
+        // Telegram required markdown escapes on: _*~  []()`>#+-=|{}.!
+        .replace("[", "\\[")
+        .replace("]", "\\]")
         .replace("(", "\\(")
         .replace(")", "\\)")
+        .replace("`", "\\`")
+        .replace(">", "\\>")
+        .replace("#", "\\#")
+        .replace("+", "\\+")
+        .replace("-", "\\-")
+        .replace("=", "\\=")
+        .replace("|", "\\|")
         .replace("{", "\\{")
         .replace("}", "\\}")
-        .replace("-", "\\-")
-        .replace("+", "\\+")
-        .replace("=", "\\=")
-        .replace("#", "\\#")
-        .replace("'", "\\'")
+        .replace(".", "\\.")
         .replace("!", "\\!")
-        .replace("|", "\\|")
     } else { msg.msg.to_string() };
 
     let mut query = vec![

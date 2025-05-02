@@ -240,6 +240,13 @@ fn time2timestr (time:i64) -> String {
     format!("{:02}:{:02}:{:02}", dt.hour(), dt.minute(), dt.second() )
 }
 
+fn escapeMarkdowns (s: &str) -> String {
+  s.replace("\\","\\\\")
+    .replace("_","\\_")
+    .replace("*","\\*")
+    .replace("~","\\~")
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 /// Helpers on complex types
 
@@ -868,7 +875,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "I" => s.push_str( if self.updated { "·" } else { "" } ),
                     c => fmt_decode_to(c, &mut s) }
                 } else {
-                    s.push_str(&cap[1])
+                    s.push_str(&escapeMarkdowns(&cap[1]))
                 }
                 s
             } )
@@ -986,7 +993,7 @@ impl Position { // Format the position using its format string.
                 "M" => s.push_str( &percent_squish(day_gain_percent) ), // inter-day percent
                 c => fmt_decode_to(c, &mut s) }
             } else {
-                s.push_str(&cap[1]);
+                s.push_str(&escapeMarkdowns(&cap[1]))
             }
             s
         } ) )
