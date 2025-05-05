@@ -27,7 +27,7 @@ use regex::Regex;
 use sqlite::Statement;
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap},
     env::{args, var_os},
     mem::transmute,
     str::{from_utf8, FromStr},
@@ -82,7 +82,7 @@ fn most_recent_trading_hours (
     let time_open = LocalDateTime::new(now_norm_date, start_time) - since_last_market_duration;
     let time_close = time_open + market_hours_duration; // Add extra 30m for delayed market orders.
 
-    info!("most_recent_trading_hours  now:{:?}  now_norm_date:{:?}  since_last_market_duration:{:?}  time_open:{:?}  time_close:{:?}",
+    info!("most_recent_trading_hours \x1b[m now:{:?}  now_norm_date:{:?}  since_last_market_duration:{:?}  time_open:{:?}  time_close:{:?}",
         now, now_norm_date, since_last_market_duration, time_open, time_close);
 
     Ok((time_open, time_close))
@@ -688,7 +688,7 @@ impl Quote { // Query internet for ticker details
         let result = getin(&json, "/chart/result/0");
 
         let meta = getin(result, "/meta");
-        info!("{}", meta);
+        info!("new_mrket_quote \x1b[m{}", jsonPretty(&meta.to_string()));
         let timestamps = getin(result, "/timestamp");
         let closes = getin(result, "/indicators/quote/0/close");
 
@@ -812,7 +812,7 @@ impl Quote {// Query local cache or internet for ticker details
             } else { // Quote not in cache so query internet
                 Quote::new_market_quote(env.wd.clone(), ticker).await?
             };
-        info!("quote = {:?}", quote);
+        //info!("quote = {:?}", quote);
 
         if !is_self_stonk { // Cached FNFTs are only updated during trading/settling.
             let dbconn = &envtgelock!(env)?.dbconn;
@@ -855,13 +855,7 @@ fn amt_as_glyph (qty: f64, amt: f64) -> (&'static str, &'static str) {
 impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@2087.83! ↑48.49 2.38% Ethereum USD CCC
     // Markets regular pre after
     fn market_glyph(&self) -> &str {
-        match &*self.market {
-            _ if self.hours == 24 => "∞",
-            "r" => "",
-            "p" => "ρ",
-            "a" => "α",
-            _ => "?",
-        }
+        IF!(24==self.hours,"∞", ["","ρ","α","?"]["rpa".find(&self.market[0..1]).unwrap_or(3)].into())
     }
     fn format_quote (&self, id:i64) -> Bresult<String> {
         let tge = &envtgelock!(self)?;
@@ -1166,7 +1160,7 @@ fn do_like_info (env: &mut Env) -> Bresult<&str> {
 
 
 async fn do_def (env: &mut Env) -> Bresult<&str> {
-    let cap = must_re_to_vec(regex!(r"^([A-Za-z-]+):$"), &env.msg.message)?;
+    let cap = must_re_to_vec(regex!(r"^([ A-Z_a-z-]+):$"), &env.msg.message)?;
     let word = cap.as_str(1)?;
 
     info!("{BLD}::do_def(){RST} {:?}", word);
@@ -1177,6 +1171,7 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
     // Definitions
 
     let defs = get_definition(word).await?;
+    let word = escapeMarkdowns(&word);
 
     if defs.is_empty() {
         env
@@ -1196,7 +1191,7 @@ async fn do_def (env: &mut Env) -> Bresult<&str> {
 
     // Synonyms
 
-    let mut syns = get_syns(word).await?;
+    let mut syns = get_syns(&word).await?;
 
     if syns.is_empty() {
         env
@@ -1367,9 +1362,9 @@ async fn do_sql (env: &mut Env) -> Bresult<&str> {
 // DO QUOTES
 
 // Valid "ticker" strings:  GME, 308188500, @shrewm, local level 2 quotes
-fn doquotes_scan_tickers (txt :&str, re:Regex) -> Bresult<HashSet<String>> {
-    let mut tickers = HashSet::new();
-    for s in txt.split(" ") {
+fn doquotes_scan_tickers (txt :&str, re:Regex) -> Bresult<Vec<String>> {
+    let mut tickers = Vec::new();
+    for s in txt.split(&[' ','\n']) {
         let w = s.split("$").collect::<Vec<&str>>();
         if 2 == w.len() {
             let mut idx = 42;
@@ -1381,7 +1376,7 @@ fn doquotes_scan_tickers (txt :&str, re:Regex) -> Bresult<HashSet<String>> {
                 } else {
                     w[idx].to_string().to_uppercase()
                 };
-                tickers.insert(ticker );
+                tickers.push(ticker);
             }
         }
     }
@@ -1421,28 +1416,31 @@ async fn do_quotes (env: &mut Env) -> Bresult<&str> {
     let tickers =
         doquotes_scan_tickers(
             &env.msg.message,
-            Regex::new(r"^[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*$")?)?;
+            Regex::new(r"[@^]?[A-Z_a-z][-.0-9=A-Z_a-z]*")?)?;
     if tickers.is_empty() { return Err("".into()); }
+    info!("do_quotes tickers: {:?}", tickers);
 
-    env.markdown().set_msg("…").send_msg()?;
-    env.set_msg("");
+    env.markdown().set_msg(""); //.send_msg()? …
 
-    let mut found_tickers = false;
-    for ticker in &tickers {
-        // Catch error and continue looking up tickers
-        match doquotes_pretty(&env, ticker).await {
-            Ok(res) => {
-                info!("doquotes_pretty => {:?}", res);
-                env.push_msg(&format!("{}\n", res)).edit_msg()?;
-                found_tickers = true;
-            },
-            e => { glogd!("doquotes_pretty", e); }
-        }
-    }
+    // Catch error and continue looking up tickers
+    let mut foundValidTicker = false;
+    let mut shouldSend = false;
+    for ticker in &tickers { glogd!("doquotes_pretty",
+        doquotes_pretty(&env, ticker).await
+        .and_then(|res|{
+            foundValidTicker = true;
+            shouldSend = false;
+            info!("doquotes_pretty => {:?}", res);
+            env.push_msg(&format!("{}\n", res)).edit_msg()
+        })
+        .or_else(|err| {
+           env.push_msg(&format!("{} bad ticker\n", ticker));
+           shouldSend = true;
+           Err(err)
+        })
+    )}
 
-    if !found_tickers {
-        env.set_msg(&"No quotes found").edit_msg()?;
-    }
+    if foundValidTicker && shouldSend { glog!(env.edit_msg()) }
     Ok("COMPLETED.")
 }
 // DO QUOTES
