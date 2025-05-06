@@ -2806,7 +2806,7 @@ fn do_rpn (env: &mut Env) -> Bresult<&str> {
 }
 
 fn do_alias (env: &mut Env) -> Bresult<&str> {
-    let caps = must_re_to_vec(regex!(r"(?s)^/alias\s+/?([^\s]+)\s?(.*)$"), &env.msg.message)?;
+    let caps = must_re_to_vec(regex!(r"(?s)^/alias\s+/?([^\s-]+)\s?(.*)$"), &env.msg.message)?;
 
     let alias = caps.as_str(1)?;
     let mut cmd =  caps.as_string(2)?;
@@ -2821,13 +2821,14 @@ fn do_alias (env: &mut Env) -> Bresult<&str> {
             "Set "
         }
     };
+    env.set_msg("");
     if "" == cmd {
         env
-            .push_msg(&format!("Unbound Alias: {}", alias))
+            .push_msg(&format!("Unbound Alias: /{}", alias))
             .send_msg_id()?
     } else {
         env
-            .push_msg(&format!("{}Alias: {}\n{}", action, alias, cmd))
+            .push_msg(&format!("{}Alias: /{}\n{}", action, alias, cmd))
             .send_msg()?
     }
 
