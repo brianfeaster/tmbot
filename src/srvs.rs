@@ -108,15 +108,20 @@ pub async fn get_ticker_raw(ticker: &str) -> Bresult<Value> {
     info!("get_ticker_quote <- {}", ticker);
     let client = newHttpsClient()?;
     let ticker2 = ticker.to_string();
-    let rbody =
-        match client
+    let thing = client
             .get( format!("https://query1.finance.yahoo.com/v8/finance/chart/{}", ticker2) )
-            .query(&[["includePrePost", "true"],
+            .query(&[
+                ["includePrePost", "true"],
+                ["events", "split"],
                 //["period1", "1745592300"],
                 //["period2", "1745592660"],
             ])?
-            .insert_header((USER_AGENT,
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"))
+            .insert_header((USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"))
+            //.insert_header(("authority", "query1.finance.yahoo.com"))
+            ;
+        warn!("{:?}", thing);
+    let rbody =
+        match thing
             .send().await
         {
             Ok(mut clientResponse) => match clientResponse.body().await {

@@ -2,7 +2,7 @@
 name = "tmbot"
 version = "0.2.0"
 authors = ["b f <brianf@geemale.kom>"]
-edition = "2018"
+edition = "2024"
 
 [profile.dev]
 opt-level = 1

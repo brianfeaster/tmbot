@@ -41,7 +41,7 @@ use std::{
 ////////////////////////////////////////////////////////////////////////////////
 
 const QUOTE_DELAY_SECS :i64 = 30;
-const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%q";
+const FORMAT_STRING_QUOTE    :&str = "%q%A%B %C%% %D%E@%F %G%H%I%J%q";
 const FORMAT_STRING_POSITION :&str = "%n%q%A %C%B %D%%%q %q%E%F@%G%q %q%H@%I%q";
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -679,6 +679,7 @@ struct Quote {
     pub hours: i64, // 16 or 24 (hours per day market trades)
     pub exchange: String,// Keep track of this to filter "PNK" exchanged securities.
     pub title: String, // Full title/name of security
+    pub split: String, // Split details
     pub updated: bool // Was this generated or pulled from cache
 }
 
@@ -688,6 +689,13 @@ impl Quote { // Query internet for ticker details
         let result = getin(&json, "/chart/result/0");
 
         let meta = getin(result, "/meta");
+
+        let splits = getin(result, "/events/splits");
+        let split = splits.as_object().map_or("".into(), |o|o.iter()
+            .map(|(k,v)|{info!("split {:?}",v);format!(" {}@{}", getin_str(v, "/splitRatio").unwrap_or("???".into()), k)})
+            .collect::<Vec<String>>()
+            .join(""));
+
         info!("new_mrket_quote \x1b[m{}", jsonPretty(&meta.to_string()));
         let timestamps = getin(result, "/timestamp");
         let closes = getin(result, "/indicators/quote/0/close");
@@ -751,7 +759,7 @@ impl Quote { // Query internet for ticker details
             amount: roundqty(price-last),
             percent: percentify(last, price),
             market,
-            hours, exchange, title,
+            hours, exchange, title, split,
             updated: true})
     } // Quote::new_market_quote
 }
@@ -794,6 +802,7 @@ impl Quote {// Query local cache or internet for ticker details
                     hours:    hm.get_i64("hours")?,
                     exchange: hm.get_string("exchange")?,
                     title:    hm.get_string("title")?,
+                    split:    "".to_string(),
                     updated:  false}
             } else if is_self_stonk { // FNFT is not in cache so create
                 Quote {
@@ -807,6 +816,7 @@ impl Quote {// Query local cache or internet for ticker details
                     hours:   24,
                     exchange:"™BOT".to_string(),
                     title:   "FNFT".to_string(),
+                    split:   "".to_string(),
                     updated: true
                 }
             } else { // Quote not in cache so query internet
@@ -874,6 +884,7 @@ impl Quote { // Format the quote/ticker using its format string IE: 🟢ETH-USD@
                     "G" => s.push_str(&self.title),  // ticker company title
                     "H" => s.push_str(self.market_glyph()),
                     "I" => s.push_str( if self.updated { "·" } else { "" } ),
+                    "J" => s.push_str(&self.split),
                     c => fmt_decode_to(c, &mut s) }
                 } else {
                     s.push_str(&escapeMarkdowns(&cap[1]))
@@ -1013,7 +1024,7 @@ struct Trade<'a> {
 }
 
 impl<'a> Trade<'a> {
-    fn new_trade(env: &'a mut Env) -> Bresult<Option<Trade>> {
+    fn new_trade(env: &mut Env) -> Bresult<Option<Trade>> {
         //                           _____ticker____  _+-_  _$_   ____________amt_______________
         let caps = re_to_vec(regex!(
             r"(?xi)^
@@ -2374,6 +2385,7 @@ const FORMAT_STRINGS_HELP: &str =
 `%G` `Company Title`
 `%H` `Market 'p're 'a'fter '∞'`
 `%I` `Updated indicator`
+`%J` `Split info`
 `%[%nbiusq]` `% newline bold italics underline strikeout quote`
 
 ` ™Bot Position Formatting `
@@ -2883,7 +2895,7 @@ async fn do_finger(env: &mut Env) -> Bresult<&str> {
       let dbconn = &envtgelock!(env)?.dbconn;
       let rows = getsql!(dbconn, "SELECT plan FROM abouts NATURAL JOIN entitys WHERE name=?", name)?;
       if rows.is_empty() { Err("")? }
-      rows[0]["plan"].try_into::<&str>().or(Err("missing .plan"))?.to_string()
+      (&rows[0]["plan"]).try_into::<&str>().or(Err("missing .plan"))?.to_string()
     };
 
     env.markdown().push_msg(&format!("`{}`", &txt)).send_msg()?;
@@ -2905,7 +2917,7 @@ async fn do_aliasRun(mut env: &mut Env) -> Bresult<&str> {
         let dbconn = &envtgelock!(env)?.dbconn;
         let aliasCmd = getsqlquiet!(dbconn, "SELECT cmd FROM aliases WHERE alias=?", cmd)?;
         if aliasCmd.is_empty() { Err("")? }
-        aliasCmd[0]["cmd"].try_into::<&str>().or(Err("bad alias cmd"))?.to_string()
+        (&aliasCmd[0]["cmd"]).try_into::<&str>().or(Err("bad alias cmd"))?.to_string()
     };
 
     let args = expr.as_str(2)?;

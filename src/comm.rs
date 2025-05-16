@@ -3,10 +3,8 @@
 use crate::*;
 
 
-fn verifyServerName (cert_pem: &str)
-    -> Bresult<
-        impl Fn(&mut SslRef, &mut SslAlert)
-        -> Result<(), SniError> >
+fn verifyServerName (cert_pem: &str) -> Bresult<
+    impl Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + use<>>
 {
     let mut names = Vec::new();
     let mut ab = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
