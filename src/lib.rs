@@ -24,7 +24,7 @@ use datetime::{
 };
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
-use sqlite::Statement;
+//use sqlite::Statement;
 use std::{
     cmp::Ordering,
     collections::{HashMap},
@@ -416,7 +416,7 @@ impl Tge {
         getsql!(self.dbconn, "INSERT OR REPLACE INTO likes VALUES (?, ?)", at, likes)?;
         Ok(likes)
     }
-    fn _entity_uuid_set (&mut self, id: i64, pw: usize) -> Bresult<()> {
+    fn _entity_uuid_set (&mut self, id: i64, pw: u64) -> Bresult<()> {
         self.entitys
             .get_mut(&id)
             .map_or(Err("no such entity for uuid".into()), |e| { e._uuid = pw.to_string(); Ok(()) } )
@@ -538,26 +538,20 @@ struct Env {
 // This is a macro so logs reveal caller details
 #[macro_export]
 macro_rules! envtgelock {($m:expr) => {
-    match $m.wd.try_lock() {
-        Ok(tge) => Ok(tge),
-        Err(e) => {
-            warn!("{BLD_YEL}{}.env.try_lock() -> {}", stringify!($m), e);
-            $m.wd.lock()
-            .map_err(|e| format!("{}{} {}.env.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
-         }
-    }
+    $m.wd.try_lock().or_else(|e| {
+        warn!("{BLD_YEL}{}.env.try_lock() -> {}", stringify!($m), e);
+        $m.wd.lock().map_err(|e|
+            format!("{}{} {}.env.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
+    })
 }}
 
 #[macro_export]
 macro_rules! tgelock {($m:expr) => {
-    match $m.try_lock() {
-        Ok(tge) => Ok(tge),
-        Err(e) => {
-            warn!("{}.try_lock() -> {}", stringify!($m), e);
-            $m.lock()
-            .map_err(|e| format!("{}{} {}.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
-         }
-    }
+    $m.try_lock().or_else(|e| {
+        warn!("{}.try_lock() -> {}", stringify!($m), e);
+        $m.lock().map_err(|e|
+            format!("{}{} {}.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
+     })
 }}
 
 
@@ -1118,7 +1112,7 @@ r#"`          ™Bot Commands          `
 
 fn do_curse(env: &mut Env) -> Bresult<&str> {
     must_re_to_vec(regex!("/curse"), &env.msg.message)?;
-    env.push_msg(["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<usize>()%7])
+    env.push_msg(["shit", "piss", "fuck", "cunt", "cocksucker", "motherfucker", "tits"][::rand::random::<u64>()as usize%7])
         .send_msg()?;
     Ok("COMPLETED.")
 }
@@ -2527,12 +2521,12 @@ async fn do_rebalance (env: &mut Env) -> Bresult<&str> {
     if 0==positions.len() {
         env.push_msg("no valid tickers").edit_msg()?;
     } else {
-        for i in 0..positions.len() {
-            let ticker = positions[i].get_string("ticker")?;
-            let value = positions[i].get_f64("value")?;
+        for p in &mut positions {
+            let ticker = p.get_string("ticker")?;
+            let value = p.get_f64("value")?;
             let mut diff = roundfloat(percents.get(&ticker).unwrap() * total - value, 2);
             if -0.01 < diff && diff < 0.01 { diff = 0.0; } // under 1¢ diffs will be skipped
-            positions[i].insert("diff".to_string(), ::sqlite::Value::String(diff.to_string())); // Add new key/val to Position HashMap
+            p.insert("diff".to_string(), ::sqlite::Value::String(diff.to_string())); // Add new key/val to Position HashMap
         }
         for i in 0..positions.len() {
             if positions[i].get_string("diff")?.chars().nth(0).unwrap() == '-'  {
@@ -3149,7 +3143,7 @@ async fn tmbot(req: HttpRequest, body: web::Bytes) -> Bresult<()> {
 async fn handler_tmbot(req: HttpRequest, body: web::Bytes) -> HttpResponse {
     header_tmbot();
     info!("{}", httpReqPretty(&req, &body));
-    info!("::tmbot {:?}",
+    info!("::spawn {:?}",
         rt::spawn(async move {
             glogd!("--tmbot", tmbot(req, body).await) }));
     httpResponseOk!()
@@ -3201,7 +3195,7 @@ async fn _web_login (wd: WebData, name: &str) -> Bresult<i64> {
         let res =
                 match Env::new(wd, 0, id, id, id, "".into(), "".into(), false) {
                     Ok(mut env) => {
-                        let pw = ::rand::random::<usize>();
+                        let pw = ::rand::random::<u64>();
                         match envtgelock!(env) {
                             Ok(mut tge) => glog!(tge._entity_uuid_set(id, pw)),
                             Err(e) => error!("websocketlogin {:?}", e)

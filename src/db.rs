@@ -27,18 +27,14 @@ macro_rules! getsql {
     ( $conn:expr, $sql:expr ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
         info!("SQLite <= {BLD_CYN}{}", $sql);
         let mut statement = $conn.conn.prepare( $sql )?;
-        let col_names :Vec<String> =
-            Statement::column_names(&statement).into_iter().map( String::from ).collect();
-        let mut rows :Vec<HashMap<String, sqlite::Value>> = Vec::new();
-        statement.iter().for_each(|items| {
-            items.map(|vals| {
-                let vv :Vec<sqlite::Value> = vals.into();
-                rows.push(vv.iter()
-                    .enumerate()
-                    .map( |(i, row)| (col_names[i].clone(), row.clone()))
-                    .collect());
-            }).ok();
-        });
+        let rows = statement.iter()
+            .filter_map(|resrow|
+                resrow.map(|row|
+                    row.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect())
+                .ok())
+            .collect();
         info!("SQLiteRaw -> {CYN}{:?}", rows);
         Ok(rows)
     })()};
@@ -54,18 +50,14 @@ macro_rules! getsql {
             statement.bind((placeholderidx, $v))?;
         )*
         info!("SQLite{CYN}{}", info);
-        let col_names :Vec<String> =
-            Statement::column_names(&statement).into_iter().map( String::from ).collect();
-        let mut rows :Vec<HashMap<String, sqlite::Value>> = Vec::new();
-        statement.iter().for_each(|items| {
-            items.map(|vals| {
-                let vv :Vec<sqlite::Value> = vals.into();
-                rows.push(vv.iter()
-                    .enumerate()
-                    .map( |(i, row)| (col_names[i].clone(), row.clone()))
-                    .collect());
-            }).ok();
-        });
+        let rows = statement.iter()
+            .filter_map(|resrow|
+                resrow.map(|row|
+                    row.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect())
+                .ok())
+            .collect();
         info!("SQLite -> {CYN}{:?}", rows);
         Ok(rows)
     })() };
@@ -80,17 +72,14 @@ macro_rules! getsqlquiet {
             placeholderidx += 1;
             statement.bind((placeholderidx, $v))?;
         )*
-        let col_names :Vec<String> = Statement::column_names(&statement).iter().map( |e| e.to_string() ).collect();
-        let mut rows :Vec<HashMap<String, sqlite::Value>> = Vec::new();
-        statement.iter().for_each(|items| {
-            items.map(|vals| {
-                let vv :Vec<sqlite::Value> = vals.into();
-                rows.push(vv.iter()
-                    .enumerate()
-                    .map( |(i, row)| (col_names[i].clone(), row.clone()))
-                    .collect());
-            }).ok();
-        });
+        let rows = statement.iter()
+            .filter_map(|resrow|
+                resrow.map(|row|
+                    row.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect())
+                .ok())
+            .collect();
         Ok(rows)
     })()};
 }
