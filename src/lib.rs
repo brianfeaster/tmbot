@@ -24,7 +24,7 @@ use datetime::{
 };
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use regex::Regex;
-//use sqlite::Statement;
+//use sqlite::{Statement};
 use std::{
     cmp::Ordering,
     collections::{HashMap},
@@ -381,6 +381,12 @@ pub struct Tge {
     data:             Value
 }
 
+impl WithConn for Tge {
+  fn withConn (&self, f: impl Fn(&Connection)->Bresult<Table>) -> Bresult<Table> {
+    f(&self.dbconn)
+  }
+}
+
 type WebData = web::Data<Mutex<Tge>>;
 
 impl Tge {
@@ -402,18 +408,18 @@ impl Tge {
         Ok(&self.entitys.get(&tkr.parse::<i64>()?).ok_or(format!("entity_name() no id {}", tkr))?.name)
     }
     fn entity_balance_set (&mut self, id:i64, new_balance:f64) -> Bresult<()> {
-        getsql!(self.dbconn, "UPDATE accounts SET balance=? WHERE id=?", new_balance, id)?;
+        getsql2!(&self, "UPDATE accounts SET balance=? WHERE id=?", new_balance, id)?;
         self.entitys.get_mut(&id).unwrap().balance = new_balance;
         Ok(())
     }
     fn entity_balance_inc (&mut self, id:i64, balance_adjust:f64) -> Bresult<()> {
-        getsql!(self.dbconn, "UPDATE accounts SET balance=balance+? WHERE id=?", balance_adjust, id)?;
+        getsql2!(&self, "UPDATE accounts SET balance=balance+? WHERE id=?", balance_adjust, id)?;
         self.entitys.get_mut(&id).unwrap().balance += balance_adjust;
         Ok(())
     }
     fn entity_likes_inc (&mut self, at: i64, adj: i64) -> Bresult<i64> {
         let likes = self.entitys.get_mut(&at).map_or(1, |obj| { obj.likes+=adj; obj.likes });
-        getsql!(self.dbconn, "INSERT OR REPLACE INTO likes VALUES (?, ?)", at, likes)?;
+        getsql2!(&self, "INSERT OR REPLACE INTO likes VALUES (?, ?)", at, likes)?;
         Ok(likes)
     }
     fn _entity_uuid_set (&mut self, id: i64, pw: u64) -> Bresult<()> {
@@ -534,22 +540,28 @@ struct Env {
     msg: Msg
 }
 
+impl WithConn for Env {
+    fn withConn (&self, f: impl Fn(&Connection)->Bresult<Table>) -> Bresult<Table> {
+        f(&envtgelock!(self)?.dbconn)
+    }
+}
+
 
 // This is a macro so logs reveal caller details
 #[macro_export]
-macro_rules! envtgelock {($m:expr) => {
-    $m.wd.try_lock().or_else(|e| {
-        warn!("{BLD_YEL}{}.env.try_lock() -> {}", stringify!($m), e);
-        $m.wd.lock().map_err(|e|
-            format!("{}{} {}.env.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
+macro_rules! envtgelock {($env:expr) => {
+    $env.wd.try_lock().or_else(|e| {
+        warn!("{BLD_YEL}{}.env.try_lock() -> {}", stringify!($env), e);
+        $env.wd.lock().map_err(|e|
+            format!("{}{} {}.env.lock() -> {}", std::module_path!(), std::line!(), stringify!($env), e))
     })
 }}
 
 #[macro_export]
-macro_rules! tgelock {($m:expr) => {
-    $m.try_lock().or_else(|e| {
+macro_rules! tgelock {($wd:expr) => {
+    $wd.try_lock().or_else(|e| {
         warn!("{}.try_lock() -> {}", stringify!($m), e);
-        $m.lock().map_err(|e|
+        $wd.lock().map_err(|e|
             format!("{}{} {}.lock() -> {}", std::module_path!(), std::line!(), stringify!($m), e))
      })
 }}
@@ -2873,10 +2885,9 @@ async fn do_plan(env: &mut Env) -> Bresult<&str> {
     let id = env.msg.id;
     let txt = caps.as_str(1)?;
 
-    let dbconn = &envtgelock!(env)?.dbconn;
     // make change to DB
-    getsql!(dbconn, "INSERT OR IGNORE INTO abouts VALUES (?, '')", id)?;
-    getsql!(dbconn, "UPDATE abouts SET plan=? WHERE id=?", txt, id)?;
+    getsql2!(env, "INSERT OR IGNORE INTO abouts VALUES (?, '')", id)?;
+    getsql2!(env, "UPDATE abouts SET plan=? WHERE id=?", txt, id)?;
 
     Ok("COMPLETED.")
 }
@@ -2886,9 +2897,8 @@ async fn do_finger(env: &mut Env) -> Bresult<&str> {
     let name = caps.as_str(1)?;
 
     let txt = {
-      let dbconn = &envtgelock!(env)?.dbconn;
-      let rows = getsql!(dbconn, "SELECT plan FROM abouts NATURAL JOIN entitys WHERE name=?", name)?;
-      if rows.is_empty() { Err("")? }
+      let rows = getsql2!(env, "SELECT plan FROM abouts NATURAL JOIN entitys WHERE name=?", name)?;
+      if rows.is_empty() { Err("No results from 'abouts' query")? }
       (&rows[0]["plan"]).try_into::<&str>().or(Err("missing .plan"))?.to_string()
     };
 

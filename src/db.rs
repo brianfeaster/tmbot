@@ -19,22 +19,54 @@ impl std::fmt::Debug for Connection {
         f.write_fmt(format_args!("Connection{{{:?}}}", self.filename))
     }
 }
+
 ////////////////////////////////////////////////////////////////////////////////
 // SQLite macros that facilitate placeholders
+
+pub type Table = Vec<HashMap<String, sqlite::Value>>;
+
+pub trait WithConn {
+  fn withConn (&self, f:impl Fn(&Connection)->Bresult<Table>) -> Bresult<Table>;
+}
+
+pub fn statementToTable (stmt: ::sqlite::Statement) -> Table {
+    stmt.into_iter()
+    .filter_map(|resrow|
+        resrow.map(|row|
+            row.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect())
+        .ok())
+    .collect()
+}
+
+#[macro_export]
+macro_rules! getsql2 {
+    ( $dbc:expr, $sql:expr, $($v:expr),* ) => {
+        $dbc.withConn( |conn: &Connection| {
+            info!("SQLite {BLD_CYN}{}{RST}", $sql);
+            let mut statement = conn.conn.prepare( $sql )?;
+            let mut idx = 0;
+            let mut args = String::new();
+            $(
+                idx += 1;
+                args.push_str(&format!(" ({}, {})", idx, $v));
+                statement.bind((idx, $v))?;
+            )*
+            let rows = statementToTable(statement);
+            info!("SQLite{CYN}{} {RED}{:?}", args, rows);
+            info!("SQLite -> {CYN}{:?}", rows);
+            Ok(rows)
+        })
+    };
+}
 
 #[macro_export]
 macro_rules! getsql {
     ( $conn:expr, $sql:expr ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
-        info!("SQLite <= {BLD_CYN}{}", $sql);
-        let mut statement = $conn.conn.prepare( $sql )?;
-        let rows = statement.iter()
-            .filter_map(|resrow|
-                resrow.map(|row|
-                    row.iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect())
-                .ok())
-            .collect();
+        info!("SQLite <= {BLD_CYN}{}{RST}", $sql);
+        let statement = $conn.conn.prepare( $sql )?;
+        let rows = statementToTable(statement);
         info!("SQLiteRaw -> {CYN}{:?}", rows);
         Ok(rows)
     })()};
@@ -42,22 +74,15 @@ macro_rules! getsql {
     ( $conn:expr, $sql:expr, $($v:expr),* ) => { (|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
         info!("SQLite {BLD_CYN}{}", $sql);
         let mut statement = $conn.conn.prepare( $sql )?;
-        let mut placeholderidx = 0;
-        let mut info = String::new();
+        let mut idx = 0;
+        let mut args = String::new();
         $(
-            placeholderidx += 1;
-            info.push_str(&format!(" {}:{}", placeholderidx, $v));
-            statement.bind((placeholderidx, $v))?;
+            idx += 1;
+            args.push_str(&format!(" ({}, {})", idx, $v));
+            statement.bind((idx, $v))?;
         )*
-        info!("SQLite{CYN}{}", info);
-        let rows = statement.iter()
-            .filter_map(|resrow|
-                resrow.map(|row|
-                    row.iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect())
-                .ok())
-            .collect();
+        info!("SQLite{CYN}{}", args);
+        let rows = statementToTable(statement);
         info!("SQLite -> {CYN}{:?}", rows);
         Ok(rows)
     })() };
@@ -67,20 +92,12 @@ macro_rules! getsql {
 macro_rules! getsqlquiet {
     ( $conn:expr, $sql:expr, $($v:expr),* ) => {(|| -> Bresult<Vec<HashMap<String, sqlite::Value>>> {
         let mut statement = $conn.conn.prepare( $sql )?;
-        let mut placeholderidx = 0;
+        let mut idx = 0;
         $(
-            placeholderidx += 1;
-            statement.bind((placeholderidx, $v))?;
+            idx += 1;
+            statement.bind((idx, $v))?;
         )*
-        let rows = statement.iter()
-            .filter_map(|resrow|
-                resrow.map(|row|
-                    row.iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect())
-                .ok())
-            .collect();
-        Ok(rows)
+        Ok(statementToTable(statement))
     })()};
 }
 
